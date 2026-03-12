@@ -31,6 +31,21 @@ git-switch
 git-switch main
 ```
 
+## Shell Completions
+
+Tab completions are available for zsh, bash, and fish.
+
+```sh
+just install-completions
+```
+
+This installs the appropriate completion script for your current shell. For zsh, make sure `~/.zsh/completions` is in your `fpath` before `compinit`:
+
+```sh
+fpath=(~/.zsh/completions $fpath)
+autoload -Uz compinit && compinit
+```
+
 ## Configuration
 
 Protect branches from the "delete merged branches" prompt by adding them to your Git config:

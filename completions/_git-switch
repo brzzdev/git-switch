@@ -1,0 +1,9 @@
+#compdef git-switch
+
+_git-switch() {
+  local branches
+  branches=(${(f)"$(git branch --format='%(refname:short)' 2>/dev/null)"})
+  _describe 'branch' branches
+}
+
+_git-switch "$@"
