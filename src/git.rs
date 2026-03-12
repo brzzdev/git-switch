@@ -2,6 +2,13 @@ use std::process::Command;
 
 use crate::AppResult;
 
+pub enum MergeResult {
+    UpToDate,
+    Pulled(u32),
+    Diverged(String),
+    NoRemote,
+}
+
 pub fn current_branch() -> AppResult<Option<String>> {
     let output = run(&["branch", "--show-current"])?;
     let name = output.trim().to_string();
@@ -14,25 +21,9 @@ pub fn local_branches() -> AppResult<Vec<String>> {
     Ok(branches)
 }
 
-fn parse_branch_line(line: &str) -> Option<String> {
-    let trimmed = line.trim();
-    if trimmed.starts_with('*') || trimmed.starts_with('+') {
-        None
-    } else {
-        Some(trimmed.to_string())
-    }
-}
-
 pub fn is_dirty() -> AppResult<bool> {
-    let unstaged = Command::new("git")
-        .args(["diff", "--quiet"])
-        .status()?
-        .success();
-    let staged = Command::new("git")
-        .args(["diff", "--cached", "--quiet"])
-        .status()?
-        .success();
-    Ok(!unstaged || !staged)
+    let output = run(&["status", "--porcelain"])?;
+    Ok(!output.is_empty())
 }
 
 pub fn stash_push() -> AppResult<()> {
@@ -93,19 +84,14 @@ pub fn fast_forward_merge(branch: &str) -> AppResult<MergeResult> {
     Ok(MergeResult::Pulled(count))
 }
 
-pub fn is_merged(branch: &str) -> AppResult<bool> {
-    let output = run(&["branch", "--merged"])?;
-    Ok(output.lines().any(|l| l.trim() == branch))
-}
-
 pub fn merged_branches() -> AppResult<Vec<String>> {
     let current = current_branch()?;
     let keep = kept_branches();
-    let output = run(&["branch", "--merged"])?;
+    let output = run(&["branch", "--merged", "--format=%(refname:short)"])?;
     let branches = output
         .lines()
-        .filter_map(parse_branch_line)
-        .filter(|b| current.as_deref() != Some(b.as_str()) && !keep.contains(b))
+        .filter(|b| current.as_deref() != Some(*b) && !keep.contains(&b.to_string()))
+        .map(String::from)
         .collect();
     Ok(branches)
 }
@@ -116,8 +102,10 @@ fn kept_branches() -> Vec<String> {
         .unwrap_or_default()
 }
 
-pub fn delete_branch(branch: &str) -> AppResult<()> {
-    run(&["branch", "-d", branch, "--quiet"])?;
+pub fn delete_branches(branches: &[&str]) -> AppResult<()> {
+    let mut args = vec!["branch", "-d", "--quiet"];
+    args.extend(branches);
+    run(&args)?;
     Ok(())
 }
 
@@ -130,14 +118,7 @@ fn run(args: &[&str]) -> AppResult<String> {
     let output = Command::new("git").args(args).output()?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("git {}: {}", args[0], stderr.trim()).into());
+        return Err(format!("git {}: {}", args.first().unwrap_or(&"<unknown>"), stderr.trim()).into());
     }
     Ok(String::from_utf8(output.stdout)?)
-}
-
-pub enum MergeResult {
-    UpToDate,
-    Pulled(u32),
-    Diverged(String),
-    NoRemote,
 }

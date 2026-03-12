@@ -4,12 +4,12 @@ use indicatif::ProgressBar;
 use crate::{AppResult, git};
 
 pub fn run(target: Option<&str>) -> AppResult<()> {
+    let old_branch = git::current_branch()?;
+
     let target = match target {
         Some(name) => name.to_string(),
-        None => select_branch()?,
+        None => select_branch(old_branch.as_ref())?,
     };
-
-    let old_branch = git::current_branch()?;
 
     let stashed = if git::is_dirty()? {
         git::stash_push()?;
@@ -21,6 +21,12 @@ pub fn run(target: Option<&str>) -> AppResult<()> {
     let result = switch_and_update(&target, old_branch.as_deref());
 
     if stashed {
+        if result.is_err()
+            && let Some(old) = old_branch.as_deref()
+        {
+            eprintln!("Switching back to {old} and restoring stashed changes.");
+            let _ = git::checkout(old);
+        }
         git::stash_pop()?;
     }
 
@@ -66,15 +72,13 @@ fn report_update(result: git::MergeResult) -> AppResult<()> {
     Ok(())
 }
 
-fn select_branch() -> AppResult<String> {
+fn select_branch(current: Option<&String>) -> AppResult<String> {
     let branches = git::local_branches()?;
     if branches.is_empty() {
         return Err("no local branches found".into());
     }
 
-    let current = git::current_branch()?;
     let default = current
-        .as_ref()
         .and_then(|c| branches.iter().position(|b| b == c))
         .unwrap_or(0);
 
@@ -104,8 +108,9 @@ fn prompt_delete_merged_branches(old_branch: Option<&str>) -> AppResult<()> {
         .defaults(&defaults)
         .interact()?;
 
-    for i in selections {
-        git::delete_branch(&merged[i])?;
+    let to_delete: Vec<&str> = selections.iter().map(|&i| merged[i].as_str()).collect();
+    if !to_delete.is_empty() {
+        git::delete_branches(&to_delete)?;
     }
 
     Ok(())
