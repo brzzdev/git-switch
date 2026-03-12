@@ -50,7 +50,7 @@ fn switch_and_update(target: &str, old_branch: Option<&str>) -> AppResult<()> {
     spinner.finish_and_clear();
     report_update(merge_result)?;
 
-    prompt_delete_merged_branches(if already_on_target { None } else { old_branch })?;
+    prompt_delete_stale_branches(if already_on_target { None } else { old_branch })?;
 
     Ok(())
 }
@@ -91,24 +91,24 @@ fn select_branch(current: Option<&String>) -> AppResult<String> {
     Ok(branches[selection].clone())
 }
 
-fn prompt_delete_merged_branches(old_branch: Option<&str>) -> AppResult<()> {
-    let merged = git::merged_branches()?;
-    if merged.is_empty() {
+fn prompt_delete_stale_branches(old_branch: Option<&str>) -> AppResult<()> {
+    let stale = git::stale_branches()?;
+    if stale.is_empty() {
         return Ok(());
     }
 
-    let defaults: Vec<bool> = merged
+    let defaults: Vec<bool> = stale
         .iter()
         .map(|b| old_branch.is_some_and(|old| old == b))
         .collect();
 
     let selections = MultiSelect::new()
-        .with_prompt("Delete merged branches (space to toggle)")
-        .items(&merged)
+        .with_prompt("Delete stale branches (space to toggle)")
+        .items(&stale)
         .defaults(&defaults)
         .interact()?;
 
-    let to_delete: Vec<&str> = selections.iter().map(|&i| merged[i].as_str()).collect();
+    let to_delete: Vec<&str> = selections.iter().map(|&i| stale[i].as_str()).collect();
     if !to_delete.is_empty() {
         git::delete_branches(&to_delete)?;
     }
