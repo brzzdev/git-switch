@@ -87,7 +87,7 @@ pub fn fast_forward_merge(branch: &str) -> AppResult<MergeResult> {
 pub fn merged_branches() -> AppResult<Vec<String>> {
     let current = current_branch()?;
     let keep = kept_branches();
-    let output = run(&["branch", "--merged", "--format=%(refname:short)"])?;
+    let output = run(&["branch", "--format=%(refname:short)", "--merged"])?;
     let branches = output
         .lines()
         .filter(|b| current.as_deref() != Some(*b) && !keep.contains(&b.to_string()))
