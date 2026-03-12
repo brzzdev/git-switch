@@ -84,15 +84,37 @@ pub fn fast_forward_merge(branch: &str) -> AppResult<MergeResult> {
     Ok(MergeResult::Pulled(count))
 }
 
-pub fn merged_branches() -> AppResult<Vec<String>> {
+pub fn stale_branches() -> AppResult<Vec<String>> {
     let current = current_branch()?;
     let keep = kept_branches();
-    let output = run(&["branch", "--format=%(refname:short)", "--merged"])?;
-    let branches = output
+
+    let merged_output = run(&["branch", "--format=%(refname:short)", "--merged"])?;
+    let gone_output = run(&[
+        "for-each-ref",
+        "--format=%(refname:short) %(upstream:track)",
+        "refs/heads/",
+    ])?;
+
+    let gone: Vec<&str> = gone_output
         .lines()
+        .filter_map(|line| {
+            if line.ends_with("[gone]") {
+                line.split_whitespace().next()
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    let mut branches: Vec<String> = merged_output
+        .lines()
+        .chain(gone.into_iter())
         .filter(|b| current.as_deref() != Some(*b) && !keep.contains(&b.to_string()))
         .map(String::from)
         .collect();
+
+    branches.sort();
+    branches.dedup();
     Ok(branches)
 }
 
@@ -103,7 +125,7 @@ fn kept_branches() -> Vec<String> {
 }
 
 pub fn delete_branches(branches: &[&str]) -> AppResult<()> {
-    let mut args = vec!["branch", "-d", "--quiet"];
+    let mut args = vec!["branch", "-D", "--quiet"];
     args.extend(branches);
     run(&args)?;
     Ok(())
