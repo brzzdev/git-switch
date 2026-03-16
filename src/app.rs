@@ -11,7 +11,7 @@ pub fn run(target: Option<&str>) -> AppResult<()> {
         None => select_branch(old_branch.as_ref())?,
     };
 
-    let stashed = if git::is_dirty()? {
+    let stashed = if git::has_tracked_changes()? {
         git::stash_push()?;
         true
     } else {

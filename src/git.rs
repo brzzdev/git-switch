@@ -21,8 +21,8 @@ pub fn local_branches() -> AppResult<Vec<String>> {
     Ok(branches)
 }
 
-pub fn is_dirty() -> AppResult<bool> {
-    let output = run(&["status", "--porcelain"])?;
+pub fn has_tracked_changes() -> AppResult<bool> {
+    let output = run(&["status", "--porcelain", "--untracked-files=no"])?;
     Ok(!output.is_empty())
 }
 
