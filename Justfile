@@ -1,5 +1,9 @@
 # prettier-ignore
 
+# List available recipes.
+list:
+  just --list
+
 # Build a release binary.
 release:
   cargo build --release
