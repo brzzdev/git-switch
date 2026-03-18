@@ -1,12 +1,8 @@
 # prettier-ignore
 
-# List available recipes.
-list:
-  just --list
-
-# Build a release binary.
-release:
-  cargo build --release
+# Format the source code.
+format:
+  cargo fmt
 
 # Install the release binary locally.
 install: release
@@ -35,6 +31,14 @@ install-completions:
     *) \
       echo "Unsupported shell: $SHELL" && exit 1 ;; \
   esac
+
+# List available recipes.
+list:
+  just --list
+
+# Build a release binary.
+release:
+  cargo build --release
 
 # Run the test suite.
 test:
