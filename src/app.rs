@@ -40,14 +40,15 @@ fn switch_and_update(target: &str, old_branch: Option<&str>) -> AppResult<()> {
         git::checkout(target)?;
     }
 
-    let spinner = ProgressBar::new_spinner()
-        .with_message(format!("Updating {target}…"));
+    let spinner = ProgressBar::new_spinner().with_message(format!("Updating {target}…"));
+    eprint!("\x1b[?25l"); // hide cursor
     spinner.enable_steady_tick(std::time::Duration::from_millis(80));
 
     let _ = git::fetch(target);
     let merge_result = git::fast_forward_merge(target)?;
 
     spinner.finish_and_clear();
+    eprint!("\x1b[?25h"); // show cursor
     report_update(merge_result)?;
 
     prompt_delete_stale_branches(if already_on_target { None } else { old_branch })?;

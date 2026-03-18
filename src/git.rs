@@ -140,7 +140,12 @@ fn run(args: &[&str]) -> AppResult<String> {
     let output = Command::new("git").args(args).output()?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("git {}: {}", args.first().unwrap_or(&"<unknown>"), stderr.trim()).into());
+        return Err(format!(
+            "git {}: {}",
+            args.first().unwrap_or(&"<unknown>"),
+            stderr.trim()
+        )
+        .into());
     }
     Ok(String::from_utf8(output.stdout)?)
 }
