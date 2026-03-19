@@ -41,9 +41,9 @@ pub fn checkout(branch: &str) -> AppResult<()> {
     Ok(())
 }
 
-pub fn fetch(branch: &str) -> AppResult<bool> {
+pub fn fetch() -> AppResult<bool> {
     let status = Command::new("git")
-        .args(["fetch", "--quiet", "origin", branch])
+        .args(["fetch", "--quiet", "--prune", "origin"])
         .stderr(std::process::Stdio::null())
         .status()?;
     Ok(status.success())

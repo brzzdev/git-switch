@@ -44,7 +44,7 @@ fn switch_and_update(target: &str, old_branch: Option<&str>) -> AppResult<()> {
     eprint!("\x1b[?25l"); // hide cursor
     spinner.enable_steady_tick(std::time::Duration::from_millis(80));
 
-    let _ = git::fetch(target);
+    let _ = git::fetch();
     let merge_result = git::fast_forward_merge(target)?;
 
     spinner.finish_and_clear();
