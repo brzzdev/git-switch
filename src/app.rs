@@ -27,7 +27,12 @@ pub fn run(target: Option<&str>) -> AppResult<()> {
             eprintln!("Switching back to {old} and restoring stashed changes.");
             let _ = git::checkout(old);
         }
-        git::stash_pop()?;
+        if let Err(e) = git::stash_pop() {
+            eprintln!("error: {e}");
+            eprintln!(
+                "Your changes are still in the stash. Run `git stash pop` to restore them manually."
+            );
+        }
     }
 
     result

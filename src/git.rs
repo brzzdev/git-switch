@@ -32,7 +32,14 @@ pub fn stash_push() -> AppResult<()> {
 }
 
 pub fn stash_pop() -> AppResult<()> {
-    run(&["stash", "pop", "--quiet"])?;
+    let output = Command::new("git")
+        .args(["stash", "pop", "--quiet"])
+        .output()?;
+    if !output.status.success() {
+        // `git stash pop` writes conflict details to stdout, not stderr.
+        let detail = String::from_utf8_lossy(&output.stdout);
+        return Err(format!("git stash: {}", detail.trim()).into());
+    }
     Ok(())
 }
 
