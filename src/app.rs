@@ -108,12 +108,15 @@ fn prompt_delete_stale_branches(old_branch: Option<&str>) -> AppResult<()> {
         .map(|(i, _)| i)
         .collect();
 
-    let to_delete = MultiSelect::new(
+    eprint!("\x1b[?25l"); // hide cursor
+    let result = MultiSelect::new(
         "Delete stale branches (space to toggle, →/← all/none)",
         stale,
     )
     .with_default(&defaults)
-    .prompt()?;
+    .prompt();
+    eprint!("\x1b[?25h"); // show cursor
+    let to_delete = result?;
 
     if !to_delete.is_empty() {
         let refs: Vec<&str> = to_delete.iter().map(String::as_str).collect();
