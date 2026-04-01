@@ -116,7 +116,7 @@ pub fn stale_branches() -> AppResult<Vec<String>> {
     let mut branches: Vec<String> = merged_output
         .lines()
         .chain(gone)
-        .filter(|b| current.as_deref() != Some(*b) && !keep.contains(&b.to_string()))
+        .filter(|b| current.as_deref() != Some(*b) && !keep.iter().any(|k| k == b))
         .map(String::from)
         .collect();
 
@@ -125,10 +125,26 @@ pub fn stale_branches() -> AppResult<Vec<String>> {
     Ok(branches)
 }
 
+fn default_branch() -> Option<String> {
+    if let Ok(output) = run(&["symbolic-ref", "refs/remotes/origin/HEAD"]) {
+        let trimmed = output.trim();
+        if let Some(name) = trimmed.strip_prefix("refs/remotes/origin/") {
+            return Some(name.to_string());
+        }
+    }
+    None
+}
+
 fn kept_branches() -> Vec<String> {
-    run(&["config", "--get-all", "git-switch.keep"])
+    let mut kept: Vec<String> = run(&["config", "--get-all", "git-switch.keep"])
         .map(|o| o.lines().map(String::from).collect())
-        .unwrap_or_default()
+        .unwrap_or_default();
+    if let Some(default) = default_branch() {
+        if !kept.contains(&default) {
+            kept.push(default);
+        }
+    }
+    kept
 }
 
 pub fn delete_branches(branches: &[&str]) -> AppResult<()> {
