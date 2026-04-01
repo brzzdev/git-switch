@@ -225,3 +225,30 @@ fn local_only_branch_not_stale() {
         "local-only branch should not be considered stale, got: {stale:?}"
     );
 }
+
+#[test]
+fn merged_tracked_branch_is_stale() {
+    let _lock = CWD_LOCK.lock().unwrap();
+    let (_bare, work) = setup();
+
+    // Create a branch, push it, then merge into main.
+    // The upstream is in sync (not gone), but the branch is fully merged.
+    git(work.path(), &["checkout", "-b", "feature-done"]);
+    fs::write(work.path().join("feature.txt"), "done\n").unwrap();
+    git(work.path(), &["add", "feature.txt"]);
+    git(work.path(), &["commit", "-m", "feature"]);
+    git(work.path(), &["push", "-u", "origin", "feature-done"]);
+    git(work.path(), &["checkout", "main"]);
+    git(work.path(), &["merge", "feature-done"]);
+    git(work.path(), &["push", "origin", "main"]);
+
+    let original = std::env::current_dir().unwrap();
+    std::env::set_current_dir(work.path()).unwrap();
+    let stale = git_switch::git::stale_branches().unwrap();
+    std::env::set_current_dir(&original).unwrap();
+
+    assert!(
+        stale.contains(&"feature-done".to_string()),
+        "merged branch with upstream should be stale, got: {stale:?}"
+    );
+}
