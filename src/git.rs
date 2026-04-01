@@ -96,25 +96,26 @@ pub fn stale_branches() -> AppResult<Vec<String>> {
     let keep = kept_branches();
 
     let merged_output = run(&["branch", "--format=%(refname:short)", "--merged"])?;
-    let gone_output = run(&[
+    let tracking_output = run(&[
         "for-each-ref",
         "--format=%(refname:short) %(upstream:track)",
         "refs/heads/",
     ])?;
 
-    let gone: Vec<&str> = gone_output
-        .lines()
-        .filter_map(|line| {
-            if line.ends_with("[gone]") {
-                line.split_whitespace().next()
-            } else {
-                None
-            }
-        })
-        .collect();
+    let mut gone = Vec::new();
+    let mut has_upstream = Vec::new();
+    for line in tracking_output.lines() {
+        let name = line.split_whitespace().next().unwrap_or("");
+        if line.ends_with("[gone]") {
+            gone.push(name);
+        } else if name != line {
+            has_upstream.push(name);
+        }
+    }
 
     let mut branches: Vec<String> = merged_output
         .lines()
+        .filter(|b| has_upstream.contains(b))
         .chain(gone)
         .filter(|b| current.as_deref() != Some(*b) && !keep.iter().any(|k| k == b))
         .map(String::from)
