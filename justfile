@@ -1,5 +1,9 @@
 # prettier-ignore
 
+[private]
+default:
+  just --list
+
 # Format the source code.
 format:
   cargo fmt
@@ -32,10 +36,6 @@ install-completions:
       echo "Unsupported shell: $SHELL" && exit 1 ;; \
   esac
 
-# List available recipes.
-list:
-  just --list
-
 # Build a release binary.
 release:
   cargo build --release
@@ -43,3 +43,11 @@ release:
 # Run the test suite.
 test:
   cargo test
+
+# Install git pre-commit hooks (clippy + fmt check).
+tools:
+  #!/usr/bin/env sh
+  hook="$(git rev-parse --git-dir)/hooks/pre-commit"
+  printf '%s\n' '#!/usr/bin/env sh' 'set -e' 'cargo fmt --check' 'cargo clippy -- -D warnings' > "$hook"
+  chmod +x "$hook"
+  echo "Installed pre-commit hook."
