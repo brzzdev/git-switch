@@ -1,5 +1,5 @@
-use dialoguer::{MultiSelect, Select};
 use indicatif::ProgressBar;
+use inquire::{MultiSelect, Select};
 
 use crate::{AppResult, git};
 
@@ -8,7 +8,7 @@ pub fn run(target: Option<&str>) -> AppResult<()> {
 
     let target = match target {
         Some(name) => name.to_string(),
-        None => select_branch(old_branch.as_ref())?,
+        None => select_branch(old_branch.as_deref())?,
     };
 
     let stashed = if git::has_tracked_changes()? {
@@ -78,7 +78,7 @@ fn report_update(result: git::MergeResult) -> AppResult<()> {
     Ok(())
 }
 
-fn select_branch(current: Option<&String>) -> AppResult<String> {
+fn select_branch(current: Option<&str>) -> AppResult<String> {
     let branches = git::local_branches()?;
     if branches.is_empty() {
         return Err("no local branches found".into());
@@ -88,13 +88,11 @@ fn select_branch(current: Option<&String>) -> AppResult<String> {
         .and_then(|c| branches.iter().position(|b| b == c))
         .unwrap_or(0);
 
-    let selection = Select::new()
-        .with_prompt("Switch to")
-        .items(&branches)
-        .default(default)
-        .interact()?;
+    let selection = Select::new("Switch to", branches)
+        .with_starting_cursor(default)
+        .prompt()?;
 
-    Ok(branches[selection].clone())
+    Ok(selection)
 }
 
 fn prompt_delete_stale_branches(old_branch: Option<&str>) -> AppResult<()> {
@@ -103,20 +101,23 @@ fn prompt_delete_stale_branches(old_branch: Option<&str>) -> AppResult<()> {
         return Ok(());
     }
 
-    let defaults: Vec<bool> = stale
+    let defaults: Vec<usize> = stale
         .iter()
-        .map(|b| old_branch.is_some_and(|old| old == b))
+        .enumerate()
+        .filter(|(_, b)| old_branch.is_some_and(|old| old == b.as_str()))
+        .map(|(i, _)| i)
         .collect();
 
-    let selections = MultiSelect::new()
-        .with_prompt("Delete stale branches (space to toggle)")
-        .items(&stale)
-        .defaults(&defaults)
-        .interact()?;
+    let to_delete = MultiSelect::new(
+        "Delete stale branches (space to toggle, →/← all/none)",
+        stale,
+    )
+    .with_default(&defaults)
+    .prompt()?;
 
-    let to_delete: Vec<&str> = selections.iter().map(|&i| stale[i].as_str()).collect();
     if !to_delete.is_empty() {
-        git::delete_branches(&to_delete)?;
+        let refs: Vec<&str> = to_delete.iter().map(String::as_str).collect();
+        git::delete_branches(&refs)?;
     }
 
     Ok(())
