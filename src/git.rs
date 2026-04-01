@@ -98,17 +98,21 @@ pub fn stale_branches() -> AppResult<Vec<String>> {
     let merged_output = run(&["branch", "--format=%(refname:short)", "--merged"])?;
     let tracking_output = run(&[
         "for-each-ref",
-        "--format=%(refname:short)|%(upstream:track)",
+        "--format=%(refname:short) %(upstream) %(upstream:track)",
         "refs/heads/",
     ])?;
 
-    let mut gone = Vec::new();
     let mut has_upstream = Vec::new();
+    let mut gone = Vec::new();
     for line in tracking_output.lines() {
-        let (name, track) = line.split_once('|').unwrap_or((line, ""));
-        if track == "[gone]" {
+        let mut parts = line.split_whitespace();
+        let Some(name) = parts.next() else { continue };
+        if parts.next().is_none() {
+            continue; // local-only branch — no upstream
+        }
+        if line.ends_with("[gone]") {
             gone.push(name);
-        } else if !track.is_empty() {
+        } else {
             has_upstream.push(name);
         }
     }
