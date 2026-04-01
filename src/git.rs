@@ -139,10 +139,10 @@ fn kept_branches() -> Vec<String> {
     let mut kept: Vec<String> = run(&["config", "--get-all", "git-switch.keep"])
         .map(|o| o.lines().map(String::from).collect())
         .unwrap_or_default();
-    if let Some(default) = default_branch() {
-        if !kept.contains(&default) {
-            kept.push(default);
-        }
+    if let Some(default) = default_branch()
+        && !kept.contains(&default)
+    {
+        kept.push(default);
     }
     kept
 }
