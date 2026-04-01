@@ -1,7 +1,11 @@
 use std::fs;
 use std::path::Path;
 use std::process::{Command, Output};
+use std::sync::Mutex;
 use tempfile::TempDir;
+
+/// Guards tests that call library functions relying on process cwd.
+static CWD_LOCK: Mutex<()> = Mutex::new(());
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -195,5 +199,29 @@ fn diverged_branch_reports_error() {
     assert!(
         combined.contains("diverged"),
         "expected divergence message, got: {combined}"
+    );
+}
+
+#[test]
+fn local_only_branch_not_stale() {
+    let _lock = CWD_LOCK.lock().unwrap();
+    let (_bare, work) = setup();
+
+    // Create a local-only branch (never pushed) and merge it into main.
+    git(work.path(), &["checkout", "-b", "local-experiment"]);
+    fs::write(work.path().join("experiment.txt"), "try something\n").unwrap();
+    git(work.path(), &["add", "experiment.txt"]);
+    git(work.path(), &["commit", "-m", "experiment"]);
+    git(work.path(), &["checkout", "main"]);
+    git(work.path(), &["merge", "local-experiment"]);
+
+    let original = std::env::current_dir().unwrap();
+    std::env::set_current_dir(work.path()).unwrap();
+    let stale = git_switch::git::stale_branches().unwrap();
+    std::env::set_current_dir(&original).unwrap();
+
+    assert!(
+        !stale.contains(&"local-experiment".to_string()),
+        "local-only branch should not be considered stale, got: {stale:?}"
     );
 }
