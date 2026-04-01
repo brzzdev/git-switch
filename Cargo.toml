@@ -4,7 +4,8 @@ version = "1.0.0"
 edition = "2024"
 
 [dependencies]
-inquire = "0.7"
+console = "0.16"
+dialoguer = "0.12"
 indicatif = "0.18"
 
 [dev-dependencies]

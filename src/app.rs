@@ -1,5 +1,6 @@
+use console::{Key, Term, style};
+use dialoguer::Select;
 use indicatif::ProgressBar;
-use inquire::{MultiSelect, Select};
 
 use crate::{AppResult, git};
 
@@ -88,11 +89,13 @@ fn select_branch(current: Option<&str>) -> AppResult<String> {
         .and_then(|c| branches.iter().position(|b| b == c))
         .unwrap_or(0);
 
-    let selection = Select::new("Switch to", branches)
-        .with_starting_cursor(default)
-        .prompt()?;
+    let selection = Select::new()
+        .with_prompt("Switch to")
+        .items(&branches)
+        .default(default)
+        .interact()?;
 
-    Ok(selection)
+    Ok(branches[selection].clone())
 }
 
 fn prompt_delete_stale_branches(old_branch: Option<&str>) -> AppResult<()> {
@@ -101,27 +104,75 @@ fn prompt_delete_stale_branches(old_branch: Option<&str>) -> AppResult<()> {
         return Ok(());
     }
 
-    let defaults: Vec<usize> = stale
+    let mut selected: Vec<bool> = stale
         .iter()
-        .enumerate()
-        .filter(|(_, b)| old_branch.is_some_and(|old| old == b.as_str()))
-        .map(|(i, _)| i)
+        .map(|b| old_branch.is_some_and(|old| old == b))
         .collect();
 
-    eprint!("\x1b[?25l"); // hide cursor
-    let result = MultiSelect::new(
+    let selections = multi_select(
         "Delete stale branches (space to toggle, →/← all/none)",
-        stale,
-    )
-    .with_default(&defaults)
-    .prompt();
-    eprint!("\x1b[?25h"); // show cursor
-    let to_delete = result?;
+        &stale,
+        &mut selected,
+    )?;
 
+    let to_delete: Vec<&str> = selections.iter().map(|&i| stale[i].as_str()).collect();
     if !to_delete.is_empty() {
-        let refs: Vec<&str> = to_delete.iter().map(String::as_str).collect();
-        git::delete_branches(&refs)?;
+        git::delete_branches(&to_delete)?;
     }
 
     Ok(())
+}
+
+fn multi_select(prompt: &str, items: &[String], selected: &mut [bool]) -> AppResult<Vec<usize>> {
+    let term = Term::stderr();
+    let mut cursor = 0usize;
+    let line_count = items.len() + 1; // prompt + items
+
+    eprint!("\x1b[?25l"); // hide cursor
+
+    let draw = |cursor: usize, selected: &[bool]| {
+        eprintln!("{} {}", style("?").green().bold(), style(prompt).bold(),);
+        for (i, item) in items.iter().enumerate() {
+            let arrow = if i == cursor { ">" } else { " " };
+            let check = if selected[i] { "[x]" } else { "[ ]" };
+            eprintln!("  {arrow} {check} {item}");
+        }
+    };
+
+    let clear = |n: usize| {
+        for _ in 0..n {
+            eprint!("\x1b[A\x1b[2K");
+        }
+    };
+
+    draw(cursor, selected);
+
+    loop {
+        match term.read_key()? {
+            Key::ArrowUp if cursor > 0 => cursor -= 1,
+            Key::ArrowDown if cursor < items.len() - 1 => cursor += 1,
+            Key::Char(' ') => selected[cursor] = !selected[cursor],
+            Key::ArrowRight => selected.fill(true),
+            Key::ArrowLeft => selected.fill(false),
+            Key::Enter => break,
+            Key::Escape => {
+                clear(line_count);
+                eprint!("\x1b[?25h"); // show cursor
+                return Ok(vec![]);
+            }
+            _ => continue,
+        }
+
+        clear(line_count);
+        draw(cursor, selected);
+    }
+
+    eprint!("\x1b[?25h"); // show cursor
+
+    Ok(selected
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| **s)
+        .map(|(i, _)| i)
+        .collect())
 }
