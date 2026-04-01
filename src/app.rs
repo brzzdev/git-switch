@@ -104,7 +104,7 @@ fn prompt_delete_stale_branches(old_branch: Option<&str>) -> AppResult<()> {
         return Ok(());
     }
 
-    let mut selected: Vec<bool> = stale
+    let defaults: Vec<bool> = stale
         .iter()
         .map(|b| old_branch.is_some_and(|old| old == b))
         .collect();
@@ -112,7 +112,7 @@ fn prompt_delete_stale_branches(old_branch: Option<&str>) -> AppResult<()> {
     let selections = multi_select(
         "Delete stale branches (space to toggle, →/← all/none)",
         &stale,
-        &mut selected,
+        &defaults,
     )?;
 
     let to_delete: Vec<&str> = selections.iter().map(|&i| stale[i].as_str()).collect();
@@ -123,15 +123,17 @@ fn prompt_delete_stale_branches(old_branch: Option<&str>) -> AppResult<()> {
     Ok(())
 }
 
-fn multi_select(prompt: &str, items: &[String], selected: &mut [bool]) -> AppResult<Vec<usize>> {
+fn multi_select(prompt: &str, items: &[String], defaults: &[bool]) -> AppResult<Vec<usize>> {
     let term = Term::stderr();
+    let mut selected = defaults.to_vec();
     let mut cursor = 0usize;
-    let line_count = items.len() + 1; // prompt + items
+    let line_count = items.len() + 1;
+    let header = format!("{} {}", style("?").green().bold(), style(prompt).bold());
 
     eprint!("\x1b[?25l"); // hide cursor
 
     let draw = |cursor: usize, selected: &[bool]| {
-        eprintln!("{} {}", style("?").green().bold(), style(prompt).bold(),);
+        eprintln!("{header}");
         for (i, item) in items.iter().enumerate() {
             let arrow = if i == cursor { ">" } else { " " };
             let check = if selected[i] { "[x]" } else { "[ ]" };
@@ -145,7 +147,7 @@ fn multi_select(prompt: &str, items: &[String], selected: &mut [bool]) -> AppRes
         }
     };
 
-    draw(cursor, selected);
+    draw(cursor, &selected);
 
     loop {
         match term.read_key()? {
@@ -164,7 +166,7 @@ fn multi_select(prompt: &str, items: &[String], selected: &mut [bool]) -> AppRes
         }
 
         clear(line_count);
-        draw(cursor, selected);
+        draw(cursor, &selected);
     }
 
     eprint!("\x1b[?25h"); // show cursor
