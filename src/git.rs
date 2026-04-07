@@ -117,9 +117,12 @@ pub fn stale_branches() -> AppResult<Vec<String>> {
         }
     }
 
+    let head = rev_parse("HEAD")?;
+
     let mut branches: Vec<String> = merged_output
         .lines()
         .filter(|b| has_upstream.contains(b))
+        .filter(|b| has_unique_commits(b, &head))
         .chain(gone)
         .filter(|b| current.as_deref() != Some(*b) && !keep.iter().any(|k| k == b))
         .map(String::from)
@@ -157,6 +160,30 @@ pub fn delete_branches(branches: &[&str]) -> AppResult<()> {
     args.extend(branches);
     run(&args)?;
     Ok(())
+}
+
+/// Returns true if the branch had unique commits that were merged, not just a
+/// pointer to a commit already on the main line that never diverged.
+///
+/// A branch created from main with no new commits has its tip equal to its
+/// merge-base with HEAD and is strictly behind HEAD — this is not stale.
+/// A fast-forward-merged branch also has tip == merge-base, but its tip equals
+/// HEAD (or HEAD hasn't moved past it yet).
+fn has_unique_commits(branch: &str, head: &str) -> bool {
+    let Ok(merge_base) = run(&["merge-base", head, branch]) else {
+        return false;
+    };
+    let Ok(tip) = rev_parse(branch) else {
+        return false;
+    };
+    let (merge_base, tip) = (merge_base.trim(), tip.trim());
+    // Branch diverged from main — it had unique work.
+    if merge_base != tip {
+        return true;
+    }
+    // merge-base == tip: branch never diverged. Only consider stale if HEAD
+    // hasn't moved past it (fast-forward merge that just happened).
+    tip == head.trim()
 }
 
 fn rev_parse(refname: &str) -> AppResult<String> {

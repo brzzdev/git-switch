@@ -252,3 +252,28 @@ fn merged_tracked_branch_is_stale() {
         "merged branch with upstream should be stale, got: {stale:?}"
     );
 }
+
+#[test]
+fn tracked_branch_without_unique_commits_not_stale() {
+    let _lock = CWD_LOCK.lock().unwrap();
+    let (_bare, work) = setup();
+
+    // Create and push a branch from main without adding any commits.
+    git(work.path(), &["checkout", "-b", "new-feature"]);
+    git(work.path(), &["push", "-u", "origin", "new-feature"]);
+    git(work.path(), &["checkout", "main"]);
+
+    // Simulate a pull that moves main ahead (branch is now behind HEAD).
+    push_upstream_change(work.path(), "ahead.txt", "new\n", "advance main");
+    git(work.path(), &["pull", "origin", "main"]);
+
+    let original = std::env::current_dir().unwrap();
+    std::env::set_current_dir(work.path()).unwrap();
+    let stale = git_switch::git::stale_branches().unwrap();
+    std::env::set_current_dir(&original).unwrap();
+
+    assert!(
+        !stale.contains(&"new-feature".to_string()),
+        "branch with no unique commits should not be stale, got: {stale:?}"
+    );
+}
