@@ -203,11 +203,12 @@ fn diverged_branch_reports_error() {
 }
 
 #[test]
-fn local_only_branch_not_stale() {
+fn local_only_branch_not_stale_right_after_merge() {
     let _lock = CWD_LOCK.lock().unwrap();
     let (_bare, work) = setup();
 
     // Create a local-only branch (never pushed) and merge it into main.
+    // Right after the merge HEAD == branch tip, so it's not stale yet.
     git(work.path(), &["checkout", "-b", "local-experiment"]);
     fs::write(work.path().join("experiment.txt"), "try something\n").unwrap();
     git(work.path(), &["add", "experiment.txt"]);
@@ -222,7 +223,35 @@ fn local_only_branch_not_stale() {
 
     assert!(
         !stale.contains(&"local-experiment".to_string()),
-        "local-only branch should not be considered stale, got: {stale:?}"
+        "local-only branch should not be stale right after merge, got: {stale:?}"
+    );
+}
+
+#[test]
+fn local_only_branch_stale_after_main_advances() {
+    let _lock = CWD_LOCK.lock().unwrap();
+    let (_bare, work) = setup();
+
+    // Create a local-only branch, merge it, then advance main past it.
+    git(work.path(), &["checkout", "-b", "local-merged"]);
+    fs::write(work.path().join("local.txt"), "work\n").unwrap();
+    git(work.path(), &["add", "local.txt"]);
+    git(work.path(), &["commit", "-m", "local work"]);
+    git(work.path(), &["checkout", "main"]);
+    git(work.path(), &["merge", "local-merged"]);
+
+    // Advance main past the branch.
+    push_upstream_change(work.path(), "advance.txt", "new\n", "advance main");
+    git(work.path(), &["pull", "origin", "main"]);
+
+    let original = std::env::current_dir().unwrap();
+    std::env::set_current_dir(work.path()).unwrap();
+    let stale = git_switch::git::stale_branches().unwrap();
+    std::env::set_current_dir(&original).unwrap();
+
+    assert!(
+        stale.contains(&"local-merged".to_string()),
+        "merged local branch behind HEAD should be stale, got: {stale:?}"
     );
 }
 

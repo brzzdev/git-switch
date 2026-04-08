@@ -104,11 +104,13 @@ pub fn stale_branches() -> AppResult<Vec<String>> {
 
     let mut has_upstream = Vec::new();
     let mut gone = Vec::new();
+    let mut local_only = Vec::new();
     for line in tracking_output.lines() {
         let mut parts = line.split_whitespace();
         let Some(name) = parts.next() else { continue };
         if parts.next().is_none() {
-            continue; // local-only branch — no upstream
+            local_only.push(name);
+            continue;
         }
         if line.ends_with("[gone]") {
             gone.push(name);
@@ -121,8 +123,15 @@ pub fn stale_branches() -> AppResult<Vec<String>> {
 
     let mut branches: Vec<String> = merged_output
         .lines()
-        .filter(|b| has_upstream.contains(b))
-        .filter(|b| has_unique_commits(b, &head))
+        .filter(|b| {
+            if has_upstream.contains(b) {
+                has_unique_commits(b, &head)
+            } else if local_only.contains(b) {
+                is_behind_head(b, &head)
+            } else {
+                false
+            }
+        })
         .chain(gone)
         .filter(|b| current.as_deref() != Some(*b) && !keep.iter().any(|k| k == b))
         .map(String::from)
@@ -160,6 +169,16 @@ pub fn delete_branches(branches: &[&str]) -> AppResult<()> {
     args.extend(branches);
     run(&args)?;
     Ok(())
+}
+
+/// Returns true if the branch tip is strictly behind HEAD. For a merged
+/// local-only branch this means its work has been incorporated into the main
+/// line and HEAD has advanced past it.
+fn is_behind_head(branch: &str, head: &str) -> bool {
+    let Ok(tip) = rev_parse(branch) else {
+        return false;
+    };
+    tip.trim() != head.trim()
 }
 
 /// Returns true if the branch had unique commits that were merged, not just a
