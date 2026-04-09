@@ -32,18 +32,41 @@ pub fn stash_push() -> AppResult<()> {
 }
 
 pub fn stash_pop() -> AppResult<()> {
-    let output = Command::new("git")
-        .args(["stash", "pop", "--quiet"])
-        .output()?;
+    let output = Command::new("git").args(["stash", "pop"]).output()?;
     if !output.status.success() {
-        // `git stash pop` writes conflict details to stdout, not stderr.
-        let detail = String::from_utf8_lossy(&output.stdout);
-        return Err(format!("git stash: {}", detail.trim()).into());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let detail = if stdout.trim().is_empty() {
+            stderr.trim().to_string()
+        } else {
+            stdout.trim().to_string()
+        };
+        return Err(format!("git stash pop: {detail}").into());
     }
     Ok(())
 }
 
 pub fn checkout(branch: &str) -> AppResult<()> {
+    let output = Command::new("git")
+        .args(["checkout", branch, "--quiet"])
+        .output()?;
+    if output.status.success() {
+        return Ok(());
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if !stderr.contains("Submodule") || !stderr.contains("could not be updated") {
+        return Err(format!("git checkout: {}", stderr.trim()).into());
+    }
+
+    // Submodule checkout failed — likely missing objects. Fetch inside
+    // each submodule and retry once.
+    let _ = Command::new("git")
+        .args(["submodule", "foreach", "--recursive", "git", "fetch"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+
     run(&["checkout", branch, "--quiet"])?;
     Ok(())
 }

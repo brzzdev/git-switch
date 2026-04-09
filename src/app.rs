@@ -31,7 +31,7 @@ pub fn run(target: Option<&str>) -> AppResult<()> {
         if let Err(e) = git::stash_pop() {
             eprintln!("error: {e}");
             eprintln!(
-                "Your changes are still in the stash. Run `git stash pop` to restore them manually."
+                "Conflicts detected. Resolve them, then run `git stash drop` to clean up the stash entry."
             );
         }
     }
