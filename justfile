@@ -9,7 +9,7 @@ format:
   cargo fmt
 
 # Install the release binary locally.
-install: release
+install: build-release
   mkdir -p ~/.local/bin
   cp target/release/git-switch ~/.local/bin/git-switch
 
@@ -37,8 +37,20 @@ install-completions:
   esac
 
 # Build a release binary.
-release:
+build-release:
   cargo build --release
+
+# Tag a release, bump Cargo.toml, push, and create a GitHub release.
+release tag:
+  #!/usr/bin/env sh
+  set -e
+  version="${1#v}"
+  sed -i '' "s/^version = \".*\"/version = \"$version\"/" Cargo.toml
+  cargo check --quiet
+  git add Cargo.toml Cargo.lock
+  git commit -m "chore: bump version to $version"
+  git push
+  echo "Now create a GitHub release: gh release create v$version --title v$version --notes '...'"
 
 # Run the test suite.
 test:
