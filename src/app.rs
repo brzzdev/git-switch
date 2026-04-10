@@ -1,4 +1,4 @@
-use console::{Key, Term, style};
+use console::{Key, Term, measure_text_width, style};
 use dialoguer::Select;
 use indicatif::ProgressBar;
 
@@ -123,22 +123,34 @@ fn prompt_delete_stale_branches(old_branch: Option<&str>) -> AppResult<()> {
     Ok(())
 }
 
+fn visual_rows(text: &str, width: usize) -> usize {
+    if width == 0 {
+        return 1;
+    }
+    let w = measure_text_width(text);
+    if w == 0 { 1 } else { w.div_ceil(width) }
+}
+
 fn multi_select(prompt: &str, items: &[String], defaults: &[bool]) -> AppResult<Vec<usize>> {
     let term = Term::stderr();
     let mut selected = defaults.to_vec();
     let mut cursor = 0usize;
-    let line_count = items.len() + 1;
     let header = format!("{} {}", style("?").green().bold(), style(prompt).bold());
 
     eprint!("\x1b[?25l"); // hide cursor
 
-    let draw = |cursor: usize, selected: &[bool]| {
+    let draw = |cursor: usize, selected: &[bool]| -> usize {
+        let width = term.size().1 as usize;
+        let mut rows = visual_rows(&header, width);
         eprintln!("{header}");
         for (i, item) in items.iter().enumerate() {
             let arrow = if i == cursor { ">" } else { " " };
             let check = if selected[i] { "[x]" } else { "[ ]" };
-            eprintln!("  {arrow} {check} {item}");
+            let line = format!("  {arrow} {check} {item}");
+            rows += visual_rows(&line, width);
+            eprintln!("{line}");
         }
+        rows
     };
 
     let clear = |n: usize| {
@@ -147,7 +159,7 @@ fn multi_select(prompt: &str, items: &[String], defaults: &[bool]) -> AppResult<
         }
     };
 
-    draw(cursor, &selected);
+    let mut drawn = draw(cursor, &selected);
 
     loop {
         match term.read_key()? {
@@ -158,15 +170,15 @@ fn multi_select(prompt: &str, items: &[String], defaults: &[bool]) -> AppResult<
             Key::ArrowLeft => selected.fill(false),
             Key::Enter => break,
             Key::Escape => {
-                clear(line_count);
+                clear(drawn);
                 eprint!("\x1b[?25h"); // show cursor
                 return Ok(vec![]);
             }
             _ => continue,
         }
 
-        clear(line_count);
-        draw(cursor, &selected);
+        clear(drawn);
+        drawn = draw(cursor, &selected);
     }
 
     eprint!("\x1b[?25h"); // show cursor
