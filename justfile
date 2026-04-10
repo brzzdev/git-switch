@@ -44,7 +44,8 @@ build-release:
 release tag:
   #!/usr/bin/env sh
   set -e
-  version="${1#v}"
+  version="{{tag}}"
+  version="${version#v}"
   sed -i '' "s/^version = \".*\"/version = \"$version\"/" Cargo.toml
   cargo check --quiet
   git add Cargo.toml Cargo.lock
