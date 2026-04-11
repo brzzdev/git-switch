@@ -1,3 +1,4 @@
+use std::collections::{HashMap, HashSet};
 use std::process::Command;
 
 use crate::AppResult;
@@ -119,26 +120,29 @@ pub fn stale_branches() -> AppResult<Vec<String>> {
     let keep = kept_branches();
 
     let merged_output = run(&["branch", "--format=%(refname:short)", "--merged"])?;
-    let tracking_output = run(&[
+    let refs_output = run(&[
         "for-each-ref",
-        "--format=%(refname:short) %(upstream) %(upstream:track)",
+        "--format=%(refname:short) %(objectname) %(upstream) %(upstream:track)",
         "refs/heads/",
     ])?;
 
-    let mut has_upstream = Vec::new();
-    let mut gone = Vec::new();
-    let mut local_only = Vec::new();
-    for line in tracking_output.lines() {
+    let mut tips: HashMap<&str, &str> = HashMap::new();
+    let mut has_upstream: HashSet<&str> = HashSet::new();
+    let mut gone: HashSet<&str> = HashSet::new();
+    let mut local_only: HashSet<&str> = HashSet::new();
+    for line in refs_output.lines() {
         let mut parts = line.split_whitespace();
         let Some(name) = parts.next() else { continue };
+        let Some(sha) = parts.next() else { continue };
+        tips.insert(name, sha);
         if parts.next().is_none() {
-            local_only.push(name);
+            local_only.insert(name);
             continue;
         }
         if line.ends_with("[gone]") {
-            gone.push(name);
+            gone.insert(name);
         } else {
-            has_upstream.push(name);
+            has_upstream.insert(name);
         }
     }
 
@@ -147,16 +151,17 @@ pub fn stale_branches() -> AppResult<Vec<String>> {
     let mut branches: Vec<String> = merged_output
         .lines()
         .filter(|b| {
+            let Some(tip) = tips.get(b) else { return false };
             if has_upstream.contains(b) {
-                has_unique_commits(b, &head)
+                has_unique_commits(b, tip, &head)
             } else if local_only.contains(b) {
-                is_behind_head(b, &head)
+                *tip != head
             } else {
                 false
             }
         })
-        .chain(gone)
-        .filter(|b| current.as_deref() != Some(*b) && !keep.iter().any(|k| k == b))
+        .chain(gone.iter().copied())
+        .filter(|b| current.as_deref() != Some(*b) && !keep.contains(*b))
         .map(String::from)
         .collect();
 
@@ -175,14 +180,12 @@ fn default_branch() -> Option<String> {
     None
 }
 
-fn kept_branches() -> Vec<String> {
-    let mut kept: Vec<String> = run(&["config", "--get-all", "git-switch.keep"])
+fn kept_branches() -> HashSet<String> {
+    let mut kept: HashSet<String> = run(&["config", "--get-all", "git-switch.keep"])
         .map(|o| o.lines().map(String::from).collect())
         .unwrap_or_default();
-    if let Some(default) = default_branch()
-        && !kept.contains(&default)
-    {
-        kept.push(default);
+    if let Some(default) = default_branch() {
+        kept.insert(default);
     }
     kept
 }
@@ -194,16 +197,6 @@ pub fn delete_branches(branches: &[&str]) -> AppResult<()> {
     Ok(())
 }
 
-/// Returns true if the branch tip is strictly behind HEAD. For a merged
-/// local-only branch this means its work has been incorporated into the main
-/// line and HEAD has advanced past it.
-fn is_behind_head(branch: &str, head: &str) -> bool {
-    let Ok(tip) = rev_parse(branch) else {
-        return false;
-    };
-    tip.trim() != head.trim()
-}
-
 /// Returns true if the branch had unique commits that were merged, not just a
 /// pointer to a commit already on the main line that never diverged.
 ///
@@ -211,21 +204,14 @@ fn is_behind_head(branch: &str, head: &str) -> bool {
 /// merge-base with HEAD and is strictly behind HEAD — this is not stale.
 /// A fast-forward-merged branch also has tip == merge-base, but its tip equals
 /// HEAD (or HEAD hasn't moved past it yet).
-fn has_unique_commits(branch: &str, head: &str) -> bool {
+fn has_unique_commits(branch: &str, tip: &str, head: &str) -> bool {
     let Ok(merge_base) = run(&["merge-base", head, branch]) else {
         return false;
     };
-    let Ok(tip) = rev_parse(branch) else {
-        return false;
-    };
-    let (merge_base, tip) = (merge_base.trim(), tip.trim());
-    // Branch diverged from main — it had unique work.
-    if merge_base != tip {
+    if merge_base.trim() != tip {
         return true;
     }
-    // merge-base == tip: branch never diverged. Only consider stale if HEAD
-    // hasn't moved past it (fast-forward merge that just happened).
-    tip == head.trim()
+    tip == head
 }
 
 fn rev_parse(refname: &str) -> AppResult<String> {
