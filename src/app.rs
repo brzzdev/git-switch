@@ -154,8 +154,8 @@ fn multi_select(prompt: &str, items: &[String], defaults: &[bool]) -> AppResult<
     };
 
     let clear = |n: usize| {
-        for _ in 0..n {
-            eprint!("\x1b[A\x1b[2K");
+        if n > 0 {
+            eprint!("\x1b[{n}F\x1b[J");
         }
     };
 
