@@ -22,6 +22,23 @@ pub fn local_branches() -> AppResult<Vec<String>> {
     Ok(branches)
 }
 
+pub fn remote_only_branches(local: &[String]) -> AppResult<Vec<String>> {
+    let output = run(&[
+        "for-each-ref",
+        "--format=%(refname:short)",
+        "refs/remotes/origin/",
+    ])?;
+    let locals: HashSet<&str> = local.iter().map(String::as_str).collect();
+    let branches = output
+        .lines()
+        .filter(|r| !r.ends_with("/HEAD"))
+        .filter_map(|r| r.strip_prefix("origin/"))
+        .filter(|name| !locals.contains(name))
+        .map(String::from)
+        .collect();
+    Ok(branches)
+}
+
 pub fn has_tracked_changes() -> AppResult<bool> {
     let output = run(&["status", "--porcelain", "--untracked-files=no"])?;
     Ok(!output.is_empty())

@@ -1,5 +1,5 @@
 use console::{Key, Term, measure_text_width, style};
-use dialoguer::Select;
+use dialoguer::FuzzySelect;
 use indicatif::ProgressBar;
 
 use crate::{AppResult, git};
@@ -80,22 +80,32 @@ fn report_update(result: git::MergeResult) -> AppResult<()> {
 }
 
 fn select_branch(current: Option<&str>) -> AppResult<String> {
-    let branches = git::local_branches()?;
-    if branches.is_empty() {
-        return Err("no local branches found".into());
+    let local = git::local_branches()?;
+    let remote_only = git::remote_only_branches(&local).unwrap_or_default();
+
+    if local.is_empty() && remote_only.is_empty() {
+        return Err("no branches found".into());
     }
+
+    let local_count = local.len();
+    let mut branches = local;
+    branches.extend(remote_only.iter().map(|b| format!("origin/{b}")));
 
     let default = current
         .and_then(|c| branches.iter().position(|b| b == c))
         .unwrap_or(0);
 
-    let selection = Select::new()
+    let selection = FuzzySelect::new()
         .with_prompt("Switch to")
         .items(&branches)
         .default(default)
         .interact()?;
 
-    Ok(branches[selection].clone())
+    if selection < local_count {
+        Ok(branches[selection].clone())
+    } else {
+        Ok(remote_only[selection - local_count].clone())
+    }
 }
 
 fn prompt_delete_stale_branches(old_branch: Option<&str>) -> AppResult<()> {
