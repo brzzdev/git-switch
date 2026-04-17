@@ -109,7 +109,23 @@ fn select_branch(current: Option<&str>) -> AppResult<String> {
 }
 
 fn prompt_delete_stale_branches(old_branch: Option<&str>) -> AppResult<()> {
-    let stale = git::stale_branches()?;
+    let all_stale = git::stale_branches()?;
+    if all_stale.is_empty() {
+        return Ok(());
+    }
+
+    let held = git::worktree_branches().unwrap_or_default();
+    let (locked, stale): (Vec<String>, Vec<String>) =
+        all_stale.into_iter().partition(|b| held.contains(b));
+
+    for branch in &locked {
+        eprintln!(
+            "{} stale but held by worktree, skipping: {}",
+            style("!").yellow().bold(),
+            branch
+        );
+    }
+
     if stale.is_empty() {
         return Ok(());
     }

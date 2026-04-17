@@ -207,6 +207,18 @@ fn kept_branches() -> HashSet<String> {
     kept
 }
 
+/// Branches currently checked out in any worktree (including the main one).
+/// These cannot be deleted with `git branch -D`.
+pub fn worktree_branches() -> AppResult<HashSet<String>> {
+    let output = run(&["worktree", "list", "--porcelain"])?;
+    let branches = output
+        .lines()
+        .filter_map(|l| l.strip_prefix("branch refs/heads/"))
+        .map(String::from)
+        .collect();
+    Ok(branches)
+}
+
 pub fn delete_branches(branches: &[&str]) -> AppResult<()> {
     let mut args = vec!["branch", "-D", "--quiet"];
     args.extend(branches);
