@@ -120,6 +120,27 @@ fn report_update(result: git::MergeResult) -> AppResult<()> {
     Ok(())
 }
 
+struct BranchOption {
+    display: String,
+    checkout: String,
+}
+
+impl BranchOption {
+    fn local(name: String) -> Self {
+        Self {
+            display: name.clone(),
+            checkout: name,
+        }
+    }
+
+    fn remote(name: String) -> Self {
+        Self {
+            display: format!("origin/{name}"),
+            checkout: name,
+        }
+    }
+}
+
 fn select_branch(current: Option<&str>) -> AppResult<Option<String>> {
     let local = git::local_branches()?;
     let remote_only = git::remote_only_branches(&local).unwrap_or_default();
@@ -128,16 +149,16 @@ fn select_branch(current: Option<&str>) -> AppResult<Option<String>> {
         return Err("no branches found".into());
     }
 
-    let branches: Vec<(String, String)> = local
+    let branches: Vec<BranchOption> = local
         .into_iter()
-        .map(|b| (b.clone(), b))
-        .chain(remote_only.into_iter().map(|b| (format!("origin/{b}"), b)))
+        .map(BranchOption::local)
+        .chain(remote_only.into_iter().map(BranchOption::remote))
         .collect();
 
-    let display: Vec<&str> = branches.iter().map(|(d, _)| d.as_str()).collect();
+    let display: Vec<&str> = branches.iter().map(|b| b.display.as_str()).collect();
 
     let default = current
-        .and_then(|c| branches.iter().position(|(_, checkout)| checkout == c))
+        .and_then(|c| branches.iter().position(|b| b.checkout == c))
         .unwrap_or(0);
 
     let selection = FuzzySelect::new()
@@ -147,7 +168,7 @@ fn select_branch(current: Option<&str>) -> AppResult<Option<String>> {
         .interact_opt()
         .map_err(std::io::Error::from)?;
 
-    Ok(selection.map(|i| branches[i].1.clone()))
+    Ok(selection.map(|i| branches[i].checkout.clone()))
 }
 
 fn prompt_delete_stale_branches(old_branch: Option<&str>) -> AppResult<()> {
