@@ -2,6 +2,12 @@
 name = "git-switch"
 version = "1.0.7"
 edition = "2024"
+categories = ["command-line-utilities", "development-tools"]
+description = "Interactive Git branch switcher with merged-branch cleanup"
+keywords = ["branch", "cli", "git"]
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/brzzdev/git-switch"
 
 [dependencies]
 console = "0.16"
