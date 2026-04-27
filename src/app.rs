@@ -121,25 +121,25 @@ fn select_branch(current: Option<&str>) -> AppResult<String> {
         return Err("no branches found".into());
     }
 
-    let local_count = local.len();
-    let mut branches = local;
-    branches.extend(remote_only.iter().map(|b| format!("origin/{b}")));
+    let branches: Vec<(String, String)> = local
+        .into_iter()
+        .map(|b| (b.clone(), b))
+        .chain(remote_only.into_iter().map(|b| (format!("origin/{b}"), b)))
+        .collect();
+
+    let display: Vec<&str> = branches.iter().map(|(d, _)| d.as_str()).collect();
 
     let default = current
-        .and_then(|c| branches.iter().position(|b| b == c))
+        .and_then(|c| branches.iter().position(|(_, checkout)| checkout == c))
         .unwrap_or(0);
 
     let selection = FuzzySelect::new()
         .with_prompt("Switch to")
-        .items(&branches)
+        .items(&display)
         .default(default)
         .interact()?;
 
-    if selection < local_count {
-        Ok(branches[selection].clone())
-    } else {
-        Ok(remote_only[selection - local_count].clone())
-    }
+    Ok(branches[selection].1.clone())
 }
 
 fn prompt_delete_stale_branches(old_branch: Option<&str>) -> AppResult<()> {
