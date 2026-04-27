@@ -46,7 +46,7 @@ release tag:
   set -e
   version="{{tag}}"
   version="${version#v}"
-  sed -i '' "s/^version = \".*\"/version = \"$version\"/" Cargo.toml
+  perl -i -pe "s/^version = \".*\"/version = \"$version\"/" Cargo.toml
   cargo check --quiet
   git add Cargo.toml Cargo.lock
   git commit -m "chore: bump version to $version"
