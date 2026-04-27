@@ -15,6 +15,11 @@ pub enum StashPopOutcome {
     Conflict,
 }
 
+pub enum FetchOutcome {
+    Ok,
+    Failed(String),
+}
+
 pub fn current_branch() -> AppResult<Option<String>> {
     let output = run(&["branch", "--show-current"])?;
     let name = output.trim().to_string();
@@ -100,12 +105,15 @@ pub fn checkout(branch: &str) -> AppResult<()> {
     Ok(())
 }
 
-pub fn fetch() -> AppResult<bool> {
-    let status = Command::new("git")
+pub fn fetch() -> AppResult<FetchOutcome> {
+    let output = Command::new("git")
         .args(["fetch", "--quiet", "--prune", "origin"])
-        .stderr(std::process::Stdio::null())
-        .status()?;
-    Ok(status.success())
+        .output()?;
+    if output.status.success() {
+        return Ok(FetchOutcome::Ok);
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    Ok(FetchOutcome::Failed(stderr))
 }
 
 pub fn fast_forward_merge(branch: &str) -> AppResult<MergeResult> {
