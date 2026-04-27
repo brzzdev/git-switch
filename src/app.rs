@@ -70,23 +70,27 @@ fn switch_and_update(target: &str, old_branch: Option<&str>) -> AppResult<()> {
         git::checkout(target)?;
     }
 
-    let (fetch_ok, merge_result) = {
+    let (fetch_outcome, merge_result) = {
         let spinner = ProgressBar::new_spinner().with_message(format!("Updating {target}…"));
         let _cursor_guard = CursorGuard::hide();
         spinner.enable_steady_tick(std::time::Duration::from_millis(80));
 
-        let fetch_ok = git::fetch().unwrap_or(false);
+        let fetch_outcome =
+            git::fetch().unwrap_or_else(|e| git::FetchOutcome::Failed(e.to_string()));
         let result = git::fast_forward_merge(target);
 
         spinner.finish_and_clear();
-        (fetch_ok, result)
+        (fetch_outcome, result)
     };
 
-    if !fetch_ok {
+    if let git::FetchOutcome::Failed(detail) = &fetch_outcome {
         eprintln!(
             "{} fetch failed; results may be stale",
             style("!").yellow().bold()
         );
+        for line in detail.lines() {
+            eprintln!("  {line}");
+        }
     }
 
     report_update(merge_result?)?;
