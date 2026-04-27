@@ -44,11 +44,19 @@ pub fn run(target: Option<&str>) -> AppResult<()> {
             eprintln!("Switching back to {old} and restoring stashed changes.");
             let _ = git::checkout(old);
         }
-        if let Err(e) = git::stash_pop() {
-            eprintln!("error: {e}");
-            eprintln!(
-                "Conflicts detected. Resolve them, then run `git stash drop` to clean up the stash entry."
-            );
+        match git::stash_pop() {
+            Ok(git::StashPopOutcome::Clean) => {}
+            Ok(git::StashPopOutcome::Conflict) => {
+                eprintln!(
+                    "Conflicts detected restoring stashed changes. Resolve them, then run `git stash drop` to clean up the stash entry."
+                );
+            }
+            Err(e) => {
+                eprintln!("error: {e}");
+                eprintln!(
+                    "Stash pop failed. Inspect `git status` and `git stash list` to recover manually."
+                );
+            }
         }
     }
 

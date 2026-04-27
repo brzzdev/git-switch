@@ -155,8 +155,8 @@ fn stash_pop_conflict_shows_guidance() {
 
     let stderr = stderr_str(&output);
     assert!(
-        stderr.contains("git stash pop"),
-        "expected stash guidance in stderr, got: {stderr}"
+        stderr.contains("Conflicts detected"),
+        "expected conflict-specific guidance in stderr, got: {stderr}"
     );
 
     // The stash should still be present for manual recovery.
