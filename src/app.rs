@@ -62,18 +62,26 @@ fn switch_and_update(target: &str, old_branch: Option<&str>) -> AppResult<()> {
         git::checkout(target)?;
     }
 
-    let merge_result = {
+    let (fetch_ok, merge_result) = {
         let spinner = ProgressBar::new_spinner().with_message(format!("Updating {target}…"));
         let _cursor_guard = CursorGuard::hide();
         spinner.enable_steady_tick(std::time::Duration::from_millis(80));
 
-        let _ = git::fetch();
-        let result = git::fast_forward_merge(target)?;
+        let fetch_ok = git::fetch().unwrap_or(false);
+        let result = git::fast_forward_merge(target);
 
         spinner.finish_and_clear();
-        result
+        (fetch_ok, result)
     };
-    report_update(merge_result)?;
+
+    if !fetch_ok {
+        eprintln!(
+            "{} fetch failed; results may be stale",
+            style("!").yellow().bold()
+        );
+    }
+
+    report_update(merge_result?)?;
 
     prompt_delete_stale_branches(if already_on_target { None } else { old_branch })?;
 
