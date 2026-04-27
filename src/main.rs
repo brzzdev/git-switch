@@ -1,6 +1,11 @@
 use std::process;
 
 fn main() {
+    let _ = ctrlc::set_handler(|| {
+        let _ = console::Term::stderr().show_cursor();
+        process::exit(130);
+    });
+
     let target = match std::env::args().nth(1).as_deref() {
         Some("--help" | "-h") => {
             println!("Usage: git-switch [<branch>]");
