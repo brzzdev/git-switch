@@ -228,7 +228,7 @@ fn multi_select(prompt: &str, items: &[String], defaults: &[bool]) -> AppResult<
     loop {
         match term.read_key()? {
             Key::ArrowUp if cursor > 0 => cursor -= 1,
-            Key::ArrowDown if cursor < items.len() - 1 => cursor += 1,
+            Key::ArrowDown if cursor + 1 < items.len() => cursor += 1,
             Key::Char(' ') => selected[cursor] = !selected[cursor],
             Key::ArrowRight => selected.fill(true),
             Key::ArrowLeft => selected.fill(false),
