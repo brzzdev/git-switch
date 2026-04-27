@@ -10,6 +10,11 @@ pub enum MergeResult {
     NoRemote,
 }
 
+pub enum StashPopOutcome {
+    Clean,
+    Conflict,
+}
+
 pub fn current_branch() -> AppResult<Option<String>> {
     let output = run(&["branch", "--show-current"])?;
     let name = output.trim().to_string();
@@ -49,19 +54,25 @@ pub fn stash_push() -> AppResult<()> {
     Ok(())
 }
 
-pub fn stash_pop() -> AppResult<()> {
+pub fn stash_pop() -> AppResult<StashPopOutcome> {
     let output = Command::new("git").args(["stash", "pop"]).output()?;
-    if !output.status.success() {
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let detail = if stdout.trim().is_empty() {
-            stderr.trim().to_string()
-        } else {
-            stdout.trim().to_string()
-        };
-        return Err(format!("git stash pop: {detail}").into());
+    if output.status.success() {
+        return Ok(StashPopOutcome::Clean);
     }
-    Ok(())
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if stdout.contains("CONFLICT") || stderr.contains("CONFLICT") {
+        return Ok(StashPopOutcome::Conflict);
+    }
+
+    let stdout_trimmed = stdout.trim();
+    let detail = if stdout_trimmed.is_empty() {
+        stderr.trim()
+    } else {
+        stdout_trimmed
+    };
+    Err(format!("git stash pop: {detail}").into())
 }
 
 pub fn checkout(branch: &str) -> AppResult<()> {
