@@ -25,7 +25,10 @@ pub fn run(target: Option<&str>) -> AppResult<()> {
 
     let target = match target {
         Some(name) => name.to_string(),
-        None => select_branch(old_branch.as_deref())?,
+        None => match select_branch(old_branch.as_deref())? {
+            Some(t) => t,
+            None => return Ok(()),
+        },
     };
 
     let stashed = if git::has_tracked_changes()? {
@@ -117,7 +120,7 @@ fn report_update(result: git::MergeResult) -> AppResult<()> {
     Ok(())
 }
 
-fn select_branch(current: Option<&str>) -> AppResult<String> {
+fn select_branch(current: Option<&str>) -> AppResult<Option<String>> {
     let local = git::local_branches()?;
     let remote_only = git::remote_only_branches(&local).unwrap_or_default();
 
@@ -141,9 +144,9 @@ fn select_branch(current: Option<&str>) -> AppResult<String> {
         .with_prompt("Switch to")
         .items(&display)
         .default(default)
-        .interact()?;
+        .interact_opt()?;
 
-    Ok(branches[selection].1.clone())
+    Ok(selection.map(|i| branches[i].1.clone()))
 }
 
 fn prompt_delete_stale_branches(old_branch: Option<&str>) -> AppResult<()> {
