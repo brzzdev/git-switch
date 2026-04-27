@@ -4,6 +4,22 @@ use indicatif::ProgressBar;
 
 use crate::{AppResult, git};
 
+struct CursorGuard(Term);
+
+impl CursorGuard {
+    fn hide() -> Self {
+        let term = Term::stderr();
+        let _ = term.hide_cursor();
+        Self(term)
+    }
+}
+
+impl Drop for CursorGuard {
+    fn drop(&mut self) {
+        let _ = self.0.show_cursor();
+    }
+}
+
 pub fn run(target: Option<&str>) -> AppResult<()> {
     let old_branch = git::current_branch()?;
 
@@ -46,15 +62,17 @@ fn switch_and_update(target: &str, old_branch: Option<&str>) -> AppResult<()> {
         git::checkout(target)?;
     }
 
-    let spinner = ProgressBar::new_spinner().with_message(format!("Updating {target}…"));
-    eprint!("\x1b[?25l"); // hide cursor
-    spinner.enable_steady_tick(std::time::Duration::from_millis(80));
+    let merge_result = {
+        let spinner = ProgressBar::new_spinner().with_message(format!("Updating {target}…"));
+        let _cursor_guard = CursorGuard::hide();
+        spinner.enable_steady_tick(std::time::Duration::from_millis(80));
 
-    let _ = git::fetch();
-    let merge_result = git::fast_forward_merge(target)?;
+        let _ = git::fetch();
+        let result = git::fast_forward_merge(target)?;
 
-    spinner.finish_and_clear();
-    eprint!("\x1b[?25h"); // show cursor
+        spinner.finish_and_clear();
+        result
+    };
     report_update(merge_result)?;
 
     prompt_delete_stale_branches(if already_on_target { None } else { old_branch })?;
@@ -163,7 +181,7 @@ fn multi_select(prompt: &str, items: &[String], defaults: &[bool]) -> AppResult<
     let mut cursor = 0usize;
     let header = format!("{} {}", style("?").green().bold(), style(prompt).bold());
 
-    eprint!("\x1b[?25l"); // hide cursor
+    let _cursor_guard = CursorGuard::hide();
 
     let draw = |cursor: usize, selected: &[bool]| -> usize {
         let width = term.size().1 as usize;
@@ -197,7 +215,6 @@ fn multi_select(prompt: &str, items: &[String], defaults: &[bool]) -> AppResult<
             Key::Enter => break,
             Key::Escape => {
                 clear(drawn);
-                eprint!("\x1b[?25h"); // show cursor
                 return Ok(vec![]);
             }
             _ => continue,
@@ -206,8 +223,6 @@ fn multi_select(prompt: &str, items: &[String], defaults: &[bool]) -> AppResult<
         clear(drawn);
         drawn = draw(cursor, &selected);
     }
-
-    eprint!("\x1b[?25h"); // show cursor
 
     Ok(selected
         .iter()
