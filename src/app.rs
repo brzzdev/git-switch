@@ -22,10 +22,11 @@ impl Drop for CursorGuard {
 
 pub fn run(target: Option<&str>) -> AppResult<()> {
     let old_branch = git::current_branch()?;
+    let remote = git::current_remote(old_branch.as_deref());
 
     let target = match target {
         Some(name) => name.to_string(),
-        None => match select_branch(old_branch.as_deref())? {
+        None => match select_branch(old_branch.as_deref(), &remote)? {
             Some(t) => t,
             None => return Ok(()),
         },
@@ -38,7 +39,7 @@ pub fn run(target: Option<&str>) -> AppResult<()> {
         false
     };
 
-    let result = switch_and_update(&target, old_branch.as_deref());
+    let result = switch_and_update(&target, old_branch.as_deref(), &remote);
 
     if stashed {
         if result.is_err()
@@ -66,7 +67,7 @@ pub fn run(target: Option<&str>) -> AppResult<()> {
     result
 }
 
-fn switch_and_update(target: &str, old_branch: Option<&str>) -> AppResult<()> {
+fn switch_and_update(target: &str, old_branch: Option<&str>, remote: &str) -> AppResult<()> {
     let already_on_target = old_branch.is_some_and(|b| b == target);
 
     if !already_on_target {
@@ -79,8 +80,8 @@ fn switch_and_update(target: &str, old_branch: Option<&str>) -> AppResult<()> {
         spinner.enable_steady_tick(std::time::Duration::from_millis(80));
 
         let fetch_outcome =
-            git::fetch().unwrap_or_else(|e| git::FetchOutcome::Failed(e.to_string()));
-        let result = git::fast_forward_merge(target);
+            git::fetch(remote).unwrap_or_else(|e| git::FetchOutcome::Failed(e.to_string()));
+        let result = git::fast_forward_merge(target, remote);
 
         spinner.finish_and_clear();
         (fetch_outcome, result)
@@ -96,14 +97,14 @@ fn switch_and_update(target: &str, old_branch: Option<&str>) -> AppResult<()> {
         }
     }
 
-    report_update(merge_result?)?;
+    report_update(merge_result?, remote)?;
 
-    prompt_delete_stale_branches(if already_on_target { None } else { old_branch })?;
+    prompt_delete_stale_branches(if already_on_target { None } else { old_branch }, remote)?;
 
     Ok(())
 }
 
-fn report_update(result: git::MergeResult) -> AppResult<()> {
+fn report_update(result: git::MergeResult, remote: &str) -> AppResult<()> {
     match result {
         git::MergeResult::UpToDate => println!("Already up to date."),
         git::MergeResult::Pulled(1) => println!("Pulled 1 commit."),
@@ -111,8 +112,8 @@ fn report_update(result: git::MergeResult) -> AppResult<()> {
         git::MergeResult::NoRemote => println!("No remote tracking branch."),
         git::MergeResult::Diverged(branch) => {
             eprintln!(
-                "Local branch has diverged from origin/{branch}.\n\
-                 Run `git rebase origin/{branch}` or `git merge origin/{branch}` to reconcile."
+                "Local branch has diverged from {remote}/{branch}.\n\
+                 Run `git rebase {remote}/{branch}` or `git merge {remote}/{branch}` to reconcile."
             );
             return Err("branch diverged from remote".into());
         }
@@ -133,17 +134,17 @@ impl BranchOption {
         }
     }
 
-    fn remote(name: String) -> Self {
+    fn remote(name: String, remote: &str) -> Self {
         Self {
-            display: format!("origin/{name}"),
+            display: format!("{remote}/{name}"),
             checkout: name,
         }
     }
 }
 
-fn select_branch(current: Option<&str>) -> AppResult<Option<String>> {
+fn select_branch(current: Option<&str>, remote: &str) -> AppResult<Option<String>> {
     let local = git::local_branches()?;
-    let remote_only = git::remote_only_branches(&local).unwrap_or_default();
+    let remote_only = git::remote_only_branches(&local, remote).unwrap_or_default();
 
     if local.is_empty() && remote_only.is_empty() {
         return Err("no branches found".into());
@@ -152,7 +153,11 @@ fn select_branch(current: Option<&str>) -> AppResult<Option<String>> {
     let branches: Vec<BranchOption> = local
         .into_iter()
         .map(BranchOption::local)
-        .chain(remote_only.into_iter().map(BranchOption::remote))
+        .chain(
+            remote_only
+                .into_iter()
+                .map(|name| BranchOption::remote(name, remote)),
+        )
         .collect();
 
     let display: Vec<&str> = branches.iter().map(|b| b.display.as_str()).collect();
@@ -171,8 +176,8 @@ fn select_branch(current: Option<&str>) -> AppResult<Option<String>> {
     Ok(selection.map(|i| branches[i].checkout.clone()))
 }
 
-fn prompt_delete_stale_branches(old_branch: Option<&str>) -> AppResult<()> {
-    let all_stale = git::stale_branches()?;
+fn prompt_delete_stale_branches(old_branch: Option<&str>, remote: &str) -> AppResult<()> {
+    let all_stale = git::stale_branches(remote)?;
     if all_stale.is_empty() {
         return Ok(());
     }

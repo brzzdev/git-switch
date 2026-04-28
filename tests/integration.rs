@@ -40,6 +40,10 @@ fn git_switch(dir: &Path, branch: &str) -> Output {
 
 /// Create a bare "remote" and a working clone with one commit on `main`.
 fn setup() -> (TempDir, TempDir) {
+    setup_with_remote("origin")
+}
+
+fn setup_with_remote(remote: &str) -> (TempDir, TempDir) {
     let bare = TempDir::new().unwrap();
     let work = TempDir::new().unwrap();
 
@@ -48,24 +52,28 @@ fn setup() -> (TempDir, TempDir) {
     git(work.path(), &["init", "-b", "main"]);
     git(
         work.path(),
-        &["remote", "add", "origin", bare.path().to_str().unwrap()],
+        &["remote", "add", remote, bare.path().to_str().unwrap()],
     );
 
     fs::write(work.path().join("file.txt"), "hello\n").unwrap();
     git(work.path(), &["add", "file.txt"]);
     git(work.path(), &["commit", "-m", "initial"]);
-    git(work.path(), &["push", "-u", "origin", "main"]);
+    git(work.path(), &["push", "-u", remote, "main"]);
 
     (bare, work)
 }
 
-/// Push a commit to `origin/main` that the working tree doesn't have.
+/// Push a commit to `<remote>/main` that the working tree doesn't have.
 /// Works by committing locally, pushing, then rewinding.
 fn push_upstream_change(work: &Path, file: &str, content: &str, msg: &str) {
+    push_upstream_change_to(work, "origin", file, content, msg);
+}
+
+fn push_upstream_change_to(work: &Path, remote: &str, file: &str, content: &str, msg: &str) {
     fs::write(work.join(file), content).unwrap();
     git(work, &["add", file]);
     git(work, &["commit", "-m", msg]);
-    git(work, &["push", "origin", "main"]);
+    git(work, &["push", remote, "main"]);
     git(work, &["reset", "--hard", "HEAD~1"]);
 }
 
@@ -218,7 +226,7 @@ fn local_only_branch_not_stale_right_after_merge() {
 
     let original = std::env::current_dir().unwrap();
     std::env::set_current_dir(work.path()).unwrap();
-    let stale = git_switch::git::stale_branches().unwrap();
+    let stale = git_switch::git::stale_branches("origin").unwrap();
     std::env::set_current_dir(&original).unwrap();
 
     assert!(
@@ -246,7 +254,7 @@ fn local_only_branch_stale_after_main_advances() {
 
     let original = std::env::current_dir().unwrap();
     std::env::set_current_dir(work.path()).unwrap();
-    let stale = git_switch::git::stale_branches().unwrap();
+    let stale = git_switch::git::stale_branches("origin").unwrap();
     std::env::set_current_dir(&original).unwrap();
 
     assert!(
@@ -273,7 +281,7 @@ fn merged_tracked_branch_is_stale() {
 
     let original = std::env::current_dir().unwrap();
     std::env::set_current_dir(work.path()).unwrap();
-    let stale = git_switch::git::stale_branches().unwrap();
+    let stale = git_switch::git::stale_branches("origin").unwrap();
     std::env::set_current_dir(&original).unwrap();
 
     assert!(
@@ -298,7 +306,7 @@ fn tracked_branch_without_unique_commits_not_stale() {
 
     let original = std::env::current_dir().unwrap();
     std::env::set_current_dir(work.path()).unwrap();
-    let stale = git_switch::git::stale_branches().unwrap();
+    let stale = git_switch::git::stale_branches("origin").unwrap();
     std::env::set_current_dir(&original).unwrap();
 
     assert!(
@@ -404,6 +412,56 @@ fn version_flag_prints_version() {
     assert_eq!(
         stdout_str(&output).trim(),
         format!("git-switch {}", env!("CARGO_PKG_VERSION"))
+    );
+}
+
+#[test]
+fn non_origin_remote_pulls_via_branch_config() {
+    let (_bare, work) = setup_with_remote("upstream");
+
+    push_upstream_change_to(
+        work.path(),
+        "upstream",
+        "file.txt",
+        "updated\n",
+        "upstream change",
+    );
+
+    let output = git_switch(work.path(), "main");
+
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+    assert!(
+        stdout_str(&output).contains("Pulled 1 commit"),
+        "stdout: {}",
+        stdout_str(&output)
+    );
+
+    let content = fs::read_to_string(work.path().join("file.txt")).unwrap();
+    assert_eq!(content, "updated\n");
+}
+
+#[test]
+fn non_origin_remote_detects_stale_branch() {
+    let _lock = CWD_LOCK.lock().unwrap();
+    let (_bare, work) = setup_with_remote("upstream");
+
+    git(work.path(), &["checkout", "-b", "feature-done"]);
+    fs::write(work.path().join("feature.txt"), "done\n").unwrap();
+    git(work.path(), &["add", "feature.txt"]);
+    git(work.path(), &["commit", "-m", "feature"]);
+    git(work.path(), &["push", "-u", "upstream", "feature-done"]);
+    git(work.path(), &["checkout", "main"]);
+    git(work.path(), &["merge", "feature-done"]);
+    git(work.path(), &["push", "upstream", "main"]);
+
+    let original = std::env::current_dir().unwrap();
+    std::env::set_current_dir(work.path()).unwrap();
+    let stale = git_switch::git::stale_branches("upstream").unwrap();
+    std::env::set_current_dir(&original).unwrap();
+
+    assert!(
+        stale.contains(&"feature-done".to_string()),
+        "merged branch with upstream remote should be stale, got: {stale:?}"
     );
 }
 
