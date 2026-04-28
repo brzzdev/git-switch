@@ -309,5 +309,5 @@ fn run(args: &[&str]) -> AppResult<String> {
             message: stderr.trim().to_string(),
         });
     }
-    Ok(String::from_utf8(output.stdout)?)
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
