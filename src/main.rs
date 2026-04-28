@@ -20,8 +20,8 @@ fn main() {
     };
 
     if let Err(e) = git_switch::app::run(target.as_deref()) {
-        if e.downcast_ref::<std::io::Error>()
-            .is_some_and(|io| io.kind() == std::io::ErrorKind::Interrupted)
+        if let git_switch::Error::Io(io) = &e
+            && io.kind() == std::io::ErrorKind::Interrupted
         {
             let _ = console::Term::stderr().show_cursor();
             process::exit(130);

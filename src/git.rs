@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::process::Command;
 
-use crate::AppResult;
+use crate::{AppResult, Error};
 
 pub enum MergeResult {
     UpToDate,
@@ -102,7 +102,10 @@ pub fn stash_pop() -> AppResult<StashPopOutcome> {
     } else {
         stdout_trimmed
     };
-    Err(format!("git stash pop: {detail}").into())
+    Err(Error::Git {
+        command: "stash pop".to_string(),
+        message: detail.to_string(),
+    })
 }
 
 pub fn checkout(branch: &str) -> AppResult<()> {
@@ -115,7 +118,10 @@ pub fn checkout(branch: &str) -> AppResult<()> {
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     if !stderr.contains("Submodule") || !stderr.contains("could not be updated") {
-        return Err(format!("git checkout: {}", stderr.trim()).into());
+        return Err(Error::Git {
+            command: "checkout".to_string(),
+            message: stderr.trim().to_string(),
+        });
     }
 
     // Submodule checkout failed — likely missing objects. Fetch inside
@@ -298,12 +304,10 @@ fn run(args: &[&str]) -> AppResult<String> {
     let output = Command::new("git").args(args).output()?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!(
-            "git {}: {}",
-            args.first().unwrap_or(&"<unknown>"),
-            stderr.trim()
-        )
-        .into());
+        return Err(Error::Git {
+            command: args.first().copied().unwrap_or("<unknown>").to_string(),
+            message: stderr.trim().to_string(),
+        });
     }
     Ok(String::from_utf8(output.stdout)?)
 }

@@ -2,7 +2,7 @@ use console::{Key, Term, measure_text_width, style};
 use dialoguer::FuzzySelect;
 use indicatif::ProgressBar;
 
-use crate::{AppResult, git};
+use crate::{AppResult, Error, git};
 
 struct CursorGuard(Term);
 
@@ -115,7 +115,7 @@ fn report_update(result: git::MergeResult, remote: &str) -> AppResult<()> {
                 "Local branch has diverged from {remote}/{branch}.\n\
                  Run `git rebase {remote}/{branch}` or `git merge {remote}/{branch}` to reconcile."
             );
-            return Err("branch diverged from remote".into());
+            return Err(Error::Diverged);
         }
     }
     Ok(())
@@ -147,7 +147,7 @@ fn select_branch(current: Option<&str>, remote: &str) -> AppResult<Option<String
     let remote_only = git::remote_only_branches(&local, remote).unwrap_or_default();
 
     if local.is_empty() && remote_only.is_empty() {
-        return Err("no branches found".into());
+        return Err(Error::NoBranches);
     }
 
     let branches: Vec<BranchOption> = local
