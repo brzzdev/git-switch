@@ -144,7 +144,8 @@ fn select_branch(current: Option<&str>) -> AppResult<Option<String>> {
         .with_prompt("Switch to")
         .items(&display)
         .default(default)
-        .interact_opt()?;
+        .interact_opt()
+        .map_err(std::io::Error::from)?;
 
     Ok(selection.map(|i| branches[i].1.clone()))
 }
