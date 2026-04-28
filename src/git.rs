@@ -33,12 +33,12 @@ pub fn current_branch() -> AppResult<Option<String>> {
 pub fn current_remote(current: Option<&str>) -> String {
     if let Some(branch) = current
         && let Ok(output) = run(&["config", "--get", &format!("branch.{branch}.remote")])
-    {
-        let name = output.trim();
+        && let Some(name) = output.lines().next().map(str::trim)
+        && !name.is_empty()
         // `.` means push to the local repo — useless for fetch/merge.
-        if !name.is_empty() && name != "." {
-            return name.to_string();
-        }
+        && name != "."
+    {
+        return name.to_string();
     }
 
     if let Ok(output) = run(&["remote"]) {

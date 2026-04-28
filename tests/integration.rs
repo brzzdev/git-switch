@@ -466,6 +466,24 @@ fn non_origin_remote_detects_stale_branch() {
 }
 
 #[test]
+fn current_remote_handles_multiline_config_value() {
+    let _lock = CWD_LOCK.lock().unwrap();
+    let (_bare, work) = setup_with_remote("upstream");
+
+    git(
+        work.path(),
+        &["config", "branch.main.remote", "upstream\nstray"],
+    );
+
+    let original = std::env::current_dir().unwrap();
+    std::env::set_current_dir(work.path()).unwrap();
+    let remote = git_switch::git::current_remote(Some("main"));
+    std::env::set_current_dir(&original).unwrap();
+
+    assert_eq!(remote, "upstream");
+}
+
+#[test]
 fn detached_head_can_switch_to_branch() {
     let (_bare, work) = setup();
 
