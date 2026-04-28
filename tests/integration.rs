@@ -306,3 +306,117 @@ fn tracked_branch_without_unique_commits_not_stale() {
         "branch with no unique commits should not be stale, got: {stale:?}"
     );
 }
+
+#[test]
+fn delete_branches_removes_listed_branches() {
+    let _lock = CWD_LOCK.lock().unwrap();
+    let (_bare, work) = setup();
+
+    for name in ["feat-a", "feat-b"] {
+        git(work.path(), &["checkout", "-b", name]);
+        fs::write(work.path().join(format!("{name}.txt")), "x\n").unwrap();
+        git(work.path(), &["add", "."]);
+        git(work.path(), &["commit", "-m", name]);
+        git(work.path(), &["checkout", "main"]);
+        git(
+            work.path(),
+            &["merge", "--no-ff", name, "-m", &format!("merge {name}")],
+        );
+    }
+
+    let original = std::env::current_dir().unwrap();
+    std::env::set_current_dir(work.path()).unwrap();
+    let result = git_switch::git::delete_branches(&["feat-a", "feat-b"]);
+    std::env::set_current_dir(&original).unwrap();
+
+    result.expect("delete_branches should succeed");
+
+    let listing = git(work.path(), &["branch", "--format=%(refname:short)"]);
+    let names = stdout_str(&listing);
+    for name in ["feat-a", "feat-b"] {
+        assert!(
+            !names.lines().any(|l| l == name),
+            "{name} should be deleted, got: {names}"
+        );
+    }
+}
+
+#[test]
+fn worktree_held_stale_branch_is_skipped_with_warning() {
+    let (_bare, work) = setup();
+
+    git(work.path(), &["checkout", "-b", "wip"]);
+    fs::write(work.path().join("wip.txt"), "x\n").unwrap();
+    git(work.path(), &["add", "wip.txt"]);
+    git(work.path(), &["commit", "-m", "wip"]);
+    git(work.path(), &["push", "-u", "origin", "wip"]);
+    git(work.path(), &["checkout", "main"]);
+    git(work.path(), &["merge", "wip"]);
+    git(work.path(), &["push", "origin", "main"]);
+
+    let parent = TempDir::new().unwrap();
+    let worktree_path = parent.path().join("wt");
+    git(
+        work.path(),
+        &["worktree", "add", worktree_path.to_str().unwrap(), "wip"],
+    );
+
+    let output = git_switch(work.path(), "main");
+
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+
+    let stderr = stderr_str(&output);
+    assert!(
+        stderr.contains("stale but held by worktree, skipping: wip"),
+        "expected worktree-held warning, got: {stderr}"
+    );
+
+    let branches = git(
+        work.path(),
+        &["branch", "--list", "--format=%(refname:short)"],
+    );
+    assert!(
+        stdout_str(&branches).lines().any(|l| l == "wip"),
+        "wip should still exist, got: {}",
+        stdout_str(&branches)
+    );
+}
+
+#[test]
+fn help_flag_prints_usage() {
+    let dir = TempDir::new().unwrap();
+    let output = git_switch(dir.path(), "--help");
+
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+    let out = stdout_str(&output);
+    assert!(
+        out.contains("Usage: git-switch"),
+        "expected usage line, got: {out}"
+    );
+}
+
+#[test]
+fn version_flag_prints_version() {
+    let dir = TempDir::new().unwrap();
+    let output = git_switch(dir.path(), "--version");
+
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+    assert_eq!(
+        stdout_str(&output).trim(),
+        format!("git-switch {}", env!("CARGO_PKG_VERSION"))
+    );
+}
+
+#[test]
+fn detached_head_can_switch_to_branch() {
+    let (_bare, work) = setup();
+
+    git(work.path(), &["checkout", "--detach", "HEAD"]);
+
+    let output = git_switch(work.path(), "main");
+
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+
+    let head = git(work.path(), &["branch", "--show-current"]);
+    assert_eq!(stdout_str(&head).trim(), "main");
+}
