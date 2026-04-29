@@ -248,9 +248,7 @@ fn multi_select(prompt: &str, items: &[String], defaults: &[bool]) -> AppResult<
     };
 
     let clear = |n: usize| {
-        if n > 0 {
-            eprint!("\x1b[{n}F\x1b[J");
-        }
+        let _ = term.clear_last_lines(n);
     };
 
     let mut drawn = draw(cursor, &selected);
