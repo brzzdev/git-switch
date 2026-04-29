@@ -1,11 +1,37 @@
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard, PoisonError};
 use tempfile::TempDir;
 
-/// Guards tests that call library functions relying on process cwd.
+/// Serializes tests that mutate process cwd while calling library functions.
 static CWD_LOCK: Mutex<()> = Mutex::new(());
+
+/// Locks `CWD_LOCK`, switches process cwd, and restores the previous cwd on
+/// drop — even on panic. Without this, a panicking test would leave cwd at a
+/// deleted `TempDir` and cascade failures into unrelated tests.
+struct CwdGuard {
+    _lock: MutexGuard<'static, ()>,
+    original: PathBuf,
+}
+
+impl Drop for CwdGuard {
+    fn drop(&mut self) {
+        let _ = std::env::set_current_dir(&self.original);
+    }
+}
+
+fn cwd_at(path: &Path) -> CwdGuard {
+    // Poisoning is safe to recover from: the guard always restores cwd, so
+    // the mutex's protected state is in fact consistent.
+    let lock = CWD_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
+    let original = std::env::current_dir().unwrap();
+    std::env::set_current_dir(path).unwrap();
+    CwdGuard {
+        _lock: lock,
+        original,
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -212,7 +238,6 @@ fn diverged_branch_reports_error() {
 
 #[test]
 fn local_only_branch_not_stale_right_after_merge() {
-    let _lock = CWD_LOCK.lock().unwrap();
     let (_bare, work) = setup();
 
     // Create a local-only branch (never pushed) and merge it into main.
@@ -224,10 +249,8 @@ fn local_only_branch_not_stale_right_after_merge() {
     git(work.path(), &["checkout", "main"]);
     git(work.path(), &["merge", "local-experiment"]);
 
-    let original = std::env::current_dir().unwrap();
-    std::env::set_current_dir(work.path()).unwrap();
+    let _cwd = cwd_at(work.path());
     let stale = git_switch::git::stale_branches("origin").unwrap();
-    std::env::set_current_dir(&original).unwrap();
 
     assert!(
         !stale.contains(&"local-experiment".to_string()),
@@ -237,7 +260,6 @@ fn local_only_branch_not_stale_right_after_merge() {
 
 #[test]
 fn local_only_branch_stale_after_main_advances() {
-    let _lock = CWD_LOCK.lock().unwrap();
     let (_bare, work) = setup();
 
     // Create a local-only branch, merge it, then advance main past it.
@@ -252,10 +274,8 @@ fn local_only_branch_stale_after_main_advances() {
     push_upstream_change(work.path(), "advance.txt", "new\n", "advance main");
     git(work.path(), &["pull", "origin", "main"]);
 
-    let original = std::env::current_dir().unwrap();
-    std::env::set_current_dir(work.path()).unwrap();
+    let _cwd = cwd_at(work.path());
     let stale = git_switch::git::stale_branches("origin").unwrap();
-    std::env::set_current_dir(&original).unwrap();
 
     assert!(
         stale.contains(&"local-merged".to_string()),
@@ -265,7 +285,6 @@ fn local_only_branch_stale_after_main_advances() {
 
 #[test]
 fn merged_tracked_branch_is_stale() {
-    let _lock = CWD_LOCK.lock().unwrap();
     let (_bare, work) = setup();
 
     // Create a branch, push it, then merge into main.
@@ -279,10 +298,8 @@ fn merged_tracked_branch_is_stale() {
     git(work.path(), &["merge", "feature-done"]);
     git(work.path(), &["push", "origin", "main"]);
 
-    let original = std::env::current_dir().unwrap();
-    std::env::set_current_dir(work.path()).unwrap();
+    let _cwd = cwd_at(work.path());
     let stale = git_switch::git::stale_branches("origin").unwrap();
-    std::env::set_current_dir(&original).unwrap();
 
     assert!(
         stale.contains(&"feature-done".to_string()),
@@ -292,7 +309,6 @@ fn merged_tracked_branch_is_stale() {
 
 #[test]
 fn tracked_branch_without_unique_commits_not_stale() {
-    let _lock = CWD_LOCK.lock().unwrap();
     let (_bare, work) = setup();
 
     // Create and push a branch from main without adding any commits.
@@ -304,10 +320,8 @@ fn tracked_branch_without_unique_commits_not_stale() {
     push_upstream_change(work.path(), "ahead.txt", "new\n", "advance main");
     git(work.path(), &["pull", "origin", "main"]);
 
-    let original = std::env::current_dir().unwrap();
-    std::env::set_current_dir(work.path()).unwrap();
+    let _cwd = cwd_at(work.path());
     let stale = git_switch::git::stale_branches("origin").unwrap();
-    std::env::set_current_dir(&original).unwrap();
 
     assert!(
         !stale.contains(&"new-feature".to_string()),
@@ -317,7 +331,6 @@ fn tracked_branch_without_unique_commits_not_stale() {
 
 #[test]
 fn delete_branches_removes_listed_branches() {
-    let _lock = CWD_LOCK.lock().unwrap();
     let (_bare, work) = setup();
 
     for name in ["feat-a", "feat-b"] {
@@ -332,10 +345,8 @@ fn delete_branches_removes_listed_branches() {
         );
     }
 
-    let original = std::env::current_dir().unwrap();
-    std::env::set_current_dir(work.path()).unwrap();
+    let _cwd = cwd_at(work.path());
     let result = git_switch::git::delete_branches(&["feat-a", "feat-b"]);
-    std::env::set_current_dir(&original).unwrap();
 
     result.expect("delete_branches should succeed");
 
@@ -442,7 +453,6 @@ fn non_origin_remote_pulls_via_branch_config() {
 
 #[test]
 fn non_origin_remote_detects_stale_branch() {
-    let _lock = CWD_LOCK.lock().unwrap();
     let (_bare, work) = setup_with_remote("upstream");
 
     git(work.path(), &["checkout", "-b", "feature-done"]);
@@ -454,10 +464,8 @@ fn non_origin_remote_detects_stale_branch() {
     git(work.path(), &["merge", "feature-done"]);
     git(work.path(), &["push", "upstream", "main"]);
 
-    let original = std::env::current_dir().unwrap();
-    std::env::set_current_dir(work.path()).unwrap();
+    let _cwd = cwd_at(work.path());
     let stale = git_switch::git::stale_branches("upstream").unwrap();
-    std::env::set_current_dir(&original).unwrap();
 
     assert!(
         stale.contains(&"feature-done".to_string()),
@@ -467,7 +475,6 @@ fn non_origin_remote_detects_stale_branch() {
 
 #[test]
 fn current_remote_handles_multiline_config_value() {
-    let _lock = CWD_LOCK.lock().unwrap();
     let (_bare, work) = setup_with_remote("upstream");
 
     git(
@@ -475,10 +482,8 @@ fn current_remote_handles_multiline_config_value() {
         &["config", "branch.main.remote", "upstream\nstray"],
     );
 
-    let original = std::env::current_dir().unwrap();
-    std::env::set_current_dir(work.path()).unwrap();
+    let _cwd = cwd_at(work.path());
     let remote = git_switch::git::current_remote(Some("main"));
-    std::env::set_current_dir(&original).unwrap();
 
     assert_eq!(remote, "upstream");
 }
