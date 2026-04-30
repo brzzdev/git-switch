@@ -237,6 +237,27 @@ pub fn stale_branches(remote: &str) -> AppResult<Vec<String>> {
     Ok(branches)
 }
 
+/// Branches treated as "pinned" by the picker: the remote's default branch
+/// first, then `git-switch.keep` entries in config order, deduplicated.
+#[must_use]
+pub fn pinned_branches(remote: &str) -> Vec<String> {
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut out: Vec<String> = Vec::new();
+    if let Some(default) = default_branch(remote) {
+        seen.insert(default.clone());
+        out.push(default);
+    }
+    if let Ok(output) = run(&["config", "--get-all", "git-switch.keep"]) {
+        for line in output.lines() {
+            let name = line.trim();
+            if !name.is_empty() && seen.insert(name.to_string()) {
+                out.push(name.to_string());
+            }
+        }
+    }
+    out
+}
+
 fn default_branch(remote: &str) -> Option<String> {
     let head_ref = format!("refs/remotes/{remote}/HEAD");
     let prefix = format!("refs/remotes/{remote}/");

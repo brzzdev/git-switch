@@ -1,5 +1,6 @@
+use std::collections::HashSet;
+
 use console::{Key, Term, measure_text_width, style};
-use dialoguer::FuzzySelect;
 use indicatif::ProgressBar;
 
 use crate::{AppResult, Error, git};
@@ -121,28 +122,40 @@ fn report_update(result: git::MergeResult, remote: &str) -> AppResult<()> {
     Ok(())
 }
 
-struct BranchOption {
-    display: String,
-    checkout: String,
+#[derive(Clone)]
+struct Pick {
+    name: String,
+    is_current: bool,
+    remote_only: bool,
+    missing: bool,
 }
 
-impl BranchOption {
-    fn local(name: String) -> Self {
-        Self {
-            display: name.clone(),
-            checkout: name,
-        }
-    }
+struct Section {
+    heading: &'static str,
+    items: Vec<Pick>,
+}
 
-    fn remote(name: String, remote: &str) -> Self {
-        Self {
-            display: format!("{remote}/{name}"),
-            checkout: name,
-        }
-    }
+enum RowKind {
+    Heading(String),
+    Item(Pick),
+}
+
+struct RenderRow {
+    kind: RowKind,
+    section_idx: usize,
+}
+
+struct View {
+    rows: Vec<RenderRow>,
+    selectable: Vec<usize>,
 }
 
 fn select_branch(current: Option<&str>, remote: &str) -> AppResult<Option<String>> {
+    let sections = build_sections(current, remote)?;
+    pick(current, &sections)
+}
+
+fn build_sections(current: Option<&str>, remote: &str) -> AppResult<Vec<Section>> {
     let local = git::local_branches()?;
     let remote_only = git::remote_only_branches(&local, remote).unwrap_or_default();
 
@@ -150,30 +163,321 @@ fn select_branch(current: Option<&str>, remote: &str) -> AppResult<Option<String
         return Err(Error::NoBranches);
     }
 
-    let branches: Vec<BranchOption> = local
-        .into_iter()
-        .map(BranchOption::local)
-        .chain(
-            remote_only
-                .into_iter()
-                .map(|name| BranchOption::remote(name, remote)),
-        )
+    let pinned_names = git::pinned_branches(remote);
+    let local_set: HashSet<&str> = local.iter().map(String::as_str).collect();
+    let remote_set: HashSet<&str> = remote_only.iter().map(String::as_str).collect();
+    let pinned_set: HashSet<&str> = pinned_names.iter().map(String::as_str).collect();
+
+    let pinned_picks: Vec<Pick> = pinned_names
+        .iter()
+        .map(|name| {
+            let in_local = local_set.contains(name.as_str());
+            let in_remote = remote_set.contains(name.as_str());
+            Pick {
+                name: name.clone(),
+                is_current: current == Some(name.as_str()),
+                remote_only: !in_local && in_remote,
+                missing: !in_local && !in_remote,
+            }
+        })
         .collect();
 
-    let display: Vec<&str> = branches.iter().map(|b| b.display.as_str()).collect();
+    let local_picks: Vec<Pick> = local
+        .iter()
+        .filter(|b| !pinned_set.contains(b.as_str()))
+        .map(|b| Pick {
+            name: b.clone(),
+            is_current: current == Some(b.as_str()),
+            remote_only: false,
+            missing: false,
+        })
+        .collect();
 
-    let default = current
-        .and_then(|c| branches.iter().position(|b| b.checkout == c))
+    let remote_picks: Vec<Pick> = remote_only
+        .iter()
+        .filter(|b| !pinned_set.contains(b.as_str()))
+        .map(|b| Pick {
+            name: b.clone(),
+            is_current: false,
+            remote_only: false,
+            missing: false,
+        })
+        .collect();
+
+    let mut sections = Vec::new();
+    if !pinned_picks.is_empty() {
+        sections.push(Section {
+            heading: "Pinned",
+            items: pinned_picks,
+        });
+    }
+    if !local_picks.is_empty() {
+        sections.push(Section {
+            heading: "Local",
+            items: local_picks,
+        });
+    }
+    if !remote_picks.is_empty() {
+        sections.push(Section {
+            heading: "Remote",
+            items: remote_picks,
+        });
+    }
+    Ok(sections)
+}
+
+/// Case-insensitive subsequence match. Empty needle matches everything.
+fn fuzzy_match(needle: &str, haystack: &str) -> bool {
+    if needle.is_empty() {
+        return true;
+    }
+    let needle: String = needle.chars().flat_map(char::to_lowercase).collect();
+    let haystack: String = haystack.chars().flat_map(char::to_lowercase).collect();
+    let mut iter = haystack.chars();
+    'next: for nc in needle.chars() {
+        for hc in iter.by_ref() {
+            if hc == nc {
+                continue 'next;
+            }
+        }
+        return false;
+    }
+    true
+}
+
+fn build_view(sections: &[Section], filter: &str) -> View {
+    let mut rows: Vec<RenderRow> = Vec::new();
+    let mut selectable: Vec<usize> = Vec::new();
+
+    for (sec_idx, sec) in sections.iter().enumerate() {
+        let matching: Vec<&Pick> = sec
+            .items
+            .iter()
+            .filter(|p| fuzzy_match(filter, &p.name))
+            .collect();
+        if matching.is_empty() {
+            continue;
+        }
+        rows.push(RenderRow {
+            kind: RowKind::Heading(sec.heading.to_string()),
+            section_idx: sec_idx,
+        });
+        for pick in matching {
+            let idx = rows.len();
+            let is_selectable = !pick.missing;
+            rows.push(RenderRow {
+                kind: RowKind::Item(pick.clone()),
+                section_idx: sec_idx,
+            });
+            if is_selectable {
+                selectable.push(idx);
+            }
+        }
+    }
+
+    View { rows, selectable }
+}
+
+fn cursor_pick_name(view: &View, cursor: usize) -> Option<String> {
+    let &row_idx = view.selectable.get(cursor)?;
+    if let RowKind::Item(p) = &view.rows[row_idx].kind {
+        Some(p.name.clone())
+    } else {
+        None
+    }
+}
+
+fn selectable_position(view: &View, name: &str) -> Option<usize> {
+    view.selectable
+        .iter()
+        .position(|&i| matches!(&view.rows[i].kind, RowKind::Item(p) if p.name == name))
+}
+
+fn pick(current: Option<&str>, sections: &[Section]) -> AppResult<Option<String>> {
+    let term = Term::stderr();
+    let _cursor_guard = CursorGuard::hide();
+
+    let mut filter = String::new();
+    let mut view = build_view(sections, &filter);
+    if view.selectable.is_empty() {
+        return Ok(None);
+    }
+
+    let mut cursor: usize = current
+        .and_then(|c| selectable_position(&view, c))
         .unwrap_or(0);
 
-    let selection = FuzzySelect::new()
-        .with_prompt("Switch to")
-        .items(&display)
-        .default(default)
-        .interact_opt()
-        .map_err(std::io::Error::from)?;
+    let mut drawn = render(&term, &view, cursor, &filter);
 
-    Ok(selection.map(|i| branches[i].checkout.clone()))
+    loop {
+        let key = term.read_key()?;
+        let preserved = cursor_pick_name(&view, cursor);
+        let mut filter_changed = false;
+
+        match key {
+            Key::ArrowUp => {
+                if !view.selectable.is_empty() {
+                    cursor = if cursor == 0 {
+                        view.selectable.len() - 1
+                    } else {
+                        cursor - 1
+                    };
+                }
+            }
+            Key::ArrowDown => {
+                if !view.selectable.is_empty() {
+                    cursor = (cursor + 1) % view.selectable.len();
+                }
+            }
+            Key::PageUp => {
+                let page = page_size(&term);
+                cursor = cursor.saturating_sub(page);
+            }
+            Key::PageDown => {
+                let page = page_size(&term);
+                let last = view.selectable.len().saturating_sub(1);
+                cursor = (cursor + page).min(last);
+            }
+            Key::Home => cursor = 0,
+            Key::End => {
+                cursor = view.selectable.len().saturating_sub(1);
+            }
+            Key::Char(c) if !c.is_control() => {
+                filter.push(c);
+                filter_changed = true;
+            }
+            Key::Backspace => {
+                if filter.pop().is_some() {
+                    filter_changed = true;
+                }
+            }
+            Key::Enter => {
+                let name = cursor_pick_name(&view, cursor);
+                let _ = term.clear_last_lines(drawn);
+                return Ok(name);
+            }
+            Key::Escape => {
+                if filter.is_empty() {
+                    let _ = term.clear_last_lines(drawn);
+                    return Ok(None);
+                }
+                filter.clear();
+                filter_changed = true;
+            }
+            _ => continue,
+        }
+
+        if filter_changed {
+            view = build_view(sections, &filter);
+            cursor = preserved
+                .as_deref()
+                .and_then(|n| selectable_position(&view, n))
+                .unwrap_or(0);
+        }
+
+        let _ = term.clear_last_lines(drawn);
+        drawn = render(&term, &view, cursor, &filter);
+    }
+}
+
+fn page_size(term: &Term) -> usize {
+    let h = term.size().0 as usize;
+    h.saturating_sub(2).max(1)
+}
+
+fn render(term: &Term, view: &View, cursor: usize, filter: &str) -> usize {
+    let (rows_term, cols_term) = term.size();
+    let height = rows_term as usize;
+    let width = cols_term as usize;
+
+    let prompt = format!(
+        "{} {} {} {}",
+        style("?").green().bold(),
+        style("Switch to").bold(),
+        style("(type to filter):").dim(),
+        filter,
+    );
+    eprintln!("{prompt}");
+    let mut drawn = visual_rows(&prompt, width);
+
+    if view.selectable.is_empty() {
+        let line = style("  (no matches)").dim().to_string();
+        eprintln!("{line}");
+        drawn += visual_rows(&line, width);
+        return drawn;
+    }
+
+    let viewport_h = height.saturating_sub(drawn).max(3);
+    let total_rows = view.rows.len();
+    let cursor_row = view.selectable.get(cursor).copied().unwrap_or(0);
+
+    let cursor_section = view.rows[cursor_row].section_idx;
+    let cursor_heading_row = view
+        .rows
+        .iter()
+        .position(|r| r.section_idx == cursor_section && matches!(r.kind, RowKind::Heading(_)));
+
+    let mut scroll = if total_rows <= viewport_h || cursor_row + 1 < viewport_h {
+        0
+    } else {
+        cursor_row + 1 - viewport_h
+    };
+
+    let sticky = cursor_heading_row.is_some_and(|h| h < scroll);
+    let content_h = if sticky {
+        viewport_h.saturating_sub(1).max(1)
+    } else {
+        viewport_h
+    };
+
+    if sticky && cursor_row >= scroll + content_h {
+        scroll = cursor_row + 1 - content_h;
+    }
+
+    if sticky
+        && let Some(h) = cursor_heading_row
+        && let RowKind::Heading(text) = &view.rows[h].kind
+    {
+        let line = style(text).bold().dim().to_string();
+        eprintln!("{line}");
+        drawn += visual_rows(&line, width);
+    }
+
+    let end = (scroll + content_h).min(total_rows);
+    for r in scroll..end {
+        let line = format_row(&view.rows[r], r == cursor_row);
+        eprintln!("{line}");
+        drawn += visual_rows(&line, width);
+    }
+
+    drawn
+}
+
+fn format_row(row: &RenderRow, is_cursor: bool) -> String {
+    match &row.kind {
+        RowKind::Heading(text) => style(text).bold().dim().to_string(),
+        RowKind::Item(pick) => {
+            let cursor = if is_cursor { ">" } else { " " };
+            let name_with_mark = if pick.is_current {
+                format!("* {}", pick.name)
+            } else {
+                pick.name.clone()
+            };
+            let suffix = if pick.remote_only {
+                " ☁".to_string()
+            } else if pick.missing {
+                " (missing)".to_string()
+            } else {
+                String::new()
+            };
+            let line = format!("  {cursor} {name_with_mark}{suffix}");
+            if pick.missing {
+                style(line).dim().to_string()
+            } else {
+                line
+            }
+        }
+    }
 }
 
 fn prompt_delete_stale_branches(old_branch: Option<&str>, remote: &str) -> AppResult<()> {
