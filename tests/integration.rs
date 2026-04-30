@@ -489,6 +489,57 @@ fn current_remote_handles_multiline_config_value() {
 }
 
 #[test]
+fn pinned_branches_includes_default_first() {
+    let (_bare, work) = setup();
+
+    git(work.path(), &["remote", "set-head", "origin", "main"]);
+
+    let _cwd = cwd_at(work.path());
+    let pinned = git_switch::git::pinned_branches("origin");
+
+    assert_eq!(
+        pinned.first().map(String::as_str),
+        Some("main"),
+        "expected main first, got: {pinned:?}"
+    );
+}
+
+#[test]
+fn pinned_branches_appends_keep_config_in_order_and_dedups() {
+    let (_bare, work) = setup();
+
+    git(work.path(), &["remote", "set-head", "origin", "main"]);
+    // Repo-local keep entries: deliberately duplicate "main" (the default)
+    // and reorder release branches to verify config order is preserved.
+    git(
+        work.path(),
+        &["config", "--add", "git-switch.keep", "release/v2"],
+    );
+    git(work.path(), &["config", "--add", "git-switch.keep", "main"]);
+    git(
+        work.path(),
+        &["config", "--add", "git-switch.keep", "release/v1"],
+    );
+
+    let _cwd = cwd_at(work.path());
+    let pinned = git_switch::git::pinned_branches("origin");
+
+    let position = |name: &str| pinned.iter().position(|p| p == name);
+    let main = position("main").expect("main should be present");
+    let v2 = position("release/v2").expect("release/v2 should be present");
+    let v1 = position("release/v1").expect("release/v1 should be present");
+
+    assert_eq!(main, 0, "default branch must be first, got: {pinned:?}");
+    assert!(v2 > main, "release/v2 after main, got: {pinned:?}");
+    assert!(v1 > v2, "release/v1 after release/v2, got: {pinned:?}");
+    assert_eq!(
+        pinned.iter().filter(|p| *p == "main").count(),
+        1,
+        "main should be deduped, got: {pinned:?}"
+    );
+}
+
+#[test]
 fn detached_head_can_switch_to_branch() {
     let (_bare, work) = setup();
 
