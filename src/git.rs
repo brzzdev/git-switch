@@ -11,7 +11,7 @@ pub enum MergeReport {
 
 pub enum FastForwardResult {
     Merged(MergeReport),
-    Diverged(String),
+    Diverged,
 }
 
 pub enum StashPopOutcome {
@@ -205,7 +205,7 @@ pub fn fast_forward_merge(branch: &str, remote: &str) -> AppResult<FastForwardRe
         .output()?;
 
     if !output.status.success() {
-        return Ok(FastForwardResult::Diverged(branch.to_string()));
+        return Ok(FastForwardResult::Diverged);
     }
 
     let after = rev_parse("HEAD")?;

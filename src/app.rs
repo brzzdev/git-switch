@@ -99,7 +99,7 @@ fn switch_and_update(target: &str, old_branch: Option<&str>, remote: &str) -> Ap
     }
 
     match merge_result? {
-        git::FastForwardResult::Diverged(branch) => reconcile_diverged(&branch, remote)?,
+        git::FastForwardResult::Diverged => reconcile_diverged(target, remote)?,
         git::FastForwardResult::Merged(report) => report_update(&report),
     }
 
@@ -121,8 +121,7 @@ fn reconcile_diverged(branch: &str, remote: &str) -> AppResult<()> {
     let remote_ref = format!("{remote}/{branch}");
     eprintln!("Local branch has diverged from {remote_ref}.");
 
-    let term = Term::stderr();
-    if !term.is_term() || !confirm(&format!("Rebase onto {remote_ref}?"), false)? {
+    if !confirm(&format!("Rebase onto {remote_ref}?"), false)? {
         eprintln!("Run `git rebase {remote_ref}` or `git merge {remote_ref}` to reconcile.");
         return Err(Error::Diverged);
     }
@@ -140,6 +139,9 @@ fn reconcile_diverged(branch: &str, remote: &str) -> AppResult<()> {
 
 fn confirm(prompt: &str, default_yes: bool) -> AppResult<bool> {
     let term = Term::stderr();
+    if !term.is_term() {
+        return Ok(default_yes);
+    }
     let hint = if default_yes { "[Y/n]" } else { "[y/N]" };
     eprint!(
         "{} {} {} ",
@@ -165,6 +167,12 @@ enum Availability {
     Local,
     RemoteOnly,
     Missing,
+}
+
+impl Availability {
+    fn is_missing(self) -> bool {
+        matches!(self, Availability::Missing)
+    }
 }
 
 #[derive(Clone)]
@@ -312,7 +320,7 @@ fn build_view(sections: &[Section], filter: &str) -> View {
         });
         for pick in matching {
             let idx = rows.len();
-            let is_selectable = !matches!(pick.availability, Availability::Missing);
+            let is_selectable = !pick.availability.is_missing();
             rows.push(RenderRow {
                 kind: RowKind::Item(pick.clone()),
                 section_idx: sec_idx,
@@ -517,7 +525,7 @@ fn format_row(row: &RenderRow, is_cursor: bool) -> String {
                 Availability::Missing => " (missing)",
             };
             let line = format!("  {cursor} {name_with_mark}{suffix}");
-            if matches!(pick.availability, Availability::Missing) {
+            if pick.availability.is_missing() {
                 style(line).dim().to_string()
             } else {
                 line
