@@ -98,36 +98,80 @@ fn switch_and_update(target: &str, old_branch: Option<&str>, remote: &str) -> Ap
         }
     }
 
-    report_update(merge_result?, remote)?;
+    match merge_result? {
+        git::FastForwardResult::Diverged(branch) => reconcile_diverged(&branch, remote)?,
+        git::FastForwardResult::Merged(report) => report_update(&report),
+    }
 
     prompt_delete_stale_branches(if already_on_target { None } else { old_branch }, remote)?;
 
     Ok(())
 }
 
-fn report_update(result: git::MergeResult, remote: &str) -> AppResult<()> {
+fn report_update(result: &git::MergeReport) {
     match result {
-        git::MergeResult::UpToDate => println!("Already up to date."),
-        git::MergeResult::Pulled(1) => println!("Pulled 1 commit."),
-        git::MergeResult::Pulled(n) => println!("Pulled {n} commits."),
-        git::MergeResult::NoRemote => println!("No remote tracking branch."),
-        git::MergeResult::Diverged(branch) => {
+        git::MergeReport::UpToDate => println!("Already up to date."),
+        git::MergeReport::Pulled(1) => println!("Pulled 1 commit."),
+        git::MergeReport::Pulled(n) => println!("Pulled {n} commits."),
+        git::MergeReport::NoRemote => println!("No remote tracking branch."),
+    }
+}
+
+fn reconcile_diverged(branch: &str, remote: &str) -> AppResult<()> {
+    let remote_ref = format!("{remote}/{branch}");
+    eprintln!("Local branch has diverged from {remote_ref}.");
+
+    let term = Term::stderr();
+    if !term.is_term() || !confirm(&format!("Rebase onto {remote_ref}?"), false)? {
+        eprintln!("Run `git rebase {remote_ref}` or `git merge {remote_ref}` to reconcile.");
+        return Err(Error::Diverged);
+    }
+
+    match git::rebase(&remote_ref)? {
+        git::RebaseOutcome::Clean => Ok(()),
+        git::RebaseOutcome::Aborted => {
             eprintln!(
-                "Local branch has diverged from {remote}/{branch}.\n\
-                 Run `git rebase {remote}/{branch}` or `git merge {remote}/{branch}` to reconcile."
+                "Rebase aborted due to conflicts. Run `git rebase {remote_ref}` manually to reconcile."
             );
-            return Err(Error::Diverged);
+            Err(Error::Diverged)
         }
     }
-    Ok(())
+}
+
+fn confirm(prompt: &str, default_yes: bool) -> AppResult<bool> {
+    let term = Term::stderr();
+    let hint = if default_yes { "[Y/n]" } else { "[y/N]" };
+    eprint!(
+        "{} {} {} ",
+        style("?").green().bold(),
+        style(prompt).bold(),
+        style(hint).dim(),
+    );
+    let _cursor_guard = CursorGuard::hide();
+    loop {
+        let answer = match term.read_key()? {
+            Key::Char('y' | 'Y') => true,
+            Key::Char('n' | 'N') | Key::Escape => false,
+            Key::Enter => default_yes,
+            _ => continue,
+        };
+        eprintln!("{}", if answer { "y" } else { "n" });
+        return Ok(answer);
+    }
+}
+
+#[derive(Clone, Copy)]
+enum Availability {
+    Local,
+    RemoteOnly,
+    Missing,
 }
 
 #[derive(Clone)]
 struct Pick {
     name: String,
     is_current: bool,
-    remote_only: bool,
-    missing: bool,
+    availability: Availability,
 }
 
 struct Section {
@@ -173,11 +217,17 @@ fn build_sections(current: Option<&str>, remote: &str) -> AppResult<Vec<Section>
         .map(|name| {
             let in_local = local_set.contains(name.as_str());
             let in_remote = remote_set.contains(name.as_str());
+            let availability = if in_local {
+                Availability::Local
+            } else if in_remote {
+                Availability::RemoteOnly
+            } else {
+                Availability::Missing
+            };
             Pick {
                 name: name.clone(),
                 is_current: current == Some(name.as_str()),
-                remote_only: !in_local && in_remote,
-                missing: !in_local && !in_remote,
+                availability,
             }
         })
         .collect();
@@ -188,8 +238,7 @@ fn build_sections(current: Option<&str>, remote: &str) -> AppResult<Vec<Section>
         .map(|b| Pick {
             name: b.clone(),
             is_current: current == Some(b.as_str()),
-            remote_only: false,
-            missing: false,
+            availability: Availability::Local,
         })
         .collect();
 
@@ -199,8 +248,7 @@ fn build_sections(current: Option<&str>, remote: &str) -> AppResult<Vec<Section>
         .map(|b| Pick {
             name: b.clone(),
             is_current: false,
-            remote_only: false,
-            missing: false,
+            availability: Availability::Local,
         })
         .collect();
 
@@ -226,16 +274,15 @@ fn build_sections(current: Option<&str>, remote: &str) -> AppResult<Vec<Section>
     Ok(sections)
 }
 
-/// Case-insensitive subsequence match. Empty needle matches everything.
-fn fuzzy_match(needle: &str, haystack: &str) -> bool {
-    if needle.is_empty() {
+/// Subsequence match against a pre-lowered needle. Lowering happens at the
+/// call site so the needle is normalized once per filter, not once per item.
+fn fuzzy_match(needle_lower: &str, haystack: &str) -> bool {
+    if needle_lower.is_empty() {
         return true;
     }
-    let needle: String = needle.chars().flat_map(char::to_lowercase).collect();
-    let haystack: String = haystack.chars().flat_map(char::to_lowercase).collect();
-    let mut iter = haystack.chars();
-    'next: for nc in needle.chars() {
-        for hc in iter.by_ref() {
+    let mut hi = haystack.chars().flat_map(char::to_lowercase);
+    'next: for nc in needle_lower.chars() {
+        for hc in hi.by_ref() {
             if hc == nc {
                 continue 'next;
             }
@@ -246,6 +293,7 @@ fn fuzzy_match(needle: &str, haystack: &str) -> bool {
 }
 
 fn build_view(sections: &[Section], filter: &str) -> View {
+    let needle: String = filter.chars().flat_map(char::to_lowercase).collect();
     let mut rows: Vec<RenderRow> = Vec::new();
     let mut selectable: Vec<usize> = Vec::new();
 
@@ -253,7 +301,7 @@ fn build_view(sections: &[Section], filter: &str) -> View {
         let matching: Vec<&Pick> = sec
             .items
             .iter()
-            .filter(|p| fuzzy_match(filter, &p.name))
+            .filter(|p| fuzzy_match(&needle, &p.name))
             .collect();
         if matching.is_empty() {
             continue;
@@ -264,7 +312,7 @@ fn build_view(sections: &[Section], filter: &str) -> View {
         });
         for pick in matching {
             let idx = rows.len();
-            let is_selectable = !pick.missing;
+            let is_selectable = !matches!(pick.availability, Availability::Missing);
             rows.push(RenderRow {
                 kind: RowKind::Item(pick.clone()),
                 section_idx: sec_idx,
@@ -463,15 +511,13 @@ fn format_row(row: &RenderRow, is_cursor: bool) -> String {
             } else {
                 pick.name.clone()
             };
-            let suffix = if pick.remote_only {
-                " ☁".to_string()
-            } else if pick.missing {
-                " (missing)".to_string()
-            } else {
-                String::new()
+            let suffix = match pick.availability {
+                Availability::Local => "",
+                Availability::RemoteOnly => " ☁",
+                Availability::Missing => " (missing)",
             };
             let line = format!("  {cursor} {name_with_mark}{suffix}");
-            if pick.missing {
+            if matches!(pick.availability, Availability::Missing) {
                 style(line).dim().to_string()
             } else {
                 line

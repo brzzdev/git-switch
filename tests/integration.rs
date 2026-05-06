@@ -489,6 +489,92 @@ fn current_remote_handles_multiline_config_value() {
 }
 
 #[test]
+fn rebase_replays_local_commits_onto_remote() {
+    let (bare, work) = setup();
+
+    git(work.path(), &["checkout", "-b", "feature"]);
+    fs::write(work.path().join("feature.txt"), "base\n").unwrap();
+    git(work.path(), &["add", "feature.txt"]);
+    git(work.path(), &["commit", "-m", "feature base"]);
+    git(work.path(), &["push", "-u", "origin", "feature"]);
+
+    // Local-only commit on a unique file (no conflict).
+    fs::write(work.path().join("local.txt"), "local\n").unwrap();
+    git(work.path(), &["add", "local.txt"]);
+    git(work.path(), &["commit", "-m", "local commit"]);
+
+    // From a second clone, push a different commit on a different file.
+    let second = clone_bare(bare.path());
+    git(second.path(), &["checkout", "feature"]);
+    fs::write(second.path().join("remote.txt"), "remote\n").unwrap();
+    git(second.path(), &["add", "remote.txt"]);
+    git(second.path(), &["commit", "-m", "remote commit"]);
+    git(second.path(), &["push", "origin", "feature"]);
+
+    git(work.path(), &["fetch", "origin"]);
+
+    let _cwd = cwd_at(work.path());
+    let outcome = git_switch::git::rebase("origin/feature").expect("rebase call failed");
+
+    assert!(
+        matches!(outcome, git_switch::git::RebaseOutcome::Clean),
+        "expected Clean rebase outcome"
+    );
+    assert!(
+        work.path().join("local.txt").exists(),
+        "local.txt should survive the rebase"
+    );
+    assert!(
+        work.path().join("remote.txt").exists(),
+        "remote.txt should be present after rebase"
+    );
+}
+
+#[test]
+fn rebase_aborts_on_conflict_and_leaves_clean_tree() {
+    let (bare, work) = setup();
+
+    git(work.path(), &["checkout", "-b", "feature"]);
+    fs::write(work.path().join("file.txt"), "base\n").unwrap();
+    git(work.path(), &["add", "file.txt"]);
+    git(work.path(), &["commit", "-m", "feature base"]);
+    git(work.path(), &["push", "-u", "origin", "feature"]);
+
+    // Conflicting local change.
+    fs::write(work.path().join("file.txt"), "local\n").unwrap();
+    git(work.path(), &["add", "file.txt"]);
+    git(work.path(), &["commit", "-m", "local"]);
+
+    // Conflicting remote change (force-pushed from a second clone).
+    let second = clone_bare(bare.path());
+    git(second.path(), &["checkout", "feature"]);
+    fs::write(second.path().join("file.txt"), "remote\n").unwrap();
+    git(second.path(), &["add", "file.txt"]);
+    git(second.path(), &["commit", "-m", "remote"]);
+    git(second.path(), &["push", "--force", "origin", "feature"]);
+
+    git(work.path(), &["fetch", "origin"]);
+
+    let _cwd = cwd_at(work.path());
+    let outcome = git_switch::git::rebase("origin/feature").expect("rebase call failed");
+
+    assert!(
+        matches!(outcome, git_switch::git::RebaseOutcome::Aborted),
+        "expected Aborted rebase outcome"
+    );
+
+    let git_dir = work.path().join(".git");
+    assert!(
+        !git_dir.join("rebase-merge").exists(),
+        "rebase-merge directory should not exist after abort"
+    );
+    assert!(
+        !git_dir.join("rebase-apply").exists(),
+        "rebase-apply directory should not exist after abort"
+    );
+}
+
+#[test]
 fn pinned_branches_includes_default_first() {
     let (_bare, work) = setup();
 

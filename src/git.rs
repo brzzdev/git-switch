@@ -3,11 +3,15 @@ use std::process::Command;
 
 use crate::{AppResult, Error};
 
-pub enum MergeResult {
+pub enum MergeReport {
     UpToDate,
     Pulled(u32),
-    Diverged(String),
     NoRemote,
+}
+
+pub enum FastForwardResult {
+    Merged(MergeReport),
+    Diverged(String),
 }
 
 pub enum StashPopOutcome {
@@ -18,6 +22,11 @@ pub enum StashPopOutcome {
 pub enum FetchOutcome {
     Ok,
     Failed(String),
+}
+
+pub enum RebaseOutcome {
+    Clean,
+    Aborted,
 }
 
 pub fn current_branch() -> AppResult<Option<String>> {
@@ -147,7 +156,26 @@ pub fn fetch(remote: &str) -> AppResult<FetchOutcome> {
     Ok(FetchOutcome::Failed(stderr))
 }
 
-pub fn fast_forward_merge(branch: &str, remote: &str) -> AppResult<MergeResult> {
+/// Rebase the current branch onto `onto` (e.g. `origin/main`). Git's stdout
+/// and stderr stream directly to the terminal so users see progress and
+/// conflict markers in real time. On failure the rebase is aborted, leaving
+/// the working tree clean.
+pub fn rebase(onto: &str) -> AppResult<RebaseOutcome> {
+    let status = Command::new("git")
+        .args(["-c", "advice.skippedCherryPicks=false", "rebase", onto])
+        .status()?;
+    if status.success() {
+        return Ok(RebaseOutcome::Clean);
+    }
+    let _ = Command::new("git")
+        .args(["rebase", "--abort"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+    Ok(RebaseOutcome::Aborted)
+}
+
+pub fn fast_forward_merge(branch: &str, remote: &str) -> AppResult<FastForwardResult> {
     let remote_ref = format!("{remote}/{branch}");
 
     let has_remote = Command::new("git")
@@ -158,28 +186,37 @@ pub fn fast_forward_merge(branch: &str, remote: &str) -> AppResult<MergeResult> 
         .success();
 
     if !has_remote {
-        return Ok(MergeResult::NoRemote);
+        return Ok(FastForwardResult::Merged(MergeReport::NoRemote));
     }
 
     let before = rev_parse("HEAD")?;
 
-    let status = Command::new("git")
-        .args(["merge", "--ff-only", &remote_ref, "--quiet"])
-        .status()?;
+    // Capture stderr so git's diverging hint and "fatal: Not possible to
+    // fast-forward" don't leak — we surface a tailored message instead.
+    let output = Command::new("git")
+        .args([
+            "-c",
+            "advice.diverging=false",
+            "merge",
+            "--ff-only",
+            &remote_ref,
+            "--quiet",
+        ])
+        .output()?;
 
-    if !status.success() {
-        return Ok(MergeResult::Diverged(branch.to_string()));
+    if !output.status.success() {
+        return Ok(FastForwardResult::Diverged(branch.to_string()));
     }
 
     let after = rev_parse("HEAD")?;
 
     if before == after {
-        return Ok(MergeResult::UpToDate);
+        return Ok(FastForwardResult::Merged(MergeReport::UpToDate));
     }
 
     let output = run(&["rev-list", "--count", &format!("{before}..{after}")])?;
     let count: u32 = output.trim().parse()?;
-    Ok(MergeResult::Pulled(count))
+    Ok(FastForwardResult::Merged(MergeReport::Pulled(count)))
 }
 
 pub fn stale_branches(remote: &str) -> AppResult<Vec<String>> {
