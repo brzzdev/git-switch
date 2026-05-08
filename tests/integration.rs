@@ -76,6 +76,12 @@ fn setup_with_remote(remote: &str) -> (TempDir, TempDir) {
     git(bare.path(), &["init", "--bare"]);
 
     git(work.path(), &["init", "-b", "main"]);
+    // Library code under test spawns its own `git` subprocesses without our
+    // helper's GIT_*_NAME/EMAIL env, so commits it makes (e.g. during rebase)
+    // need identity from .git/config — otherwise CI hosts without a global
+    // gitconfig fail with "empty ident name".
+    git(work.path(), &["config", "user.name", "test"]);
+    git(work.path(), &["config", "user.email", "test@example.com"]);
     git(
         work.path(),
         &["remote", "add", remote, bare.path().to_str().unwrap()],
@@ -486,6 +492,143 @@ fn current_remote_handles_multiline_config_value() {
     let remote = git_switch::git::current_remote(Some("main"));
 
     assert_eq!(remote, "upstream");
+}
+
+#[test]
+fn rebase_replays_local_commits_onto_remote() {
+    let (bare, work) = setup();
+
+    git(work.path(), &["checkout", "-b", "feature"]);
+    fs::write(work.path().join("feature.txt"), "base\n").unwrap();
+    git(work.path(), &["add", "feature.txt"]);
+    git(work.path(), &["commit", "-m", "feature base"]);
+    git(work.path(), &["push", "-u", "origin", "feature"]);
+
+    // Local-only commit on a unique file (no conflict).
+    fs::write(work.path().join("local.txt"), "local\n").unwrap();
+    git(work.path(), &["add", "local.txt"]);
+    git(work.path(), &["commit", "-m", "local commit"]);
+
+    // From a second clone, push a different commit on a different file.
+    let second = clone_bare(bare.path());
+    git(second.path(), &["checkout", "feature"]);
+    fs::write(second.path().join("remote.txt"), "remote\n").unwrap();
+    git(second.path(), &["add", "remote.txt"]);
+    git(second.path(), &["commit", "-m", "remote commit"]);
+    git(second.path(), &["push", "origin", "feature"]);
+
+    git(work.path(), &["fetch", "origin"]);
+
+    let _cwd = cwd_at(work.path());
+    let outcome = git_switch::git::rebase("origin/feature").expect("rebase call failed");
+
+    assert!(
+        matches!(outcome, git_switch::git::RebaseOutcome::Clean),
+        "expected Clean rebase outcome"
+    );
+    assert!(
+        work.path().join("local.txt").exists(),
+        "local.txt should survive the rebase"
+    );
+    assert!(
+        work.path().join("remote.txt").exists(),
+        "remote.txt should be present after rebase"
+    );
+}
+
+#[test]
+fn rebase_aborts_on_conflict_and_leaves_clean_tree() {
+    let (bare, work) = setup();
+
+    git(work.path(), &["checkout", "-b", "feature"]);
+    fs::write(work.path().join("file.txt"), "base\n").unwrap();
+    git(work.path(), &["add", "file.txt"]);
+    git(work.path(), &["commit", "-m", "feature base"]);
+    git(work.path(), &["push", "-u", "origin", "feature"]);
+
+    // Conflicting local change.
+    fs::write(work.path().join("file.txt"), "local\n").unwrap();
+    git(work.path(), &["add", "file.txt"]);
+    git(work.path(), &["commit", "-m", "local"]);
+
+    // Conflicting remote change (force-pushed from a second clone).
+    let second = clone_bare(bare.path());
+    git(second.path(), &["checkout", "feature"]);
+    fs::write(second.path().join("file.txt"), "remote\n").unwrap();
+    git(second.path(), &["add", "file.txt"]);
+    git(second.path(), &["commit", "-m", "remote"]);
+    git(second.path(), &["push", "--force", "origin", "feature"]);
+
+    git(work.path(), &["fetch", "origin"]);
+
+    let _cwd = cwd_at(work.path());
+    let outcome = git_switch::git::rebase("origin/feature").expect("rebase call failed");
+
+    assert!(
+        matches!(outcome, git_switch::git::RebaseOutcome::Aborted),
+        "expected Aborted rebase outcome"
+    );
+
+    let git_dir = work.path().join(".git");
+    assert!(
+        !git_dir.join("rebase-merge").exists(),
+        "rebase-merge directory should not exist after abort"
+    );
+    assert!(
+        !git_dir.join("rebase-apply").exists(),
+        "rebase-apply directory should not exist after abort"
+    );
+}
+
+#[test]
+fn pinned_branches_includes_default_first() {
+    let (_bare, work) = setup();
+
+    git(work.path(), &["remote", "set-head", "origin", "main"]);
+
+    let _cwd = cwd_at(work.path());
+    let pinned = git_switch::git::pinned_branches("origin");
+
+    assert_eq!(
+        pinned.first().map(String::as_str),
+        Some("main"),
+        "expected main first, got: {pinned:?}"
+    );
+}
+
+#[test]
+fn pinned_branches_appends_keep_config_in_order_and_dedups() {
+    let (_bare, work) = setup();
+
+    git(work.path(), &["remote", "set-head", "origin", "main"]);
+    // Repo-local keep entries: deliberately duplicate "main" (the default)
+    // and reorder release branches to verify config order is preserved.
+    git(
+        work.path(),
+        &["config", "--add", "git-switch.keep", "release/v2"],
+    );
+    git(work.path(), &["config", "--add", "git-switch.keep", "main"]);
+    git(
+        work.path(),
+        &["config", "--add", "git-switch.keep", "release/v1"],
+    );
+
+    let _cwd = cwd_at(work.path());
+    let pinned = git_switch::git::pinned_branches("origin");
+
+    let position = |name: &str| pinned.iter().position(|p| p == name);
+    let main = position("main").expect("main should be present");
+    let v2 = position("release/v2").expect("release/v2 should be present");
+    let v1 = position("release/v1").expect("release/v1 should be present");
+
+    assert_eq!(main, 0, "default branch must be first, got: {pinned:?}");
+    assert!(v2 > main, "release/v2 after main, got: {pinned:?}");
+    assert!(v1 > v2, "release/v1 after release/v2, got: {pinned:?}");
+    assert_eq!(
+        pinned.iter().filter(|p| *p == "main").count(),
+        1,
+        "main should be deduped, got: {pinned:?}"
+    );
 }
 
 #[test]
