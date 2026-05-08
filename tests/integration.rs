@@ -76,6 +76,12 @@ fn setup_with_remote(remote: &str) -> (TempDir, TempDir) {
     git(bare.path(), &["init", "--bare"]);
 
     git(work.path(), &["init", "-b", "main"]);
+    // Library code under test spawns its own `git` subprocesses without our
+    // helper's GIT_*_NAME/EMAIL env, so commits it makes (e.g. during rebase)
+    // need identity from .git/config — otherwise CI hosts without a global
+    // gitconfig fail with "empty ident name".
+    git(work.path(), &["config", "user.name", "test"]);
+    git(work.path(), &["config", "user.email", "test@example.com"]);
     git(
         work.path(),
         &["remote", "add", remote, bare.path().to_str().unwrap()],
