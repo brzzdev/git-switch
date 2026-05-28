@@ -926,3 +926,71 @@ fn double_dash_switches_to_branch_named_like_subcommand() {
     let head = git(work.path(), &["branch", "--show-current"]);
     assert_eq!(stdout_str(&head).trim(), "wt");
 }
+
+#[test]
+fn wt_rm_from_inside_doomed_worktree_hands_off_to_main() {
+    let (_bare, parent, work) = setup_with_parent();
+
+    git(&work, &["branch", "feature"]);
+    let path = parent.path().join("worktrees").join("repo").join("feature");
+    git(
+        &work,
+        &["worktree", "add", path.to_str().unwrap(), "feature"],
+    );
+
+    // Run `wt rm feature` *from inside* the worktree being removed: cwd would
+    // vanish, so it must chdir to main and hand that path off for the wrapper.
+    let output = git_switch_args(&path, &["wt", "rm", "feature"]);
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+    assert!(!path.exists(), "worktree dir should be removed");
+
+    let printed = stdout_str(&output).trim().to_string();
+    assert!(
+        Path::new(&printed).is_dir() && printed.ends_with("repo"),
+        "stdout should be the main worktree path; got: {printed}"
+    );
+}
+
+#[test]
+fn handoff_fast_forwards_held_worktree_from_its_own_remote() {
+    let (_bare, parent, work) = setup_with_parent();
+
+    let path = parent.path().join("worktrees").join("repo").join("feature");
+    git(
+        &work,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "feature",
+            path.to_str().unwrap(),
+            "main",
+        ],
+    );
+
+    // Publish a commit on `feature`, record it, then rewind the worktree so it
+    // sits one commit behind its upstream.
+    fs::write(path.join("f.txt"), "v1\n").unwrap();
+    git(&path, &["add", "f.txt"]);
+    git(&path, &["commit", "-m", "remote work"]);
+    git(&path, &["push", "-u", "origin", "feature"]);
+    let upstream = stdout_str(&git(&path, &["rev-parse", "HEAD"]))
+        .trim()
+        .to_string();
+    git(&path, &["reset", "--hard", "HEAD~1"]);
+
+    // Plain `git-switch feature` from main: hands off and updates the worktree.
+    let output = git_switch(&work, "feature");
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+    assert!(
+        stderr_str(&output).contains("Pulled 1 commit"),
+        "should fast-forward the held worktree; stderr: {}",
+        stderr_str(&output)
+    );
+
+    // The worktree (not the main checkout) must now be at the upstream commit.
+    let head = stdout_str(&git(&path, &["rev-parse", "HEAD"]))
+        .trim()
+        .to_string();
+    assert_eq!(head, upstream, "worktree HEAD should be fast-forwarded");
+}
