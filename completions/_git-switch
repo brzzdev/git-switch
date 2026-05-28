@@ -1,9 +1,32 @@
 #compdef git-switch
 
 _git-switch() {
+  local -a subcommands worktree_subs
+  subcommands=(
+    'wt:Worktree commands'
+    'worktree:Worktree commands'
+  )
+  worktree_subs=(
+    'ls:List worktrees'
+    'list:List worktrees'
+    'rm:Remove worktree (also deletes branch)'
+    'remove:Remove worktree (also deletes branch)'
+  )
+
   local branches
   branches=(${(f)"$(git branch --format='%(refname:short)' 2>/dev/null)"})
-  _describe 'branch' branches
+
+  if (( CURRENT == 2 )); then
+    _describe -t subcommands 'subcommand' subcommands
+    _describe -t branches 'branch' branches
+  elif (( CURRENT == 3 )) && [[ "$words[2]" == (wt|worktree) ]]; then
+    _describe -t subcommands 'worktree subcommand' worktree_subs
+    _describe -t branches 'branch' branches
+  elif (( CURRENT == 4 )) && [[ "$words[2]" == (wt|worktree) && "$words[3]" == (rm|remove) ]]; then
+    _describe -t branches 'branch' branches
+  else
+    _describe -t branches 'branch' branches
+  fi
 }
 
 _git-switch "$@"

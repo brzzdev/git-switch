@@ -36,6 +36,25 @@ install-completions:
       echo "Unsupported shell: $SHELL" && exit 1 ;; \
   esac
 
+# Install the shell wrapper function (required for worktree cd hand-off).
+install-shell-integration:
+  #!/usr/bin/env sh
+  mkdir -p ~/.config/git-switch
+  case "$(basename "$SHELL")" in \
+    zsh|bash) \
+      cp shell/git-switch.sh ~/.config/git-switch/git-switch.sh && \
+      echo "Installed shell integration to ~/.config/git-switch/git-switch.sh" && \
+      echo "Add to your shell rc:" && \
+      echo "  source ~/.config/git-switch/git-switch.sh" ;; \
+    fish) \
+      cp shell/git-switch.fish ~/.config/git-switch/git-switch.fish && \
+      echo "Installed shell integration to ~/.config/git-switch/git-switch.fish" && \
+      echo "Add to ~/.config/fish/conf.d/git-switch.fish:" && \
+      echo "  source ~/.config/git-switch/git-switch.fish" ;; \
+    *) \
+      echo "Unsupported shell: $SHELL" && exit 1 ;; \
+  esac
+
 # Build a release binary.
 build-release:
   cargo build --release

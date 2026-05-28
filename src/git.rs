@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::{AppResult, Error};
@@ -145,8 +146,8 @@ pub fn checkout(branch: &str) -> AppResult<()> {
     Ok(())
 }
 
-pub fn fetch(remote: &str) -> AppResult<FetchOutcome> {
-    let output = Command::new("git")
+pub fn fetch(dir: Option<&Path>, remote: &str) -> AppResult<FetchOutcome> {
+    let output = git_cmd(dir)
         .args(["fetch", "--quiet", "--prune", remote])
         .output()?;
     if output.status.success() {
@@ -175,10 +176,14 @@ pub fn rebase(onto: &str) -> AppResult<RebaseOutcome> {
     Ok(RebaseOutcome::Aborted)
 }
 
-pub fn fast_forward_merge(branch: &str, remote: &str) -> AppResult<FastForwardResult> {
+pub fn fast_forward_merge(
+    dir: Option<&Path>,
+    branch: &str,
+    remote: &str,
+) -> AppResult<FastForwardResult> {
     let remote_ref = format!("{remote}/{branch}");
 
-    let has_remote = Command::new("git")
+    let has_remote = git_cmd(dir)
         .args(["rev-parse", "--verify", &remote_ref])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -189,11 +194,11 @@ pub fn fast_forward_merge(branch: &str, remote: &str) -> AppResult<FastForwardRe
         return Ok(FastForwardResult::Merged(MergeReport::NoRemote));
     }
 
-    let before = rev_parse("HEAD")?;
+    let before = rev_parse(dir, "HEAD")?;
 
     // Capture stderr so git's diverging hint and "fatal: Not possible to
     // fast-forward" don't leak — we surface a tailored message instead.
-    let output = Command::new("git")
+    let output = git_cmd(dir)
         .args([
             "-c",
             "advice.diverging=false",
@@ -208,13 +213,13 @@ pub fn fast_forward_merge(branch: &str, remote: &str) -> AppResult<FastForwardRe
         return Ok(FastForwardResult::Diverged);
     }
 
-    let after = rev_parse("HEAD")?;
+    let after = rev_parse(dir, "HEAD")?;
 
     if before == after {
         return Ok(FastForwardResult::Merged(MergeReport::UpToDate));
     }
 
-    let output = run(&["rev-list", "--count", &format!("{before}..{after}")])?;
+    let output = run_in(dir, &["rev-list", "--count", &format!("{before}..{after}")])?;
     let count: u32 = output.trim().parse()?;
     Ok(FastForwardResult::Merged(MergeReport::Pulled(count)))
 }
@@ -250,7 +255,7 @@ pub fn stale_branches(remote: &str) -> AppResult<Vec<String>> {
         }
     }
 
-    let head = rev_parse("HEAD")?;
+    let head = rev_parse(None, "HEAD")?;
 
     let mut branches: Vec<String> = merged_output
         .lines()
@@ -295,7 +300,8 @@ pub fn pinned_branches(remote: &str) -> Vec<String> {
     out
 }
 
-fn default_branch(remote: &str) -> Option<String> {
+#[must_use]
+pub(crate) fn default_branch(remote: &str) -> Option<String> {
     let head_ref = format!("refs/remotes/{remote}/HEAD");
     let prefix = format!("refs/remotes/{remote}/");
     if let Ok(output) = run(&["symbolic-ref", &head_ref]) {
@@ -317,16 +323,111 @@ fn kept_branches(remote: &str) -> HashSet<String> {
     kept
 }
 
+/// Detached worktrees have `branch: None`.
+#[derive(Debug, Clone)]
+pub struct Worktree {
+    pub path: PathBuf,
+    pub branch: Option<String>,
+    pub is_main: bool,
+}
+
+/// Lists all worktrees for the current repo. Per `git worktree list
+/// --porcelain`, the first record is the main worktree.
+pub fn worktree_list() -> AppResult<Vec<Worktree>> {
+    let output = run(&["worktree", "list", "--porcelain"])?;
+    let mut worktrees: Vec<Worktree> = Vec::new();
+    let mut path: Option<PathBuf> = None;
+    let mut branch: Option<String> = None;
+
+    let flush =
+        |worktrees: &mut Vec<Worktree>, path: &mut Option<PathBuf>, branch: &mut Option<String>| {
+            if let Some(p) = path.take() {
+                let is_main = worktrees.is_empty();
+                worktrees.push(Worktree {
+                    path: p,
+                    branch: branch.take(),
+                    is_main,
+                });
+            }
+        };
+
+    for line in output.lines() {
+        if line.is_empty() {
+            flush(&mut worktrees, &mut path, &mut branch);
+        } else if let Some(p) = line.strip_prefix("worktree ") {
+            flush(&mut worktrees, &mut path, &mut branch);
+            path = Some(PathBuf::from(p));
+        } else if let Some(b) = line.strip_prefix("branch refs/heads/") {
+            branch = Some(b.to_string());
+        }
+    }
+    flush(&mut worktrees, &mut path, &mut branch);
+    Ok(worktrees)
+}
+
 /// Branches currently checked out in any worktree (including the main one).
 /// These cannot be deleted with `git branch -D`.
 pub fn worktree_branches() -> AppResult<HashSet<String>> {
-    let output = run(&["worktree", "list", "--porcelain"])?;
-    let branches = output
-        .lines()
-        .filter_map(|l| l.strip_prefix("branch refs/heads/"))
-        .map(String::from)
-        .collect();
-    Ok(branches)
+    Ok(worktree_list()?
+        .into_iter()
+        .filter_map(|w| w.branch)
+        .collect())
+}
+
+#[must_use]
+pub fn worktree_for_branch(worktrees: &[Worktree], branch: &str) -> Option<Worktree> {
+    worktrees
+        .iter()
+        .find(|w| w.branch.as_deref() == Some(branch))
+        .cloned()
+}
+
+/// Add a worktree at `path` for `branch`. If `base` is `Some`, create the
+/// branch from `base` (e.g. `origin/main`); if `None`, check out an existing
+/// local or remote-tracking branch.
+pub fn worktree_add(path: &Path, branch: &str, base: Option<&str>) -> AppResult<()> {
+    let path_str = path_to_str(path)?;
+    let output = if let Some(base) = base {
+        Command::new("git")
+            .args(["worktree", "add", "-b", branch, path_str, base])
+            .output()?
+    } else {
+        Command::new("git")
+            .args(["worktree", "add", path_str, branch])
+            .output()?
+    };
+    if output.status.success() {
+        return Ok(());
+    }
+    Err(Error::Git {
+        command: "worktree add".to_string(),
+        message: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+    })
+}
+
+pub enum WorktreeRemoveOutcome {
+    Removed,
+    Failed(String),
+}
+
+pub fn worktree_remove(path: &Path) -> AppResult<WorktreeRemoveOutcome> {
+    let path_str = path_to_str(path)?;
+    let output = Command::new("git")
+        .args(["worktree", "remove", path_str])
+        .output()?;
+    if output.status.success() {
+        return Ok(WorktreeRemoveOutcome::Removed);
+    }
+    Ok(WorktreeRemoveOutcome::Failed(
+        String::from_utf8_lossy(&output.stderr).trim().to_string(),
+    ))
+}
+
+fn path_to_str(path: &Path) -> AppResult<&str> {
+    path.to_str().ok_or_else(|| Error::Git {
+        command: "worktree".to_string(),
+        message: format!("non-utf8 path: {}", path.display()),
+    })
 }
 
 pub fn delete_branches(branches: &[&str]) -> AppResult<()> {
@@ -334,6 +435,30 @@ pub fn delete_branches(branches: &[&str]) -> AppResult<()> {
     args.extend(branches);
     run(&args)?;
     Ok(())
+}
+
+pub enum BranchDeleteOutcome {
+    Deleted,
+    /// Kept because it has commits not merged into its upstream or HEAD.
+    NotMerged,
+    Failed(String),
+}
+
+/// Delete `branch` only if git considers it fully merged (`git branch -d`).
+/// Unlike [`delete_branches`] this never force-deletes, so unmerged work is
+/// preserved rather than silently discarded.
+pub fn delete_branch_if_merged(branch: &str) -> AppResult<BranchDeleteOutcome> {
+    let output = git_cmd(None)
+        .args(["branch", "-d", "--quiet", branch])
+        .output()?;
+    if output.status.success() {
+        return Ok(BranchDeleteOutcome::Deleted);
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if stderr.contains("not fully merged") {
+        return Ok(BranchDeleteOutcome::NotMerged);
+    }
+    Ok(BranchDeleteOutcome::Failed(stderr.trim().to_string()))
 }
 
 /// Returns true if the branch had unique commits that were merged, not just a
@@ -353,13 +478,27 @@ fn has_unique_commits(branch: &str, tip: &str, head: &str) -> bool {
     tip == head
 }
 
-fn rev_parse(refname: &str) -> AppResult<String> {
-    let output = run(&["rev-parse", refname])?;
+fn rev_parse(dir: Option<&Path>, refname: &str) -> AppResult<String> {
+    let output = run_in(dir, &["rev-parse", refname])?;
     Ok(output.trim().to_string())
 }
 
+/// A `git` command, optionally rooted in `dir` via `-C` so it operates on
+/// another worktree without mutating the process's working directory.
+fn git_cmd(dir: Option<&Path>) -> Command {
+    let mut cmd = Command::new("git");
+    if let Some(d) = dir {
+        cmd.arg("-C").arg(d);
+    }
+    cmd
+}
+
 fn run(args: &[&str]) -> AppResult<String> {
-    let output = Command::new("git").args(args).output()?;
+    run_in(None, args)
+}
+
+fn run_in(dir: Option<&Path>, args: &[&str]) -> AppResult<String> {
+    let output = git_cmd(dir).args(args).output()?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(Error::Git {
