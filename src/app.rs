@@ -5,10 +5,12 @@ use indicatif::ProgressBar;
 
 use crate::{AppResult, Error, git};
 
-struct CursorGuard(Term);
+pub mod wt;
+
+pub(crate) struct CursorGuard(Term);
 
 impl CursorGuard {
-    fn hide() -> Self {
+    pub(crate) fn hide() -> Self {
         let term = Term::stderr();
         let _ = term.hide_cursor();
         Self(term)
@@ -32,6 +34,36 @@ pub fn run(target: Option<&str>) -> AppResult<()> {
             None => return Ok(()),
         },
     };
+
+    // `git checkout` refuses for a branch already checked out in another
+    // worktree; hand off to the shell wrapper instead.
+    if old_branch.as_deref() != Some(target.as_str())
+        && let Some(held_by) = git::worktree_for_branch(&git::worktree_list()?, &target)
+    {
+        // The target may track a different remote than the current branch.
+        let target_remote = git::current_remote(Some(target.as_str()));
+        if let Err(e) = wt::update_in(&held_by.path, &target, &target_remote) {
+            eprintln!(
+                "{} update of {} failed: {e}",
+                style("!").yellow().bold(),
+                target,
+            );
+        }
+        eprintln!(
+            "{} {} is checked out at {}",
+            style("→").cyan().bold(),
+            target,
+            held_by.path.display()
+        );
+        if let Err(e) = prompt_delete_stale_branches(None, &remote) {
+            eprintln!(
+                "{} stale-branch check failed: {e}",
+                style("!").yellow().bold()
+            );
+        }
+        handoff_cd(&held_by.path);
+        return Ok(());
+    }
 
     let stashed = if git::has_tracked_changes()? {
         git::stash_push()?;
@@ -75,14 +107,33 @@ fn switch_and_update(target: &str, old_branch: Option<&str>, remote: &str) -> Ap
         git::checkout(target)?;
     }
 
+    match fetch_and_ff(None, target, remote)? {
+        git::FastForwardResult::Diverged => reconcile_diverged(target, remote)?,
+        git::FastForwardResult::Merged(report) => report_update(&report),
+    }
+
+    prompt_delete_stale_branches(if already_on_target { None } else { old_branch }, remote)?;
+
+    Ok(())
+}
+
+/// Fetch `remote` then fast-forward `branch` onto it, optionally inside the
+/// worktree at `dir` (via `git -C`). Shows a spinner and surfaces fetch
+/// failures; the caller decides how to handle the [`git::FastForwardResult`]
+/// (the in-place switch offers a rebase on diverge; worktree updates don't).
+pub(crate) fn fetch_and_ff(
+    dir: Option<&std::path::Path>,
+    branch: &str,
+    remote: &str,
+) -> AppResult<git::FastForwardResult> {
     let (fetch_outcome, merge_result) = {
-        let spinner = ProgressBar::new_spinner().with_message(format!("Updating {target}…"));
+        let spinner = ProgressBar::new_spinner().with_message(format!("Updating {branch}…"));
         let _cursor_guard = CursorGuard::hide();
         spinner.enable_steady_tick(std::time::Duration::from_millis(80));
 
         let fetch_outcome =
-            git::fetch(remote).unwrap_or_else(|e| git::FetchOutcome::Failed(e.to_string()));
-        let result = git::fast_forward_merge(target, remote);
+            git::fetch(dir, remote).unwrap_or_else(|e| git::FetchOutcome::Failed(e.to_string()));
+        let result = git::fast_forward_merge(dir, branch, remote);
 
         spinner.finish_and_clear();
         (fetch_outcome, result)
@@ -98,22 +149,15 @@ fn switch_and_update(target: &str, old_branch: Option<&str>, remote: &str) -> Ap
         }
     }
 
-    match merge_result? {
-        git::FastForwardResult::Diverged => reconcile_diverged(target, remote)?,
-        git::FastForwardResult::Merged(report) => report_update(&report),
-    }
-
-    prompt_delete_stale_branches(if already_on_target { None } else { old_branch }, remote)?;
-
-    Ok(())
+    merge_result
 }
 
-fn report_update(result: &git::MergeReport) {
+pub(crate) fn report_update(result: &git::MergeReport) {
     match result {
-        git::MergeReport::UpToDate => println!("Already up to date."),
-        git::MergeReport::Pulled(1) => println!("Pulled 1 commit."),
-        git::MergeReport::Pulled(n) => println!("Pulled {n} commits."),
-        git::MergeReport::NoRemote => println!("No remote tracking branch."),
+        git::MergeReport::UpToDate => eprintln!("Already up to date."),
+        git::MergeReport::Pulled(1) => eprintln!("Pulled 1 commit."),
+        git::MergeReport::Pulled(n) => eprintln!("Pulled {n} commits."),
+        git::MergeReport::NoRemote => eprintln!("No remote tracking branch."),
     }
 }
 
@@ -137,7 +181,7 @@ fn reconcile_diverged(branch: &str, remote: &str) -> AppResult<()> {
     }
 }
 
-fn confirm(prompt: &str, default_yes: bool) -> AppResult<bool> {
+pub(crate) fn confirm(prompt: &str, default_yes: bool) -> AppResult<bool> {
     let term = Term::stderr();
     if !term.is_term() {
         return Ok(default_yes);
@@ -163,7 +207,7 @@ fn confirm(prompt: &str, default_yes: bool) -> AppResult<bool> {
 }
 
 #[derive(Clone, Copy)]
-enum Availability {
+pub(crate) enum Availability {
     Local,
     RemoteOnly,
     Missing,
@@ -175,21 +219,29 @@ impl Availability {
     }
 }
 
-#[derive(Clone)]
-struct Pick {
-    name: String,
-    is_current: bool,
-    availability: Availability,
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PickKind {
+    Branch,
+    Worktree,
 }
 
-struct Section {
-    heading: &'static str,
-    items: Vec<Pick>,
+#[derive(Clone)]
+pub(crate) struct Pick {
+    pub name: String,
+    pub is_current: bool,
+    pub availability: Availability,
+    pub kind: PickKind,
+}
+
+pub(crate) struct Section {
+    pub heading: &'static str,
+    pub items: Vec<Pick>,
 }
 
 enum RowKind {
     Heading(String),
     Item(Pick),
+    CreateNew(String),
 }
 
 struct RenderRow {
@@ -202,12 +254,38 @@ struct View {
     selectable: Vec<usize>,
 }
 
-fn select_branch(current: Option<&str>, remote: &str) -> AppResult<Option<String>> {
-    let sections = build_sections(current, remote)?;
-    pick(current, &sections)
+pub(crate) enum Selection {
+    Existing { name: String, kind: PickKind },
+    Create(String),
 }
 
-fn build_sections(current: Option<&str>, remote: &str) -> AppResult<Vec<Section>> {
+#[derive(Clone, Copy)]
+pub(crate) struct PickerOptions {
+    pub prompt: &'static str,
+    pub allow_create_from_filter: bool,
+}
+
+fn select_branch(current: Option<&str>, remote: &str) -> AppResult<Option<String>> {
+    let sections = build_sections(current, remote, &HashSet::new())?;
+    let selection = pick(
+        current,
+        &sections,
+        PickerOptions {
+            prompt: "Switch to",
+            allow_create_from_filter: false,
+        },
+    )?;
+    Ok(selection.map(|s| match s {
+        Selection::Existing { name, .. } => name,
+        Selection::Create(_) => unreachable!("create-from-filter disabled"),
+    }))
+}
+
+pub(crate) fn build_sections(
+    current: Option<&str>,
+    remote: &str,
+    exclude: &HashSet<String>,
+) -> AppResult<Vec<Section>> {
     let local = git::local_branches()?;
     let remote_only = git::remote_only_branches(&local, remote).unwrap_or_default();
 
@@ -222,6 +300,7 @@ fn build_sections(current: Option<&str>, remote: &str) -> AppResult<Vec<Section>
 
     let pinned_picks: Vec<Pick> = pinned_names
         .iter()
+        .filter(|name| !exclude.contains(name.as_str()))
         .map(|name| {
             let in_local = local_set.contains(name.as_str());
             let in_remote = remote_set.contains(name.as_str());
@@ -236,27 +315,30 @@ fn build_sections(current: Option<&str>, remote: &str) -> AppResult<Vec<Section>
                 name: name.clone(),
                 is_current: current == Some(name.as_str()),
                 availability,
+                kind: PickKind::Branch,
             }
         })
         .collect();
 
     let local_picks: Vec<Pick> = local
         .iter()
-        .filter(|b| !pinned_set.contains(b.as_str()))
+        .filter(|b| !pinned_set.contains(b.as_str()) && !exclude.contains(b.as_str()))
         .map(|b| Pick {
             name: b.clone(),
             is_current: current == Some(b.as_str()),
             availability: Availability::Local,
+            kind: PickKind::Branch,
         })
         .collect();
 
     let remote_picks: Vec<Pick> = remote_only
         .iter()
-        .filter(|b| !pinned_set.contains(b.as_str()))
+        .filter(|b| !pinned_set.contains(b.as_str()) && !exclude.contains(b.as_str()))
         .map(|b| Pick {
             name: b.clone(),
             is_current: false,
             availability: Availability::Local,
+            kind: PickKind::Branch,
         })
         .collect();
 
@@ -300,7 +382,7 @@ fn fuzzy_match(needle_lower: &str, haystack: &str) -> bool {
     true
 }
 
-fn build_view(sections: &[Section], filter: &str) -> View {
+fn build_view(sections: &[Section], filter: &str, opts: PickerOptions) -> View {
     let needle: String = filter.chars().flat_map(char::to_lowercase).collect();
     let mut rows: Vec<RenderRow> = Vec::new();
     let mut selectable: Vec<usize> = Vec::new();
@@ -331,15 +413,27 @@ fn build_view(sections: &[Section], filter: &str) -> View {
         }
     }
 
+    if opts.allow_create_from_filter && selectable.is_empty() && !filter.is_empty() {
+        let idx = rows.len();
+        rows.push(RenderRow {
+            kind: RowKind::CreateNew(filter.to_string()),
+            section_idx: 0,
+        });
+        selectable.push(idx);
+    }
+
     View { rows, selectable }
 }
 
-fn cursor_pick_name(view: &View, cursor: usize) -> Option<String> {
+fn cursor_selection(view: &View, cursor: usize) -> Option<Selection> {
     let &row_idx = view.selectable.get(cursor)?;
-    if let RowKind::Item(p) = &view.rows[row_idx].kind {
-        Some(p.name.clone())
-    } else {
-        None
+    match &view.rows[row_idx].kind {
+        RowKind::Item(p) => Some(Selection::Existing {
+            name: p.name.clone(),
+            kind: p.kind,
+        }),
+        RowKind::CreateNew(name) => Some(Selection::Create(name.clone())),
+        RowKind::Heading(_) => None,
     }
 }
 
@@ -349,13 +443,17 @@ fn selectable_position(view: &View, name: &str) -> Option<usize> {
         .position(|&i| matches!(&view.rows[i].kind, RowKind::Item(p) if p.name == name))
 }
 
-fn pick(current: Option<&str>, sections: &[Section]) -> AppResult<Option<String>> {
+pub(crate) fn pick(
+    current: Option<&str>,
+    sections: &[Section],
+    opts: PickerOptions,
+) -> AppResult<Option<Selection>> {
     let term = Term::stderr();
     let _cursor_guard = CursorGuard::hide();
 
     let mut filter = String::new();
-    let mut view = build_view(sections, &filter);
-    if view.selectable.is_empty() {
+    let mut view = build_view(sections, &filter, opts);
+    if view.selectable.is_empty() && !opts.allow_create_from_filter {
         return Ok(None);
     }
 
@@ -363,11 +461,14 @@ fn pick(current: Option<&str>, sections: &[Section]) -> AppResult<Option<String>
         .and_then(|c| selectable_position(&view, c))
         .unwrap_or(0);
 
-    let mut drawn = render(&term, &view, cursor, &filter);
+    let mut drawn = render(&term, &view, cursor, &filter, opts.prompt);
 
     loop {
         let key = term.read_key()?;
-        let preserved = cursor_pick_name(&view, cursor);
+        let preserved = match cursor_selection(&view, cursor) {
+            Some(Selection::Existing { name, .. }) => Some(name),
+            _ => None,
+        };
         let mut filter_changed = false;
 
         match key {
@@ -408,9 +509,9 @@ fn pick(current: Option<&str>, sections: &[Section]) -> AppResult<Option<String>
                 }
             }
             Key::Enter => {
-                let name = cursor_pick_name(&view, cursor);
+                let selection = cursor_selection(&view, cursor);
                 let _ = term.clear_last_lines(drawn);
-                return Ok(name);
+                return Ok(selection);
             }
             Key::Escape => {
                 if filter.is_empty() {
@@ -424,7 +525,7 @@ fn pick(current: Option<&str>, sections: &[Section]) -> AppResult<Option<String>
         }
 
         if filter_changed {
-            view = build_view(sections, &filter);
+            view = build_view(sections, &filter, opts);
             cursor = preserved
                 .as_deref()
                 .and_then(|n| selectable_position(&view, n))
@@ -432,7 +533,7 @@ fn pick(current: Option<&str>, sections: &[Section]) -> AppResult<Option<String>
         }
 
         let _ = term.clear_last_lines(drawn);
-        drawn = render(&term, &view, cursor, &filter);
+        drawn = render(&term, &view, cursor, &filter, opts.prompt);
     }
 }
 
@@ -441,7 +542,7 @@ fn page_size(term: &Term) -> usize {
     h.saturating_sub(2).max(1)
 }
 
-fn render(term: &Term, view: &View, cursor: usize, filter: &str) -> usize {
+fn render(term: &Term, view: &View, cursor: usize, filter: &str, prompt_label: &str) -> usize {
     let (rows_term, cols_term) = term.size();
     let height = rows_term as usize;
     let width = cols_term as usize;
@@ -449,7 +550,7 @@ fn render(term: &Term, view: &View, cursor: usize, filter: &str) -> usize {
     let prompt = format!(
         "{} {} {} {}",
         style("?").green().bold(),
-        style("Switch to").bold(),
+        style(prompt_label).bold(),
         style("(type to filter):").dim(),
         filter,
     );
@@ -531,10 +632,21 @@ fn format_row(row: &RenderRow, is_cursor: bool) -> String {
                 line
             }
         }
+        RowKind::CreateNew(name) => {
+            let cursor = if is_cursor { ">" } else { " " };
+            format!(
+                "  {cursor} {} {}",
+                style("+").green().bold(),
+                style(format!("Create new: {name}")).italic()
+            )
+        }
     }
 }
 
-fn prompt_delete_stale_branches(old_branch: Option<&str>, remote: &str) -> AppResult<()> {
+pub(crate) fn prompt_delete_stale_branches(
+    old_branch: Option<&str>,
+    remote: &str,
+) -> AppResult<()> {
     let all_stale = git::stale_branches(remote)?;
     if all_stale.is_empty() {
         return Ok(());
@@ -575,6 +687,24 @@ fn prompt_delete_stale_branches(old_branch: Option<&str>, remote: &str) -> AppRe
     Ok(())
 }
 
+/// Hand a target directory to the shell wrapper, which reads it from stdout and
+/// runs `cd`. When stdout is a terminal the wrapper isn't capturing it, so a
+/// bare path would just be dumped to the screen with no `cd` — print an
+/// actionable hint to stderr instead.
+pub(crate) fn handoff_cd(path: &std::path::Path) {
+    use std::io::IsTerminal;
+    if std::io::stdout().is_terminal() {
+        eprintln!(
+            "{} shell integration not active — can't cd for you. Run:",
+            style("!").yellow().bold(),
+        );
+        eprintln!("  cd {}", path.display());
+        eprintln!("  (enable auto-cd: see README \"Shell integration\")");
+    } else {
+        println!("{}", path.display());
+    }
+}
+
 fn visual_rows(text: &str, width: usize) -> usize {
     if width == 0 {
         return 1;
@@ -583,7 +713,11 @@ fn visual_rows(text: &str, width: usize) -> usize {
     if w == 0 { 1 } else { w.div_ceil(width) }
 }
 
-fn multi_select(prompt: &str, items: &[String], defaults: &[bool]) -> AppResult<Vec<usize>> {
+pub(crate) fn multi_select(
+    prompt: &str,
+    items: &[String],
+    defaults: &[bool],
+) -> AppResult<Vec<usize>> {
     let term = Term::stderr();
     let mut selected = defaults.to_vec();
     let mut cursor = 0usize;
