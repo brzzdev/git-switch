@@ -994,3 +994,36 @@ fn handoff_fast_forwards_held_worktree_from_its_own_remote() {
         .to_string();
     assert_eq!(head, upstream, "worktree HEAD should be fast-forwarded");
 }
+
+#[test]
+fn wt_rm_reports_failure_and_keeps_branch_when_worktree_is_dirty() {
+    let (_bare, parent, work) = setup_with_parent();
+
+    git(&work, &["branch", "feature"]);
+    let path = parent.path().join("worktrees").join("repo").join("feature");
+    git(
+        &work,
+        &["worktree", "add", path.to_str().unwrap(), "feature"],
+    );
+
+    // An untracked file makes `git worktree remove` refuse without --force.
+    fs::write(path.join("dirty.txt"), "uncommitted\n").unwrap();
+
+    let output = git_switch_args(&work, &["wt", "rm", "feature"]);
+    // The command itself succeeds (per-worktree failures are reported, not fatal).
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+    assert!(
+        stderr_str(&output).contains("failed to remove"),
+        "should report the removal failure; stderr: {}",
+        stderr_str(&output)
+    );
+
+    // Nothing was destroyed: the worktree dir survives and the branch remains.
+    assert!(path.exists(), "worktree dir should still exist on failure");
+    let branches = git(&work, &["branch", "--format=%(refname:short)"]);
+    assert!(
+        stdout_str(&branches).lines().any(|l| l == "feature"),
+        "branch must not be deleted when removal failed; got: {}",
+        stdout_str(&branches)
+    );
+}
