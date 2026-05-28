@@ -931,6 +931,16 @@ fn double_dash_switches_to_branch_named_like_subcommand() {
 
     let head = git(work.path(), &["branch", "--show-current"]);
     assert_eq!(stdout_str(&head).trim(), "wt");
+
+    // Switching off `main` makes it a stale merged branch, which triggers the
+    // delete prompt. Non-interactively that must neither block nor act: `main`
+    // must survive (regression guard for the multi_select TTY check).
+    let branches = git(work.path(), &["branch", "--format=%(refname:short)"]);
+    assert!(
+        stdout_str(&branches).lines().any(|l| l == "main"),
+        "main must not be auto-deleted in a non-interactive run; got: {}",
+        stdout_str(&branches)
+    );
 }
 
 #[test]

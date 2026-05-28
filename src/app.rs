@@ -449,6 +449,11 @@ pub(crate) fn pick(
     opts: PickerOptions,
 ) -> AppResult<Option<Selection>> {
     let term = Term::stderr();
+    // Non-interactive (piped/CI): no TTY to drive the picker, so select nothing
+    // instead of blocking on key input.
+    if !term.is_term() {
+        return Ok(None);
+    }
     let _cursor_guard = CursorGuard::hide();
 
     let mut filter = String::new();
@@ -719,6 +724,11 @@ pub(crate) fn multi_select(
     defaults: &[bool],
 ) -> AppResult<Vec<usize>> {
     let term = Term::stderr();
+    // Non-interactive (piped/CI): we can't prompt, so make no selection rather
+    // than blocking on key input or silently acting on the defaults.
+    if !term.is_term() {
+        return Ok(Vec::new());
+    }
     let mut selected = defaults.to_vec();
     let mut cursor = 0usize;
     let header = format!("{} {}", style("?").green().bold(), style(prompt).bold());
