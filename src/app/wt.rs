@@ -196,6 +196,9 @@ pub(crate) fn update_in(path: &Path, branch: &str, remote: &str) -> AppResult<()
             remote,
             branch,
         ),
+        // A worktree branch with no upstream is unremarkable here — unlike the
+        // in-place switch, stay quiet rather than printing "No remote…".
+        git::FastForwardResult::Merged(git::MergeReport::NoRemote) => {}
         git::FastForwardResult::Merged(report) => report_update(&report),
     }
     Ok(())

@@ -778,6 +778,12 @@ fn wt_cd_to_existing_worktree_prints_path() {
         printed.ends_with("worktrees/repo/feature") && Path::new(&printed).is_dir(),
         "stdout should be the existing worktree path; got: {printed}"
     );
+    // A worktree branch without an upstream must not emit "No remote…" noise.
+    assert!(
+        !stderr_str(&output).contains("No remote"),
+        "cd to a worktree should stay quiet about missing upstream; got: {}",
+        stderr_str(&output)
+    );
 }
 
 #[test]
