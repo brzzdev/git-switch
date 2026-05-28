@@ -56,12 +56,44 @@ fn git(dir: &Path, args: &[&str]) -> Output {
     output
 }
 
-fn git_switch(dir: &Path, branch: &str) -> Output {
+fn git_switch_args(dir: &Path, args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_git-switch"))
-        .arg(branch)
+        .args(args)
         .current_dir(dir)
         .output()
         .expect("failed to run git-switch")
+}
+
+fn git_switch(dir: &Path, branch: &str) -> Output {
+    git_switch_args(dir, &[branch])
+}
+
+/// Like `setup`, but places the working clone inside a parent `TempDir` so
+/// worktrees created at `<parent>/worktrees/<repo>/...` land in cleanable
+/// space. Returns `(bare, parent, work_path)`.
+fn setup_with_parent() -> (TempDir, TempDir, PathBuf) {
+    let bare = TempDir::new().unwrap();
+    let parent = TempDir::new().unwrap();
+    let work = parent.path().join("repo");
+    fs::create_dir(&work).unwrap();
+
+    git(bare.path(), &["init", "--bare"]);
+
+    git(&work, &["init", "-b", "main"]);
+    git(&work, &["config", "user.name", "test"]);
+    git(&work, &["config", "user.email", "test@example.com"]);
+    git(
+        &work,
+        &["remote", "add", "origin", bare.path().to_str().unwrap()],
+    );
+
+    fs::write(work.join("file.txt"), "hello\n").unwrap();
+    git(&work, &["add", "file.txt"]);
+    git(&work, &["commit", "-m", "initial"]);
+    git(&work, &["push", "-u", "origin", "main"]);
+    git(&work, &["remote", "set-head", "origin", "main"]);
+
+    (bare, parent, work)
 }
 
 /// Create a bare "remote" and a working clone with one commit on `main`.
@@ -141,9 +173,9 @@ fn fast_forward_pull() {
 
     assert!(output.status.success(), "stderr: {}", stderr_str(&output));
     assert!(
-        stdout_str(&output).contains("Pulled 1 commit"),
-        "stdout: {}",
-        stdout_str(&output)
+        stderr_str(&output).contains("Pulled 1 commit"),
+        "stderr: {}",
+        stderr_str(&output)
     );
 
     let content = fs::read_to_string(work.path().join("file.txt")).unwrap();
@@ -169,9 +201,9 @@ fn auto_stash_and_restore() {
 
     assert!(output.status.success(), "stderr: {}", stderr_str(&output));
     assert!(
-        stdout_str(&output).contains("Pulled 1 commit"),
-        "stdout: {}",
-        stdout_str(&output)
+        stderr_str(&output).contains("Pulled 1 commit"),
+        "stderr: {}",
+        stderr_str(&output)
     );
 
     // Local modification must survive the round-trip.
@@ -418,6 +450,10 @@ fn help_flag_prints_usage() {
         out.contains("Usage: git-switch"),
         "expected usage line, got: {out}"
     );
+    assert!(
+        out.contains("git-switch wt"),
+        "expected worktree usage in help, got: {out}"
+    );
 }
 
 #[test]
@@ -448,9 +484,9 @@ fn non_origin_remote_pulls_via_branch_config() {
 
     assert!(output.status.success(), "stderr: {}", stderr_str(&output));
     assert!(
-        stdout_str(&output).contains("Pulled 1 commit"),
-        "stdout: {}",
-        stdout_str(&output)
+        stderr_str(&output).contains("Pulled 1 commit"),
+        "stderr: {}",
+        stderr_str(&output)
     );
 
     let content = fs::read_to_string(work.path().join("file.txt")).unwrap();
@@ -643,4 +679,250 @@ fn detached_head_can_switch_to_branch() {
 
     let head = git(work.path(), &["branch", "--show-current"]);
     assert_eq!(stdout_str(&head).trim(), "main");
+}
+
+#[test]
+fn wt_creates_worktree_for_existing_local_branch() {
+    let (_bare, parent, work) = setup_with_parent();
+
+    git(&work, &["branch", "feature"]);
+
+    let output = git_switch_args(&work, &["wt", "feature"]);
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+
+    let expected = parent.path().join("worktrees").join("repo").join("feature");
+    assert!(
+        expected.exists(),
+        "worktree should exist at {}",
+        expected.display()
+    );
+    assert!(
+        stdout_str(&output).trim().ends_with("repo/feature"),
+        "stdout should be the worktree path; got: {}",
+        stdout_str(&output)
+    );
+
+    let list = git(&work, &["worktree", "list", "--porcelain"]);
+    let s = stdout_str(&list);
+    assert!(
+        s.contains("branch refs/heads/feature"),
+        "expected `feature` worktree; got: {s}"
+    );
+}
+
+#[test]
+fn wt_creates_new_branch_from_default_when_branch_absent() {
+    let (_bare, parent, work) = setup_with_parent();
+
+    let output = git_switch_args(&work, &["wt", "brand-new"]);
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+
+    let expected = parent
+        .path()
+        .join("worktrees")
+        .join("repo")
+        .join("brand-new");
+    assert!(
+        expected.exists(),
+        "worktree should exist at {}",
+        expected.display()
+    );
+
+    // The new branch should have a base commit (from origin/main).
+    let head = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(&expected)
+        .output()
+        .unwrap();
+    assert!(head.status.success(), "stderr: {}", stderr_str(&head));
+}
+
+#[test]
+fn wt_preserves_slashes_as_subdirs() {
+    let (_bare, parent, work) = setup_with_parent();
+
+    git(&work, &["branch", "feature/nested"]);
+
+    let output = git_switch_args(&work, &["wt", "feature/nested"]);
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+
+    let expected = parent
+        .path()
+        .join("worktrees")
+        .join("repo")
+        .join("feature")
+        .join("nested");
+    assert!(
+        expected.exists(),
+        "nested worktree should exist at {}",
+        expected.display()
+    );
+}
+
+#[test]
+fn wt_cd_to_existing_worktree_prints_path() {
+    let (_bare, parent, work) = setup_with_parent();
+
+    git(&work, &["branch", "feature"]);
+    let path = parent.path().join("worktrees").join("repo").join("feature");
+    git(
+        &work,
+        &["worktree", "add", path.to_str().unwrap(), "feature"],
+    );
+
+    let output = git_switch_args(&work, &["wt", "feature"]);
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+
+    let printed = stdout_str(&output).trim().to_string();
+    assert!(
+        printed.ends_with("worktrees/repo/feature") && Path::new(&printed).is_dir(),
+        "stdout should be the existing worktree path; got: {printed}"
+    );
+}
+
+#[test]
+fn wt_refuses_when_target_path_is_stale_non_worktree_directory() {
+    let (_bare, parent, work) = setup_with_parent();
+
+    git(&work, &["branch", "feature"]);
+    let stale = parent.path().join("worktrees").join("repo").join("feature");
+    fs::create_dir_all(&stale).unwrap();
+    fs::write(stale.join("leftover.txt"), "junk").unwrap();
+
+    let output = git_switch_args(&work, &["wt", "feature"]);
+    assert!(!output.status.success());
+
+    let combined = format!("{}{}", stdout_str(&output), stderr_str(&output));
+    assert!(
+        combined.contains("exists but is not a registered worktree"),
+        "expected stale-dir error; got: {combined}"
+    );
+}
+
+#[test]
+fn wt_ls_lists_all_worktrees() {
+    let (_bare, parent, work) = setup_with_parent();
+
+    git(&work, &["branch", "feature"]);
+    let path = parent.path().join("worktrees").join("repo").join("feature");
+    git(
+        &work,
+        &["worktree", "add", path.to_str().unwrap(), "feature"],
+    );
+
+    let output = git_switch_args(&work, &["wt", "ls"]);
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+
+    let out = stdout_str(&output);
+    assert!(out.contains("main"), "ls should mention main; got: {out}");
+    assert!(
+        out.contains("feature"),
+        "ls should mention feature; got: {out}"
+    );
+}
+
+#[test]
+fn wt_rm_removes_worktree_and_deletes_branch() {
+    let (_bare, parent, work) = setup_with_parent();
+
+    git(&work, &["branch", "feature"]);
+    let path = parent.path().join("worktrees").join("repo").join("feature");
+    git(
+        &work,
+        &["worktree", "add", path.to_str().unwrap(), "feature"],
+    );
+
+    let output = git_switch_args(&work, &["wt", "rm", "feature"]);
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+
+    assert!(
+        !path.exists(),
+        "worktree dir should be removed: {}",
+        path.display()
+    );
+
+    let branches = git(&work, &["branch", "--format=%(refname:short)"]);
+    assert!(
+        !stdout_str(&branches).lines().any(|l| l == "feature"),
+        "branch should be deleted; got: {}",
+        stdout_str(&branches)
+    );
+}
+
+#[test]
+fn in_place_switch_hands_off_when_branch_is_held_by_worktree() {
+    let (_bare, parent, work) = setup_with_parent();
+
+    git(&work, &["branch", "feature"]);
+    let path = parent.path().join("worktrees").join("repo").join("feature");
+    git(
+        &work,
+        &["worktree", "add", path.to_str().unwrap(), "feature"],
+    );
+
+    // Plain `git-switch feature` from main worktree: branch is held → handoff.
+    let output = git_switch(&work, "feature");
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+
+    let printed = stdout_str(&output).trim().to_string();
+    assert!(
+        printed.ends_with("worktrees/repo/feature") && Path::new(&printed).is_dir(),
+        "stdout should be the worktree path for the shell wrapper; got: {printed}"
+    );
+
+    // Original worktree's HEAD must NOT have changed (no checkout happened).
+    let head = git(&work, &["branch", "--show-current"]);
+    assert_eq!(stdout_str(&head).trim(), "main");
+}
+
+#[test]
+fn wt_rm_keeps_branch_with_unmerged_commits() {
+    let (_bare, parent, work) = setup_with_parent();
+
+    git(&work, &["branch", "feature"]);
+    let path = parent.path().join("worktrees").join("repo").join("feature");
+    git(
+        &work,
+        &["worktree", "add", path.to_str().unwrap(), "feature"],
+    );
+
+    // A commit on `feature` that never lands on main → not fully merged.
+    fs::write(path.join("new.txt"), "unmerged\n").unwrap();
+    git(&path, &["add", "new.txt"]);
+    git(&path, &["commit", "-m", "unmerged work"]);
+
+    let output = git_switch_args(&work, &["wt", "rm", "feature"]);
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+
+    assert!(
+        !path.exists(),
+        "worktree dir should be removed: {}",
+        path.display()
+    );
+
+    // Branch must survive, since -d refuses to drop unmerged commits.
+    let branches = git(&work, &["branch", "--format=%(refname:short)"]);
+    assert!(
+        stdout_str(&branches).lines().any(|l| l == "feature"),
+        "branch should be kept; got: {}",
+        stdout_str(&branches)
+    );
+    assert!(
+        stderr_str(&output).contains("unmerged"),
+        "should warn about unmerged commits; got: {}",
+        stderr_str(&output)
+    );
+}
+
+#[test]
+fn double_dash_switches_to_branch_named_like_subcommand() {
+    let (_bare, work) = setup();
+
+    git(work.path(), &["branch", "wt"]);
+
+    let output = git_switch_args(work.path(), &["--", "wt"]);
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+
+    let head = git(work.path(), &["branch", "--show-current"]);
+    assert_eq!(stdout_str(&head).trim(), "wt");
 }
