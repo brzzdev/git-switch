@@ -7,7 +7,8 @@ use indicatif::ProgressBar;
 
 use super::{
     Availability, CursorGuard, Pick, PickKind, PickerOptions, Section, Selection, build_sections,
-    fetch_and_ff, handoff_cd, multi_select, pick, prompt_delete_stale_branches, report_update,
+    fetch_and_ff, handoff_cd, interactive_term, multi_select, pick, prompt_delete_stale_branches,
+    report_update,
 };
 use crate::{AppResult, Error, git};
 
@@ -112,6 +113,11 @@ pub fn run_rm(target: Option<&str>) -> AppResult<()> {
             })?;
         vec![i]
     } else {
+        // Non-interactive (piped/CI): we can't prompt, so remove nothing rather
+        // than blocking on key input.
+        let Some(mut term) = interactive_term() else {
+            return Ok(());
+        };
         let items: Vec<String> = removable
             .iter()
             .map(|w| w.branch.clone().unwrap_or_default())
@@ -121,6 +127,7 @@ pub fn run_rm(target: Option<&str>) -> AppResult<()> {
             "Remove worktrees (space to toggle, →/← all/none)",
             &items,
             &defaults,
+            &mut term,
         )?
     };
 
@@ -251,6 +258,9 @@ fn select(
     remote: &str,
 ) -> AppResult<Option<Action>> {
     let sections = build_wt_sections(worktrees, current_branch, remote)?;
+    let Some(mut term) = interactive_term() else {
+        return Ok(None);
+    };
     let selection = pick(
         current_branch,
         &sections,
@@ -258,6 +268,7 @@ fn select(
             prompt: "Worktree",
             allow_create_from_filter: true,
         },
+        &mut term,
     )?;
     let action = match selection {
         None => return Ok(None),

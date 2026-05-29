@@ -23,6 +23,27 @@ impl Drop for CursorGuard {
     }
 }
 
+/// Source of key events for the interactive pickers. Abstracting input behind a
+/// trait lets the event loops be driven by a scripted sequence in tests; the
+/// real implementation just delegates to [`Term::read_key`].
+pub(crate) trait KeySource {
+    fn read_key(&mut self) -> std::io::Result<Key>;
+}
+
+impl KeySource for Term {
+    fn read_key(&mut self) -> std::io::Result<Key> {
+        Term::read_key(self)
+    }
+}
+
+/// The stderr terminal, but only when it's interactive. Returns `None` in
+/// piped/CI runs where there's no TTY to drive a prompt — callers fall back to
+/// doing nothing rather than blocking on key input.
+fn interactive_term() -> Option<Term> {
+    let term = Term::stderr();
+    term.is_term().then_some(term)
+}
+
 pub fn run(target: Option<&str>) -> AppResult<()> {
     let old_branch = git::current_branch()?;
     let remote = git::current_remote(old_branch.as_deref());
@@ -182,10 +203,9 @@ fn reconcile_diverged(branch: &str, remote: &str) -> AppResult<()> {
 }
 
 pub(crate) fn confirm(prompt: &str, default_yes: bool) -> AppResult<bool> {
-    let term = Term::stderr();
-    if !term.is_term() {
+    let Some(term) = interactive_term() else {
         return Ok(default_yes);
-    }
+    };
     let hint = if default_yes { "[Y/n]" } else { "[y/N]" };
     eprint!(
         "{} {} {} ",
@@ -267,6 +287,9 @@ pub(crate) struct PickerOptions {
 
 fn select_branch(current: Option<&str>, remote: &str) -> AppResult<Option<String>> {
     let sections = build_sections(current, remote, &HashSet::new())?;
+    let Some(mut term) = interactive_term() else {
+        return Ok(None);
+    };
     let selection = pick(
         current,
         &sections,
@@ -274,6 +297,7 @@ fn select_branch(current: Option<&str>, remote: &str) -> AppResult<Option<String
             prompt: "Switch to",
             allow_create_from_filter: false,
         },
+        &mut term,
     )?;
     Ok(selection.map(|s| match s {
         Selection::Existing { name, .. } => name,
@@ -447,13 +471,9 @@ pub(crate) fn pick(
     current: Option<&str>,
     sections: &[Section],
     opts: PickerOptions,
+    keys: &mut impl KeySource,
 ) -> AppResult<Option<Selection>> {
     let term = Term::stderr();
-    // Non-interactive (piped/CI): no TTY to drive the picker, so select nothing
-    // instead of blocking on key input.
-    if !term.is_term() {
-        return Ok(None);
-    }
     let _cursor_guard = CursorGuard::hide();
 
     let mut filter = String::new();
@@ -469,7 +489,7 @@ pub(crate) fn pick(
     let mut drawn = render(&term, &view, cursor, &filter, opts.prompt);
 
     loop {
-        let key = term.read_key()?;
+        let key = keys.read_key()?;
         let preserved = match cursor_selection(&view, cursor) {
             Some(Selection::Existing { name, .. }) => Some(name),
             _ => None,
@@ -673,6 +693,12 @@ pub(crate) fn prompt_delete_stale_branches(
         return Ok(());
     }
 
+    // Non-interactive (piped/CI): we can't prompt, so delete nothing rather than
+    // blocking on key input or silently acting on the defaults.
+    let Some(mut term) = interactive_term() else {
+        return Ok(());
+    };
+
     let defaults: Vec<bool> = stale
         .iter()
         .map(|b| old_branch.is_some_and(|old| old == b))
@@ -682,6 +708,7 @@ pub(crate) fn prompt_delete_stale_branches(
         "Delete stale branches (space to toggle, →/← all/none)",
         &stale,
         &defaults,
+        &mut term,
     )?;
 
     let to_delete: Vec<&str> = selections.iter().map(|&i| stale[i].as_str()).collect();
@@ -722,13 +749,9 @@ pub(crate) fn multi_select(
     prompt: &str,
     items: &[String],
     defaults: &[bool],
+    keys: &mut impl KeySource,
 ) -> AppResult<Vec<usize>> {
     let term = Term::stderr();
-    // Non-interactive (piped/CI): we can't prompt, so make no selection rather
-    // than blocking on key input or silently acting on the defaults.
-    if !term.is_term() {
-        return Ok(Vec::new());
-    }
     let mut selected = defaults.to_vec();
     let mut cursor = 0usize;
     let header = format!("{} {}", style("?").green().bold(), style(prompt).bold());
@@ -756,7 +779,7 @@ pub(crate) fn multi_select(
     let mut drawn = draw(cursor, &selected);
 
     loop {
-        match term.read_key()? {
+        match keys.read_key()? {
             Key::ArrowUp if cursor > 0 => cursor -= 1,
             Key::ArrowDown if cursor + 1 < items.len() => cursor += 1,
             Key::Char(' ') => selected[cursor] = !selected[cursor],
@@ -780,4 +803,179 @@ pub(crate) fn multi_select(
         .filter(|(_, s)| **s)
         .map(|(i, _)| i)
         .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Drives an event loop from a fixed list of keys. Once exhausted it yields
+    /// `Escape` so a test that under-specifies its script bails out of the loop
+    /// rather than hanging.
+    struct ScriptedKeys(std::vec::IntoIter<Key>);
+
+    impl ScriptedKeys {
+        fn new(keys: Vec<Key>) -> Self {
+            Self(keys.into_iter())
+        }
+    }
+
+    impl KeySource for ScriptedKeys {
+        fn read_key(&mut self) -> std::io::Result<Key> {
+            Ok(self.0.next().unwrap_or(Key::Escape))
+        }
+    }
+
+    fn section(heading: &'static str, names: &[&str]) -> Section {
+        Section {
+            heading,
+            items: names
+                .iter()
+                .map(|n| Pick {
+                    name: (*n).to_string(),
+                    is_current: false,
+                    availability: Availability::Local,
+                    kind: PickKind::Branch,
+                })
+                .collect(),
+        }
+    }
+
+    /// Keys for typing a literal string into the filter.
+    fn typed(s: &str) -> Vec<Key> {
+        s.chars().map(Key::Char).collect()
+    }
+
+    const SELECT_OPTS: PickerOptions = PickerOptions {
+        prompt: "Test",
+        allow_create_from_filter: false,
+    };
+
+    const CREATE_OPTS: PickerOptions = PickerOptions {
+        prompt: "Test",
+        allow_create_from_filter: true,
+    };
+
+    fn run_pick(sections: &[Section], opts: PickerOptions, keys: Vec<Key>) -> Option<Selection> {
+        let mut keys = ScriptedKeys::new(keys);
+        pick(None, sections, opts, &mut keys).expect("pick should not error")
+    }
+
+    fn picked_name(sel: Option<Selection>) -> Option<String> {
+        match sel {
+            Some(Selection::Existing { name, .. }) => Some(name),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn type_to_filter_then_enter_selects_match() {
+        let sections = vec![section("Local", &["main", "feature", "develop"])];
+        let mut keys = typed("feat");
+        keys.push(Key::Enter);
+        let sel = run_pick(&sections, SELECT_OPTS, keys);
+        assert_eq!(picked_name(sel).as_deref(), Some("feature"));
+    }
+
+    #[test]
+    fn arrow_up_from_first_wraps_to_last() {
+        let sections = vec![section("Local", &["a", "b", "c"])];
+        let sel = run_pick(&sections, SELECT_OPTS, vec![Key::ArrowUp, Key::Enter]);
+        assert_eq!(picked_name(sel).as_deref(), Some("c"));
+    }
+
+    #[test]
+    fn arrow_down_from_last_wraps_to_first() {
+        let sections = vec![section("Local", &["a", "b", "c"])];
+        // End lands on the last row; ArrowDown should wrap back to the first.
+        let sel = run_pick(
+            &sections,
+            SELECT_OPTS,
+            vec![Key::End, Key::ArrowDown, Key::Enter],
+        );
+        assert_eq!(picked_name(sel).as_deref(), Some("a"));
+    }
+
+    #[test]
+    fn non_matching_filter_with_enter_creates() {
+        let sections = vec![section("Local", &["main"])];
+        let mut keys = typed("xyz");
+        keys.push(Key::Enter);
+        let sel = run_pick(&sections, CREATE_OPTS, keys);
+        match sel {
+            Some(Selection::Create(name)) => assert_eq!(name, "xyz"),
+            _ => panic!("expected Selection::Create"),
+        }
+    }
+
+    #[test]
+    fn cursor_navigation_skips_headings() {
+        let sections = vec![section("Pinned", &["p1"]), section("Local", &["l1", "l2"])];
+        // From p1, one ArrowDown should land on l1, stepping over the "Local"
+        // heading row rather than onto it.
+        let sel = run_pick(&sections, SELECT_OPTS, vec![Key::ArrowDown, Key::Enter]);
+        assert_eq!(picked_name(sel).as_deref(), Some("l1"));
+    }
+
+    #[test]
+    fn escape_on_empty_filter_returns_none() {
+        let sections = vec![section("Local", &["a", "b"])];
+        let sel = run_pick(&sections, SELECT_OPTS, vec![Key::Escape]);
+        assert!(sel.is_none());
+    }
+
+    #[test]
+    fn escape_on_nonempty_filter_clears_it() {
+        let sections = vec![section("Local", &["alpha", "beta"])];
+        // Filter down to "beta" (hiding alpha), Escape to clear the filter, then
+        // Home + Enter selects alpha — proving it is back in the list.
+        let mut keys = typed("beta");
+        keys.extend([Key::Escape, Key::Home, Key::Enter]);
+        let sel = run_pick(&sections, SELECT_OPTS, keys);
+        assert_eq!(picked_name(sel).as_deref(), Some("alpha"));
+    }
+
+    fn run_multi_select(items: &[&str], defaults: &[bool], keys: Vec<Key>) -> Vec<usize> {
+        let items: Vec<String> = items.iter().map(|s| (*s).to_string()).collect();
+        let mut keys = ScriptedKeys::new(keys);
+        multi_select("Test", &items, defaults, &mut keys).expect("multi_select should not error")
+    }
+
+    #[test]
+    fn multi_select_space_toggles_returns_index_set() {
+        let got = run_multi_select(
+            &["a", "b", "c"],
+            &[false, false, false],
+            vec![
+                Key::Char(' '),
+                Key::ArrowDown,
+                Key::ArrowDown,
+                Key::Char(' '),
+                Key::Enter,
+            ],
+        );
+        assert_eq!(got, vec![0, 2]);
+    }
+
+    #[test]
+    fn multi_select_right_selects_all() {
+        let got = run_multi_select(
+            &["a", "b"],
+            &[false, false],
+            vec![Key::ArrowRight, Key::Enter],
+        );
+        assert_eq!(got, vec![0, 1]);
+    }
+
+    #[test]
+    fn multi_select_left_selects_none() {
+        let got = run_multi_select(&["a", "b"], &[true, true], vec![Key::ArrowLeft, Key::Enter]);
+        assert!(got.is_empty());
+    }
+
+    #[test]
+    fn multi_select_escape_returns_empty() {
+        let got = run_multi_select(&["a", "b"], &[true, true], vec![Key::Escape]);
+        assert!(got.is_empty());
+    }
 }
