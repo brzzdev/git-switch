@@ -7,7 +7,7 @@ use indicatif::ProgressBar;
 
 use super::{
     Availability, CursorGuard, Pick, PickKind, PickerOptions, Section, Selection, build_sections,
-    fetch_and_ff, handoff_cd, interactive_term, multi_select, pick, prompt_delete_stale_branches,
+    fetch_and_ff, handoff_cd, interactive_keys, multi_select, pick, prompt_delete_stale_branches,
     report_update,
 };
 use crate::{AppResult, Error, git};
@@ -66,6 +66,9 @@ pub fn run(target: Option<&str>) -> AppResult<()> {
     };
 
     if let Err(e) = prompt_delete_stale_branches(None, &remote) {
+        if e.is_interrupt() {
+            return Err(e);
+        }
         eprintln!(
             "{} stale-branch check failed: {e}",
             style("!").yellow().bold()
@@ -115,7 +118,7 @@ pub fn run_rm(target: Option<&str>) -> AppResult<()> {
     } else {
         // Non-interactive (piped/CI): we can't prompt, so remove nothing rather
         // than blocking on key input.
-        let Some(mut term) = interactive_term() else {
+        let Some(mut keys) = interactive_keys() else {
             return Ok(());
         };
         let items: Vec<String> = removable
@@ -127,7 +130,7 @@ pub fn run_rm(target: Option<&str>) -> AppResult<()> {
             "Remove worktrees (space to toggle, →/← all/none)",
             &items,
             &defaults,
-            &mut term,
+            &mut keys,
         )?
     };
 
@@ -258,7 +261,7 @@ fn select(
     remote: &str,
 ) -> AppResult<Option<Action>> {
     let sections = build_wt_sections(worktrees, current_branch, remote)?;
-    let Some(mut term) = interactive_term() else {
+    let Some(mut keys) = interactive_keys() else {
         return Ok(None);
     };
     let selection = pick(
@@ -268,7 +271,7 @@ fn select(
             prompt: "Worktree",
             allow_create_from_filter: true,
         },
-        &mut term,
+        &mut keys,
     )?;
     let action = match selection {
         None => return Ok(None),

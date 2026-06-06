@@ -36,12 +36,122 @@ impl KeySource for Term {
     }
 }
 
+/// The real key source backing the interactive pickers. It holds the terminal in
+/// raw mode for the picker's lifetime and lets `crossterm` parse key events.
+pub(crate) struct TermKeys {
+    term: Term,
+    raw: Option<raw::RawMode>,
+}
+
+impl KeySource for TermKeys {
+    fn read_key(&mut self) -> std::io::Result<Key> {
+        if let Some(raw) = &self.raw {
+            return raw.read_key();
+        }
+        self.term.read_key()
+    }
+}
+
 /// The stderr terminal, but only when it's interactive. Returns `None` in
 /// piped/CI runs where there's no TTY to drive a prompt — callers fall back to
 /// doing nothing rather than blocking on key input.
 fn interactive_term() -> Option<Term> {
     let term = Term::stderr();
     term.is_term().then_some(term)
+}
+
+/// A key source for an interactive prompt, or `None` in piped/CI runs. Mirrors
+/// [`interactive_term`] but acquires raw mode so arrow keys are read reliably.
+fn interactive_keys() -> Option<TermKeys> {
+    let term = interactive_term()?;
+    Some(TermKeys {
+        term,
+        // Acquiring raw mode can fail; fall back to `console`.
+        raw: raw::RawMode::acquire().ok(),
+    })
+}
+
+/// Raw-mode key reader. `console::read_key` re-arms raw mode on every keystroke
+/// and has been fragile around split escape sequences; `crossterm` keeps raw
+/// mode active and uses its battle-tested event parser instead.
+mod raw {
+    use std::io;
+
+    use console::Key;
+    use crossterm::{
+        event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, read},
+        terminal::{disable_raw_mode, enable_raw_mode},
+    };
+
+    /// Zero-sized guard: enabling raw mode is process-global, and [`Drop`]
+    /// disables it again.
+    pub(crate) struct RawMode;
+
+    impl RawMode {
+        pub(crate) fn acquire() -> io::Result<Self> {
+            enable_raw_mode()?;
+            Ok(Self)
+        }
+
+        // `&self` is a capability token: holding the guard proves raw mode is
+        // active, even though reading uses crossterm's global event source.
+        #[allow(clippy::unused_self)]
+        pub(crate) fn read_key(&self) -> io::Result<Key> {
+            loop {
+                let Event::Key(event) = read()? else {
+                    continue;
+                };
+                if event.kind == KeyEventKind::Release {
+                    continue;
+                }
+                return translate_key(event);
+            }
+        }
+    }
+
+    fn translate_key(event: KeyEvent) -> io::Result<Key> {
+        if event.modifiers.contains(KeyModifiers::CONTROL)
+            && matches!(event.code, KeyCode::Char('c' | 'C'))
+        {
+            return Err(io::Error::new(io::ErrorKind::Interrupted, "interrupted"));
+        }
+
+        Ok(match event.code {
+            KeyCode::Backspace => Key::Backspace,
+            KeyCode::Enter => Key::Enter,
+            KeyCode::Left => Key::ArrowLeft,
+            KeyCode::Right => Key::ArrowRight,
+            KeyCode::Up => Key::ArrowUp,
+            KeyCode::Down => Key::ArrowDown,
+            KeyCode::Home => Key::Home,
+            KeyCode::End => Key::End,
+            KeyCode::PageUp => Key::PageUp,
+            KeyCode::PageDown => Key::PageDown,
+            KeyCode::Tab => Key::Tab,
+            KeyCode::BackTab => Key::BackTab,
+            KeyCode::Delete => Key::Del,
+            KeyCode::Insert => Key::Insert,
+            KeyCode::Esc => Key::Escape,
+            KeyCode::Char('a' | 'A') if event.modifiers.contains(KeyModifiers::CONTROL) => {
+                Key::Home
+            }
+            KeyCode::Char('e' | 'E') if event.modifiers.contains(KeyModifiers::CONTROL) => Key::End,
+            KeyCode::Char(c)
+                if !event
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                Key::Char(c)
+            }
+            _ => Key::Unknown,
+        })
+    }
+
+    impl Drop for RawMode {
+        fn drop(&mut self) {
+            let _ = disable_raw_mode();
+        }
+    }
 }
 
 pub fn run(target: Option<&str>) -> AppResult<()> {
@@ -77,6 +187,9 @@ pub fn run(target: Option<&str>) -> AppResult<()> {
             held_by.path.display()
         );
         if let Err(e) = prompt_delete_stale_branches(None, &remote) {
+            if e.is_interrupt() {
+                return Err(e);
+            }
             eprintln!(
                 "{} stale-branch check failed: {e}",
                 style("!").yellow().bold()
@@ -287,7 +400,7 @@ pub(crate) struct PickerOptions {
 
 fn select_branch(current: Option<&str>, remote: &str) -> AppResult<Option<String>> {
     let sections = build_sections(current, remote, &HashSet::new())?;
-    let Some(mut term) = interactive_term() else {
+    let Some(mut keys) = interactive_keys() else {
         return Ok(None);
     };
     let selection = pick(
@@ -297,7 +410,7 @@ fn select_branch(current: Option<&str>, remote: &str) -> AppResult<Option<String
             prompt: "Switch to",
             allow_create_from_filter: false,
         },
-        &mut term,
+        &mut keys,
     )?;
     Ok(selection.map(|s| match s {
         Selection::Existing { name, .. } => name,
@@ -579,17 +692,22 @@ fn render(term: &Term, view: &View, cursor: usize, filter: &str, prompt_label: &
         style("(type to filter):").dim(),
         filter,
     );
-    eprintln!("{prompt}");
+    render_line(&prompt);
     let mut drawn = visual_rows(&prompt, width);
 
     if view.selectable.is_empty() {
         let line = style("  (no matches)").dim().to_string();
-        eprintln!("{line}");
+        render_line(&line);
         drawn += visual_rows(&line, width);
         return drawn;
     }
 
-    let viewport_h = height.saturating_sub(drawn).max(3);
+    // Reserve one trailing line of headroom. If the render filled the full
+    // terminal height, the final newline would scroll the screen up by a line
+    // each redraw; `clear_last_lines` then can't reach the scrolled-off prompt
+    // (cursor-up clamps at the top row), so stale prompt lines pile up and the
+    // live prompt scrolls out of view.
+    let viewport_h = height.saturating_sub(drawn + 1).max(3);
     let total_rows = view.rows.len();
     let cursor_row = view.selectable.get(cursor).copied().unwrap_or(0);
 
@@ -621,14 +739,14 @@ fn render(term: &Term, view: &View, cursor: usize, filter: &str, prompt_label: &
         && let RowKind::Heading(text) = &view.rows[h].kind
     {
         let line = style(text).bold().dim().to_string();
-        eprintln!("{line}");
+        render_line(&line);
         drawn += visual_rows(&line, width);
     }
 
     let end = (scroll + content_h).min(total_rows);
     for r in scroll..end {
         let line = format_row(&view.rows[r], r == cursor_row);
-        eprintln!("{line}");
+        render_line(&line);
         drawn += visual_rows(&line, width);
     }
 
@@ -695,7 +813,7 @@ pub(crate) fn prompt_delete_stale_branches(
 
     // Non-interactive (piped/CI): we can't prompt, so delete nothing rather than
     // blocking on key input or silently acting on the defaults.
-    let Some(mut term) = interactive_term() else {
+    let Some(mut keys) = interactive_keys() else {
         return Ok(());
     };
 
@@ -708,7 +826,7 @@ pub(crate) fn prompt_delete_stale_branches(
         "Delete stale branches (space to toggle, →/← all/none)",
         &stale,
         &defaults,
-        &mut term,
+        &mut keys,
     )?;
 
     let to_delete: Vec<&str> = selections.iter().map(|&i| stale[i].as_str()).collect();
@@ -745,6 +863,13 @@ fn visual_rows(text: &str, width: usize) -> usize {
     if w == 0 { 1 } else { w.div_ceil(width) }
 }
 
+fn render_line(line: &str) {
+    // Emit `\r\n` explicitly: raw mode disables the terminal's `\n`→`\r\n`
+    // translation. Routing through `eprint!` (rather than a raw fd write) keeps
+    // libtest's output capture working, so passing picker tests stay quiet.
+    eprint!("{line}\r\n");
+}
+
 pub(crate) fn multi_select(
     prompt: &str,
     items: &[String],
@@ -759,15 +884,28 @@ pub(crate) fn multi_select(
     let _cursor_guard = CursorGuard::hide();
 
     let draw = |cursor: usize, selected: &[bool]| -> usize {
-        let width = term.size().1 as usize;
+        let (rows_term, cols_term) = term.size();
+        let (height, width) = (rows_term as usize, cols_term as usize);
         let mut rows = visual_rows(&header, width);
-        eprintln!("{header}");
-        for (i, item) in items.iter().enumerate() {
+        render_line(&header);
+
+        // Scroll a window of items around the cursor and reserve a trailing line
+        // of headroom, so a long list never overflows the screen and scrolls the
+        // prompt out of `clear_last_lines`' reach (see `render`).
+        let viewport = height.saturating_sub(rows + 1).max(1);
+        let total = items.len();
+        let scroll = if total <= viewport || cursor + 1 < viewport {
+            0
+        } else {
+            (cursor + 1 - viewport).min(total - viewport)
+        };
+        let end = (scroll + viewport).min(total);
+        for i in scroll..end {
             let arrow = if i == cursor { ">" } else { " " };
             let check = if selected[i] { "[x]" } else { "[ ]" };
-            let line = format!("  {arrow} {check} {item}");
+            let line = format!("  {arrow} {check} {}", items[i]);
             rows += visual_rows(&line, width);
-            eprintln!("{line}");
+            render_line(&line);
         }
         rows
     };

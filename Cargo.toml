@@ -11,6 +11,7 @@ repository = "https://github.com/brzzdev/git-switch"
 
 [dependencies]
 console = "0.16"
+crossterm = "0.29"
 ctrlc = "3"
 indicatif = "0.18"
 thiserror = "2"

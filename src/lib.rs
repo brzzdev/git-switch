@@ -20,3 +20,14 @@ pub enum Error {
     #[error("invalid number from git: {0}")]
     ParseInt(#[from] std::num::ParseIntError),
 }
+
+impl Error {
+    /// True when this wraps a Ctrl+C (`Interrupted`) raised by an interactive
+    /// prompt. Callers that otherwise swallow prompt errors must still honour it
+    /// so the user can cancel — raw mode delivers Ctrl+C as this error rather
+    /// than a SIGINT.
+    #[must_use]
+    pub fn is_interrupt(&self) -> bool {
+        matches!(self, Error::Io(io) if io.kind() == std::io::ErrorKind::Interrupted)
+    }
+}

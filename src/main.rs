@@ -10,9 +10,7 @@ fn main() {
     let result = dispatch(&args);
 
     if let Err(e) = result {
-        if let git_switch::Error::Io(io) = &e
-            && io.kind() == std::io::ErrorKind::Interrupted
-        {
+        if e.is_interrupt() {
             let _ = console::Term::stderr().show_cursor();
             process::exit(130);
         }
