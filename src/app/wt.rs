@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use std::env;
 use std::path::{Path, PathBuf};
 
-use console::style;
+use console::{measure_text_width, style};
 use indicatif::ProgressBar;
 
 use super::{
@@ -86,17 +86,65 @@ pub fn run(target: Option<&str>) -> AppResult<()> {
 
 pub fn run_ls() -> AppResult<()> {
     let worktrees = git::worktree_list()?;
+    let track = git::ahead_behind_map();
+
     let max_branch = worktrees
         .iter()
         .map(|w| w.branch.as_deref().unwrap_or("(detached)").len())
         .max()
         .unwrap_or(0);
-    for w in worktrees {
+
+    // Build the styled status segment per row up front so the path column can be
+    // aligned to the widest one (ANSI codes inflate byte length, so pad by
+    // visible width rather than relying on `{:width$}`).
+    let statuses: Vec<String> = worktrees
+        .iter()
+        .map(|w| {
+            let dirty = !w.prunable && git::worktree_dirty(&w.path);
+            let (ahead, behind) = w
+                .branch
+                .as_deref()
+                .and_then(|b| track.get(b).copied())
+                .unwrap_or((0, 0));
+            status_segment(dirty, ahead, behind)
+        })
+        .collect();
+    let status_width = statuses
+        .iter()
+        .map(|s| measure_text_width(s))
+        .max()
+        .unwrap_or(0);
+
+    for (w, status) in worktrees.iter().zip(&statuses) {
         let label = w.branch.as_deref().unwrap_or("(detached)");
         let main_mark = if w.is_main { "*" } else { " " };
-        println!("{main_mark} {label:max_branch$}  {}", w.path.display());
+        if status_width == 0 {
+            println!("{main_mark} {label:max_branch$}  {}", w.path.display());
+        } else {
+            let pad = " ".repeat(status_width - measure_text_width(status));
+            println!(
+                "{main_mark} {label:max_branch$}  {status}{pad}  {}",
+                w.path.display()
+            );
+        }
     }
     Ok(())
+}
+
+/// A worktree's status flags for `wt ls`: a dirty marker plus ahead/behind
+/// upstream counts. Returns an empty string when the tree is clean and in sync.
+fn status_segment(dirty: bool, ahead: u32, behind: u32) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if dirty {
+        parts.push(style("●").yellow().to_string());
+    }
+    if ahead > 0 {
+        parts.push(style(format!("↑{ahead}")).green().to_string());
+    }
+    if behind > 0 {
+        parts.push(style(format!("↓{behind}")).red().to_string());
+    }
+    parts.join(" ")
 }
 
 pub fn run_rm(target: Option<&str>) -> AppResult<()> {

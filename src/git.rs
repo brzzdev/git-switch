@@ -376,6 +376,54 @@ pub fn worktree_list() -> AppResult<Vec<Worktree>> {
     Ok(worktrees)
 }
 
+/// True if the worktree at `path` has uncommitted changes (tracked edits or
+/// untracked, non-ignored files). A missing/unreadable path reports clean.
+#[must_use]
+pub fn worktree_dirty(path: &Path) -> bool {
+    git_cmd(Some(path))
+        .args(["status", "--porcelain"])
+        .output()
+        .is_ok_and(|o| o.status.success() && !o.stdout.is_empty())
+}
+
+/// Maps each local branch to its (ahead, behind) commit counts versus its
+/// upstream. Built from a single `for-each-ref` over the shared `refs/heads`,
+/// so it costs one git call regardless of how many worktrees exist. Branches
+/// with no upstream (or a `[gone]` one) are absent from the map.
+#[must_use]
+pub fn ahead_behind_map() -> HashMap<String, (u32, u32)> {
+    let Ok(output) = run(&[
+        "for-each-ref",
+        "--format=%(refname:short)%09%(upstream:track,nobracket)",
+        "refs/heads/",
+    ]) else {
+        return HashMap::new();
+    };
+
+    output
+        .lines()
+        .filter_map(|line| {
+            let (name, track) = line.split_once('\t')?;
+            let (ahead, behind) = parse_track(track);
+            (ahead != 0 || behind != 0).then(|| (name.to_string(), (ahead, behind)))
+        })
+        .collect()
+}
+
+/// Parses git's `upstream:track,nobracket` field, e.g. `ahead 2, behind 1`.
+fn parse_track(track: &str) -> (u32, u32) {
+    let (mut ahead, mut behind) = (0, 0);
+    for part in track.split(',') {
+        let part = part.trim();
+        if let Some(n) = part.strip_prefix("ahead ") {
+            ahead = n.parse().unwrap_or(0);
+        } else if let Some(n) = part.strip_prefix("behind ") {
+            behind = n.parse().unwrap_or(0);
+        }
+    }
+    (ahead, behind)
+}
+
 /// Branches currently checked out in any worktree (including the main one).
 /// These cannot be deleted with `git branch -D`.
 pub fn worktree_branches() -> AppResult<HashSet<String>> {
@@ -545,6 +593,24 @@ fn git_cmd(dir: Option<&Path>) -> Command {
 
 fn run(args: &[&str]) -> AppResult<String> {
     run_in(None, args)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_track;
+
+    #[test]
+    fn parse_track_reads_ahead_behind() {
+        assert_eq!(parse_track("ahead 2"), (2, 0));
+        assert_eq!(parse_track("behind 1"), (0, 1));
+        assert_eq!(parse_track("ahead 2, behind 1"), (2, 1));
+    }
+
+    #[test]
+    fn parse_track_in_sync_or_gone_is_zero() {
+        assert_eq!(parse_track(""), (0, 0));
+        assert_eq!(parse_track("gone"), (0, 0));
+    }
 }
 
 fn run_in(dir: Option<&Path>, args: &[&str]) -> AppResult<String> {
