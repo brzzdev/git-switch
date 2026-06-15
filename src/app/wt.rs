@@ -160,6 +160,24 @@ pub fn run_rm(target: Option<&str>) -> AppResult<()> {
         return Ok(());
     }
 
+    // Canonicalize both sides: `env::current_dir()` and git's reported path can
+    // disagree on symlinks (e.g. macOS /var vs /private/var), which would let a
+    // plain `starts_with` miss a cwd that really is inside a doomed worktree.
+    let cwd = env::current_dir().ok().and_then(|c| c.canonicalize().ok());
+    let contains_cwd = |w: &git::Worktree| {
+        let wt_path = w.path.canonicalize().unwrap_or_else(|_| w.path.clone());
+        cwd.as_ref().is_some_and(|c| c.starts_with(&wt_path))
+    };
+
+    // The worktree the cwd sits in, for the `(current)` picker marker. Longest
+    // path wins so a nested worktree beats its enclosing one.
+    let current = removable
+        .iter()
+        .enumerate()
+        .filter(|(_, w)| contains_cwd(w))
+        .max_by_key(|(_, w)| w.path.as_os_str().len())
+        .map(|(i, _)| i);
+
     let selected_indices: Vec<usize> = if let Some(name) = target {
         let i = removable
             .iter()
@@ -175,7 +193,11 @@ pub fn run_rm(target: Option<&str>) -> AppResult<()> {
         let Some(mut keys) = interactive_keys() else {
             return Ok(());
         };
-        let items: Vec<String> = removable.iter().map(rm_label).collect();
+        let items: Vec<String> = removable
+            .iter()
+            .enumerate()
+            .map(|(i, w)| rm_label(w, current == Some(i)))
+            .collect();
         let defaults = vec![false; items.len()];
         multi_select(
             "Remove worktrees (space to toggle, →/← all/none)",
@@ -189,17 +211,9 @@ pub fn run_rm(target: Option<&str>) -> AppResult<()> {
         return Ok(());
     }
 
-    // Canonicalize both sides: `env::current_dir()` and git's reported path can
-    // disagree on symlinks (e.g. macOS /var vs /private/var), which would let a
-    // plain `starts_with` miss a cwd that really is inside a doomed worktree.
-    let cwd = env::current_dir().ok().and_then(|c| c.canonicalize().ok());
-    let cwd_will_vanish = selected_indices.iter().any(|&i| {
-        let wt_path = removable[i]
-            .path
-            .canonicalize()
-            .unwrap_or_else(|_| removable[i].path.clone());
-        cwd.as_ref().is_some_and(|c| c.starts_with(&wt_path))
-    });
+    let cwd_will_vanish = selected_indices
+        .iter()
+        .any(|&i| contains_cwd(&removable[i]));
 
     if cwd_will_vanish {
         env::set_current_dir(&main.path)?;
@@ -393,17 +407,20 @@ fn resolve_target(name: &str, worktrees: &[git::Worktree], remote: &str) -> AppR
 
 /// Picker label for a removable worktree: its branch when it has one, else the
 /// path (detached HEAD). Missing-on-disk worktrees are flagged so the user knows
-/// the entry is a leftover registration.
-fn rm_label(w: &git::Worktree) -> String {
-    let base = match &w.branch {
+/// the entry is a leftover registration; the worktree the cwd sits in is marked
+/// `(current)` so it's identifiable even though it's labelled by branch.
+fn rm_label(w: &git::Worktree, is_current: bool) -> String {
+    let mut label = match &w.branch {
         Some(branch) => branch.clone(),
         None => w.path.display().to_string(),
     };
     if w.prunable {
-        format!("{base} (missing)")
-    } else {
-        base
+        label.push_str(" (missing)");
     }
+    if is_current {
+        label.push_str(" (current)");
+    }
+    label
 }
 
 /// A `wt rm <name>` target matches a worktree by branch name or by the final
