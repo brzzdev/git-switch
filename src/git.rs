@@ -127,6 +127,16 @@ pub fn checkout(branch: &str) -> AppResult<()> {
     }
 
     let stderr = String::from_utf8_lossy(&output.stderr);
+
+    // The branch is held by a worktree whose directory is gone. Clear the dead
+    // registration and retry; a live worktree survives prune, so this is a
+    // no-op there and the original error still surfaces.
+    if is_stale_worktree_error(&stderr) {
+        let _ = worktree_prune();
+        run(&["checkout", branch, "--quiet"])?;
+        return Ok(());
+    }
+
     if !stderr.contains("Submodule") || !stderr.contains("could not be updated") {
         return Err(Error::Git {
             command: "checkout".to_string(),
@@ -329,6 +339,10 @@ pub struct Worktree {
     pub path: PathBuf,
     pub branch: Option<String>,
     pub is_main: bool,
+    /// Registered but its directory is gone (`git worktree prune` clears it).
+    /// Such an entry still blocks checkout/add of its branch, but cannot be
+    /// entered.
+    pub prunable: bool,
 }
 
 /// Lists all worktrees for the current repo. Per `git worktree list
@@ -336,32 +350,29 @@ pub struct Worktree {
 pub fn worktree_list() -> AppResult<Vec<Worktree>> {
     let output = run(&["worktree", "list", "--porcelain"])?;
     let mut worktrees: Vec<Worktree> = Vec::new();
-    let mut path: Option<PathBuf> = None;
-    let mut branch: Option<String> = None;
-
-    let flush =
-        |worktrees: &mut Vec<Worktree>, path: &mut Option<PathBuf>, branch: &mut Option<String>| {
-            if let Some(p) = path.take() {
-                let is_main = worktrees.is_empty();
-                worktrees.push(Worktree {
-                    path: p,
-                    branch: branch.take(),
-                    is_main,
-                });
-            }
-        };
+    // Each porcelain record starts with a `worktree <path>` line; the attributes
+    // that follow apply to it until the next such line. Build the record in place
+    // and push it when the next one begins (or the output ends).
+    let mut current: Option<Worktree> = None;
 
     for line in output.lines() {
-        if line.is_empty() {
-            flush(&mut worktrees, &mut path, &mut branch);
-        } else if let Some(p) = line.strip_prefix("worktree ") {
-            flush(&mut worktrees, &mut path, &mut branch);
-            path = Some(PathBuf::from(p));
-        } else if let Some(b) = line.strip_prefix("branch refs/heads/") {
-            branch = Some(b.to_string());
+        if let Some(p) = line.strip_prefix("worktree ") {
+            worktrees.extend(current.take());
+            current = Some(Worktree {
+                path: PathBuf::from(p),
+                branch: None,
+                is_main: worktrees.is_empty(),
+                prunable: false,
+            });
+        } else if let Some(wt) = current.as_mut() {
+            if let Some(b) = line.strip_prefix("branch refs/heads/") {
+                wt.branch = Some(b.to_string());
+            } else if line == "prunable" || line.starts_with("prunable ") {
+                wt.prunable = true;
+            }
         }
     }
-    flush(&mut worktrees, &mut path, &mut branch);
+    worktrees.extend(current);
     Ok(worktrees)
 }
 
@@ -387,22 +398,48 @@ pub fn worktree_for_branch(worktrees: &[Worktree], branch: &str) -> Option<Workt
 /// local or remote-tracking branch.
 pub fn worktree_add(path: &Path, branch: &str, base: Option<&str>) -> AppResult<()> {
     let path_str = path_to_str(path)?;
-    let output = if let Some(base) = base {
-        Command::new("git")
-            .args(["worktree", "add", "-b", branch, path_str, base])
-            .output()?
-    } else {
-        Command::new("git")
-            .args(["worktree", "add", path_str, branch])
-            .output()?
+    let args: Vec<&str> = match base {
+        Some(base) => vec!["worktree", "add", "-b", branch, path_str, base],
+        None => vec!["worktree", "add", path_str, branch],
     };
+
+    let output = Command::new("git").args(&args).output()?;
     if output.status.success() {
         return Ok(());
     }
+
+    // A worktree whose directory was deleted by hand stays registered and
+    // blocks re-adding ("missing but already registered"). Clear the dead
+    // registrations and try once more.
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if is_stale_worktree_error(&stderr) {
+        let _ = worktree_prune();
+        let retry = Command::new("git").args(&args).output()?;
+        if retry.status.success() {
+            return Ok(());
+        }
+        return Err(Error::Git {
+            command: "worktree add".to_string(),
+            message: String::from_utf8_lossy(&retry.stderr).trim().to_string(),
+        });
+    }
+
     Err(Error::Git {
         command: "worktree add".to_string(),
-        message: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+        message: stderr.trim().to_string(),
     })
+}
+
+/// Remove worktree registrations whose working directories no longer exist.
+pub fn worktree_prune() -> AppResult<()> {
+    run(&["worktree", "prune"])?;
+    Ok(())
+}
+
+/// True when git refused because a branch/path is held by a worktree whose
+/// directory is gone — a `git worktree prune` clears the stale registration.
+fn is_stale_worktree_error(stderr: &str) -> bool {
+    stderr.contains("already registered") || stderr.contains("used by worktree")
 }
 
 pub enum WorktreeRemoveOutcome {
@@ -418,6 +455,19 @@ pub fn worktree_remove(path: &Path) -> AppResult<WorktreeRemoveOutcome> {
     if output.status.success() {
         return Ok(WorktreeRemoveOutcome::Removed);
     }
+
+    // The directory is already gone (deleted by hand): `git worktree remove` may
+    // balk, but `prune` clears the dead registration. Only claim success if the
+    // entry is actually gone afterwards — a locked worktree survives prune, and
+    // reporting a phantom removal would then delete a branch still held by it.
+    if !path.exists() {
+        let _ = worktree_prune();
+        let still_registered = worktree_list()?.iter().any(|w| w.path == path);
+        if !still_registered {
+            return Ok(WorktreeRemoveOutcome::Removed);
+        }
+    }
+
     Ok(WorktreeRemoveOutcome::Failed(
         String::from_utf8_lossy(&output.stderr).trim().to_string(),
     ))

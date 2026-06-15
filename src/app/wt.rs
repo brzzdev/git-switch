@@ -19,7 +19,13 @@ enum Action {
 }
 
 pub fn run(target: Option<&str>) -> AppResult<()> {
-    let worktrees = git::worktree_list()?;
+    // Drop worktrees whose directory was deleted by hand: they can't be entered,
+    // so treat their branch as one to (re)create. `worktree_add`/`checkout` prune
+    // the stale registration when it gets in the way.
+    let worktrees: Vec<git::Worktree> = git::worktree_list()?
+        .into_iter()
+        .filter(|w| !w.prunable)
+        .collect();
     let main = main_of(&worktrees)?;
     let current_branch = git::current_branch()?;
     let remote = git::current_remote(current_branch.as_deref());
@@ -96,10 +102,10 @@ pub fn run_ls() -> AppResult<()> {
 pub fn run_rm(target: Option<&str>) -> AppResult<()> {
     let worktrees = git::worktree_list()?;
     let main = main_of(&worktrees)?.clone();
-    let removable: Vec<git::Worktree> = worktrees
-        .into_iter()
-        .filter(|w| !w.is_main && w.branch.is_some())
-        .collect();
+    // Include branchless (detached) and missing worktrees too: a worktree whose
+    // directory was deleted by hand often shows up detached, and cleaning up its
+    // dead registration is exactly what `wt rm` is for.
+    let removable: Vec<git::Worktree> = worktrees.into_iter().filter(|w| !w.is_main).collect();
 
     if removable.is_empty() {
         eprintln!("No worktrees to remove.");
@@ -109,10 +115,10 @@ pub fn run_rm(target: Option<&str>) -> AppResult<()> {
     let selected_indices: Vec<usize> = if let Some(name) = target {
         let i = removable
             .iter()
-            .position(|w| w.branch.as_deref() == Some(name))
+            .position(|w| rm_matches(w, name))
             .ok_or_else(|| Error::Git {
                 command: "worktree remove".into(),
-                message: format!("no worktree for branch '{name}'"),
+                message: format!("no worktree matching '{name}'"),
             })?;
         vec![i]
     } else {
@@ -121,10 +127,7 @@ pub fn run_rm(target: Option<&str>) -> AppResult<()> {
         let Some(mut keys) = interactive_keys() else {
             return Ok(());
         };
-        let items: Vec<String> = removable
-            .iter()
-            .map(|w| w.branch.clone().unwrap_or_default())
-            .collect();
+        let items: Vec<String> = removable.iter().map(rm_label).collect();
         let defaults = vec![false; items.len()];
         multi_select(
             "Remove worktrees (space to toggle, →/← all/none)",
@@ -157,9 +160,13 @@ pub fn run_rm(target: Option<&str>) -> AppResult<()> {
     for &i in &selected_indices {
         let wt = &removable[i];
         match git::worktree_remove(&wt.path)? {
-            git::WorktreeRemoveOutcome::Removed => {
-                let branch = wt.branch.as_deref().unwrap_or_default();
-                match git::delete_branch_if_merged(branch)? {
+            git::WorktreeRemoveOutcome::Removed => match wt.branch.as_deref() {
+                None => eprintln!(
+                    "{} removed worktree at {}",
+                    style("✓").green().bold(),
+                    wt.path.display()
+                ),
+                Some(branch) => match git::delete_branch_if_merged(branch)? {
                     git::BranchDeleteOutcome::Deleted => eprintln!(
                         "{} removed worktree {branch} (branch deleted)",
                         style("✓").green().bold(),
@@ -173,8 +180,8 @@ pub fn run_rm(target: Option<&str>) -> AppResult<()> {
                         "{} removed worktree {branch} (branch delete failed: {detail})",
                         style("!").yellow().bold(),
                     ),
-                }
-            }
+                },
+            },
             git::WorktreeRemoveOutcome::Failed(detail) => {
                 eprintln!(
                     "{} failed to remove {}:",
@@ -334,6 +341,27 @@ fn resolve_target(name: &str, worktrees: &[git::Worktree], remote: &str) -> AppR
         return Ok(Action::CreateForBranch(name.to_string()));
     }
     Ok(Action::CreateNewBranch(name.to_string()))
+}
+
+/// Picker label for a removable worktree: its branch when it has one, else the
+/// path (detached HEAD). Missing-on-disk worktrees are flagged so the user knows
+/// the entry is a leftover registration.
+fn rm_label(w: &git::Worktree) -> String {
+    let base = match &w.branch {
+        Some(branch) => branch.clone(),
+        None => w.path.display().to_string(),
+    };
+    if w.prunable {
+        format!("{base} (missing)")
+    } else {
+        base
+    }
+}
+
+/// A `wt rm <name>` target matches a worktree by branch name or by the final
+/// component of its path — the latter lets you name a detached/missing worktree.
+fn rm_matches(w: &git::Worktree, name: &str) -> bool {
+    w.branch.as_deref() == Some(name) || w.path.file_name().and_then(|n| n.to_str()) == Some(name)
 }
 
 fn main_of(worktrees: &[git::Worktree]) -> AppResult<&git::Worktree> {

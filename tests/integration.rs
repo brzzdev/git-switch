@@ -806,6 +806,35 @@ fn wt_refuses_when_target_path_is_stale_non_worktree_directory() {
 }
 
 #[test]
+fn wt_recreates_worktree_whose_directory_was_deleted_by_hand() {
+    let (_bare, parent, work) = setup_with_parent();
+
+    // Create a worktree, then delete its directory without telling git. The
+    // registration lingers as "missing but already registered" and would block
+    // `git worktree add`; git-switch should prune it and recreate cleanly.
+    let path = parent.path().join("worktrees").join("repo").join("feature");
+    git(
+        &work,
+        &["worktree", "add", path.to_str().unwrap(), "-b", "feature"],
+    );
+    fs::remove_dir_all(&path).unwrap();
+
+    let output = git_switch_args(&work, &["wt", "feature"]);
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+    assert!(
+        path.is_dir(),
+        "worktree should be recreated at {}",
+        path.display()
+    );
+
+    let list = stdout_str(&git(&work, &["worktree", "list", "--porcelain"]));
+    assert!(
+        !list.contains("prunable"),
+        "stale registration should be pruned; got: {list}"
+    );
+}
+
+#[test]
 fn wt_ls_lists_all_worktrees() {
     let (_bare, parent, work) = setup_with_parent();
 
@@ -1041,5 +1070,29 @@ fn wt_rm_reports_failure_and_keeps_branch_when_worktree_is_dirty() {
         stdout_str(&branches).lines().any(|l| l == "feature"),
         "branch must not be deleted when removal failed; got: {}",
         stdout_str(&branches)
+    );
+}
+
+#[test]
+fn wt_rm_clears_missing_detached_worktree_by_dir_name() {
+    let (_bare, parent, work) = setup_with_parent();
+
+    // A detached worktree whose directory was deleted by hand: it reports no
+    // branch and lingers as a "prunable" registration. `wt rm` must still be
+    // able to target it (by directory name) and clear the dead entry.
+    let path = parent.path().join("worktrees").join("repo").join("scratch");
+    git(
+        &work,
+        &["worktree", "add", "--detach", path.to_str().unwrap()],
+    );
+    fs::remove_dir_all(&path).unwrap();
+
+    let output = git_switch_args(&work, &["wt", "rm", "scratch"]);
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+
+    let list = stdout_str(&git(&work, &["worktree", "list", "--porcelain"]));
+    assert!(
+        !list.contains("prunable") && !list.contains("scratch"),
+        "stale registration should be cleared; got: {list}"
     );
 }

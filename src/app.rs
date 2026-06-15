@@ -168,8 +168,11 @@ pub fn run(target: Option<&str>) -> AppResult<()> {
 
     // `git checkout` refuses for a branch already checked out in another
     // worktree; hand off to the shell wrapper instead.
+    // A prunable worktree (directory gone) still holds the branch but can't be
+    // entered; skip it so we fall through to the self-healing checkout below.
     if old_branch.as_deref() != Some(target.as_str())
-        && let Some(held_by) = git::worktree_for_branch(&git::worktree_list()?, &target)
+        && let Some(held_by) =
+            git::worktree_for_branch(&git::worktree_list()?, &target).filter(|w| !w.prunable)
     {
         // The target may track a different remote than the current branch.
         let target_remote = git::current_remote(Some(target.as_str()));
