@@ -11,6 +11,9 @@ pub enum Error {
     #[error(transparent)]
     Io(#[from] std::io::Error),
 
+    #[error("not on a branch (detached HEAD); nothing to refresh")]
+    Detached,
+
     #[error("branch diverged from remote")]
     Diverged,
 

@@ -158,6 +158,15 @@ pub fn run(target: Option<&str>) -> AppResult<()> {
     let old_branch = git::current_branch()?;
     let remote = git::current_remote(old_branch.as_deref());
 
+    // `git-switch .` refreshes the branch we're already on against its remote,
+    // rather than switching anywhere.
+    if target == Some(".") {
+        let Some(current) = old_branch.as_deref() else {
+            return Err(Error::Detached);
+        };
+        return refresh_current(&remote, current);
+    }
+
     let target = match target {
         Some(name) => name.to_string(),
         None => match select_branch(old_branch.as_deref(), &remote)? {
@@ -218,23 +227,161 @@ pub fn run(target: Option<&str>) -> AppResult<()> {
             eprintln!("Switching back to {old} and restoring stashed changes.");
             let _ = git::checkout(old);
         }
-        match git::stash_pop() {
-            Ok(git::StashPopOutcome::Clean) => {}
-            Ok(git::StashPopOutcome::Conflict) => {
-                eprintln!(
-                    "Conflicts detected restoring stashed changes. Resolve them, then run `git stash drop` to clean up the stash entry."
-                );
-            }
-            Err(e) => {
-                eprintln!("error: {e}");
-                eprintln!(
-                    "Stash pop failed. Inspect `git status` and `git stash list` to recover manually."
-                );
-            }
-        }
+        report_stash_pop();
     }
 
     result
+}
+
+/// Pop the auto-stash and report the outcome — a clean restore, a conflict to
+/// resolve, or an outright failure. Shared by the switch and refresh flows.
+fn report_stash_pop() {
+    match git::stash_pop() {
+        Ok(git::StashPopOutcome::Clean) => {}
+        Ok(git::StashPopOutcome::Conflict) => eprintln!(
+            "Conflicts detected restoring stashed changes. Resolve them, then run `git stash drop` to clean up the stash entry."
+        ),
+        Err(e) => {
+            eprintln!("error: {e}");
+            eprintln!(
+                "Stash pop failed. Inspect `git status` and `git stash list` to recover manually."
+            );
+        }
+    }
+}
+
+/// Outcome of the keep/discard prompt shown when `git-switch .` finds local
+/// work that a refresh would otherwise overwrite.
+enum RefreshChoice {
+    /// Rebase local commits onto the remote, restoring any stashed edits.
+    Keep,
+    /// Hard-reset to the remote, discarding local commits and tracked edits.
+    Discard,
+}
+
+/// Refresh the branch we're on against its remote (`git-switch .`).
+///
+/// A clean branch with no local-only commits simply fast-forwards (the common
+/// case after pulling someone else's pushes). When there's local work —
+/// uncommitted changes and/or commits not on the remote, e.g. after rebasing a
+/// branch through a web UI — it offers to keep that work (rebase onto the
+/// remote, restoring stashed edits) or discard it (hard reset to the remote).
+fn refresh_current(remote: &str, current: &str) -> AppResult<()> {
+    let remote_ref = format!("{remote}/{current}");
+
+    let has_remote = {
+        let spinner = ProgressBar::new_spinner().with_message(format!("Fetching {remote}…"));
+        let _cursor_guard = CursorGuard::hide();
+        spinner.enable_steady_tick(std::time::Duration::from_millis(80));
+
+        let fetch_outcome =
+            git::fetch(None, remote).unwrap_or_else(|e| git::FetchOutcome::Failed(e.to_string()));
+        let has_remote = git::remote_branch_exists(remote, current);
+
+        spinner.finish_and_clear();
+
+        report_fetch_failure(&fetch_outcome);
+        has_remote
+    };
+
+    if !has_remote {
+        report_update(&git::MergeReport::NoRemote);
+        return Ok(());
+    }
+
+    let dirty = git::has_tracked_changes()?;
+    let ahead = git::commits_not_on_remote(remote, current)?;
+
+    // No local work: fast-forward, or already up to date. The history always
+    // fast-forwards here, but the merge can still be refused by an untracked
+    // file in the way (`has_tracked_changes` ignores untracked files), so report
+    // that case honestly instead of claiming the branch is current.
+    if !dirty && ahead == 0 {
+        match git::fast_forward_merge(None, current, remote)? {
+            git::FastForwardResult::Merged(report) => report_update(&report),
+            git::FastForwardResult::Diverged => eprintln!(
+                "{} couldn't fast-forward {current} to {remote_ref}; an untracked file is likely blocking it",
+                style("!").yellow().bold()
+            ),
+        }
+        return Ok(());
+    }
+
+    match prompt_keep_discard(current, &remote_ref, dirty, ahead)? {
+        Some(RefreshChoice::Discard) => {
+            git::reset_hard(remote, current)?;
+            eprintln!("Reset {current} to {remote_ref}.");
+        }
+        Some(RefreshChoice::Keep) => keep_local_work(&remote_ref, dirty)?,
+        None => eprintln!("Left {current} unchanged."),
+    }
+    Ok(())
+}
+
+/// Keep local work while refreshing: stash any uncommitted edits, rebase the
+/// branch onto `remote_ref`, then restore the edits. Mirrors the auto-stash
+/// dance in [`run`] so conflicts and pop failures are surfaced the same way.
+fn keep_local_work(remote_ref: &str, dirty: bool) -> AppResult<()> {
+    if dirty {
+        git::stash_push()?;
+    }
+
+    let result = rebase_onto(remote_ref);
+
+    // A clean rebase replays the stash cleanly; an abort leaves the tree at the
+    // original HEAD, so the stash still applies. Restore either way.
+    if dirty {
+        report_stash_pop();
+    }
+
+    result
+}
+
+/// Describe the local work, then ask whether to keep or discard it. Returns
+/// `None` on cancel or in non-interactive runs, where acting destructively
+/// without confirmation would be unsafe.
+fn prompt_keep_discard(
+    branch: &str,
+    remote_ref: &str,
+    dirty: bool,
+    ahead: u32,
+) -> AppResult<Option<RefreshChoice>> {
+    if ahead > 0 {
+        let commits = if ahead == 1 { "commit" } else { "commits" };
+        eprintln!("{branch} has {ahead} {commits} not on {remote_ref}.");
+    }
+    if dirty {
+        eprintln!("Working tree has uncommitted changes.");
+    }
+
+    let Some(term) = interactive_term() else {
+        return Ok(None);
+    };
+
+    eprint!(
+        "{} {} {} ",
+        style("?").green().bold(),
+        style(format!("Refresh to {remote_ref}?")).bold(),
+        style("[k]eep (rebase) / [d]iscard (hard reset) / esc").dim(),
+    );
+    let _cursor_guard = CursorGuard::hide();
+    loop {
+        let choice = match term.read_key()? {
+            Key::Char('k' | 'K') => Some(RefreshChoice::Keep),
+            Key::Char('d' | 'D') => Some(RefreshChoice::Discard),
+            Key::Char('n' | 'N') | Key::Escape => None,
+            _ => continue,
+        };
+        eprintln!(
+            "{}",
+            match choice {
+                Some(RefreshChoice::Keep) => "keep",
+                Some(RefreshChoice::Discard) => "discard",
+                None => "cancel",
+            }
+        );
+        return Ok(choice);
+    }
 }
 
 fn switch_and_update(target: &str, old_branch: Option<&str>, remote: &str) -> AppResult<()> {
@@ -276,17 +423,25 @@ pub(crate) fn fetch_and_ff(
         (fetch_outcome, result)
     };
 
-    if let git::FetchOutcome::Failed(detail) = &fetch_outcome {
-        eprintln!(
-            "{} fetch failed; results may be stale",
-            style("!").yellow().bold()
-        );
-        for line in detail.lines() {
-            eprintln!("  {line}");
-        }
-    }
+    report_fetch_failure(&fetch_outcome);
 
     merge_result
+}
+
+/// Warn that a fetch failed (so callers know results may be stale), printing
+/// git's detail lines. A no-op on success. Shared by the switch and refresh
+/// flows, both of which fetch behind a spinner.
+fn report_fetch_failure(outcome: &git::FetchOutcome) {
+    let git::FetchOutcome::Failed(detail) = outcome else {
+        return;
+    };
+    eprintln!(
+        "{} fetch failed; results may be stale",
+        style("!").yellow().bold()
+    );
+    for line in detail.lines() {
+        eprintln!("  {line}");
+    }
 }
 
 pub(crate) fn report_update(result: &git::MergeReport) {
@@ -307,7 +462,14 @@ fn reconcile_diverged(branch: &str, remote: &str) -> AppResult<()> {
         return Err(Error::Diverged);
     }
 
-    match git::rebase(&remote_ref)? {
+    rebase_onto(&remote_ref)
+}
+
+/// Rebase the current branch onto `remote_ref`, reporting an aborted rebase the
+/// same way for every caller (refresh's keep path and the diverged-switch
+/// reconcile).
+fn rebase_onto(remote_ref: &str) -> AppResult<()> {
+    match git::rebase(remote_ref)? {
         git::RebaseOutcome::Clean => Ok(()),
         git::RebaseOutcome::Aborted => {
             eprintln!(

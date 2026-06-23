@@ -275,6 +275,91 @@ fn diverged_branch_reports_error() {
 }
 
 #[test]
+fn refresh_dot_fast_forwards_clean_branch() {
+    let (_bare, work) = setup();
+
+    push_upstream_change(work.path(), "file.txt", "updated\n", "upstream change");
+
+    let output = git_switch(work.path(), ".");
+
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+    assert!(
+        stderr_str(&output).contains("Pulled 1 commit"),
+        "stderr: {}",
+        stderr_str(&output)
+    );
+    let content = fs::read_to_string(work.path().join("file.txt")).unwrap();
+    assert_eq!(content, "updated\n");
+}
+
+#[test]
+fn refresh_dot_already_up_to_date_reports_so() {
+    let (_bare, work) = setup();
+
+    let output = git_switch(work.path(), ".");
+
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+    assert!(
+        stderr_str(&output).contains("Already up to date"),
+        "stderr: {}",
+        stderr_str(&output)
+    );
+}
+
+#[test]
+fn refresh_dot_with_local_work_is_left_unchanged_non_interactively() {
+    let (bare, work) = setup();
+
+    // Local commit not on origin, plus a rewritten origin/main (a web-style
+    // rebase): the branch has diverged and carries local work.
+    fs::write(work.path().join("file.txt"), "local diverge\n").unwrap();
+    git(work.path(), &["add", "file.txt"]);
+    git(work.path(), &["commit", "-m", "local diverge"]);
+    let local_head = stdout_str(&git(work.path(), &["rev-parse", "HEAD"]));
+
+    let second = clone_bare(bare.path());
+    push_upstream_change(
+        second.path(),
+        "file.txt",
+        "remote rebase\n",
+        "remote rebase",
+    );
+    git(work.path(), &["fetch", "origin"]);
+
+    let output = git_switch(work.path(), ".");
+
+    // No TTY to prompt on, so the destructive paths are skipped: the branch is
+    // left exactly as-is and the local commit survives.
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+    let stderr = stderr_str(&output);
+    assert!(
+        stderr.contains("not on origin/main") && stderr.contains("Left main unchanged"),
+        "expected local-work notice and no-op, got: {stderr}"
+    );
+    let head_after = stdout_str(&git(work.path(), &["rev-parse", "HEAD"]));
+    assert_eq!(
+        head_after, local_head,
+        "HEAD must not move without a prompt"
+    );
+}
+
+#[test]
+fn refresh_dot_on_detached_head_errors() {
+    let (_bare, work) = setup();
+
+    git(work.path(), &["checkout", "--detach"]);
+
+    let output = git_switch(work.path(), ".");
+
+    assert!(!output.status.success());
+    assert!(
+        stderr_str(&output).contains("not on a branch"),
+        "stderr: {}",
+        stderr_str(&output)
+    );
+}
+
+#[test]
 fn local_only_branch_not_stale_right_after_merge() {
     let (_bare, work) = setup();
 

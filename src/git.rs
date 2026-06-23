@@ -234,6 +234,35 @@ pub fn fast_forward_merge(
     Ok(FastForwardResult::Merged(MergeReport::Pulled(count)))
 }
 
+/// True if `<remote>/<branch>` exists as a remote-tracking ref.
+#[must_use]
+pub fn remote_branch_exists(remote: &str, branch: &str) -> bool {
+    let remote_ref = format!("{remote}/{branch}");
+    git_cmd(None)
+        .args(["rev-parse", "--verify", &remote_ref])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
+/// Number of commits on `HEAD` that are absent from `<remote>/<branch>` — the
+/// local-only work a hard reset to that ref would discard.
+pub fn commits_not_on_remote(remote: &str, branch: &str) -> AppResult<u32> {
+    let range = format!("{remote}/{branch}..HEAD");
+    let output = run(&["rev-list", "--count", &range])?;
+    Ok(output.trim().parse()?)
+}
+
+/// Hard-reset the current branch and working tree to `<remote>/<branch>`,
+/// discarding local commits and tracked changes. Untracked files are left
+/// alone, matching plain `git reset --hard`.
+pub fn reset_hard(remote: &str, branch: &str) -> AppResult<()> {
+    let remote_ref = format!("{remote}/{branch}");
+    run(&["reset", "--hard", &remote_ref])?;
+    Ok(())
+}
+
 pub fn stale_branches(remote: &str) -> AppResult<Vec<String>> {
     let current = current_branch()?;
     let keep = kept_branches(remote);

@@ -30,7 +30,12 @@ git-switch
 
 # Direct — switch to a specific branch
 git-switch main
+
+# Refresh the current branch from its remote
+git-switch .
 ```
+
+`git-switch .` fetches and fast-forwards the branch you're on. If you've rebased it through a web UI (so local has diverged), or have uncommitted changes, it offers to **keep** that local work (rebase it onto the remote, restoring stashed edits) or **discard** it (hard reset to the remote).
 
 ## Worktrees
 

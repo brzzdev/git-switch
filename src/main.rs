@@ -53,6 +53,7 @@ fn dispatch_wt(args: &[String]) -> git_switch::AppResult<()> {
 
 fn print_help() {
     println!("Usage: git-switch [<branch>]");
+    println!("       git-switch .               Refresh the current branch from its remote");
     println!("       git-switch -- <branch>     Switch to a branch named wt/worktree");
     println!("       git-switch wt [<branch>]");
     println!("       git-switch wt ls");
