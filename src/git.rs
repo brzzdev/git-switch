@@ -624,6 +624,18 @@ fn run(args: &[&str]) -> AppResult<String> {
     run_in(None, args)
 }
 
+fn run_in(dir: Option<&Path>, args: &[&str]) -> AppResult<String> {
+    let output = git_cmd(dir).args(args).output()?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(Error::Git {
+            command: args.first().copied().unwrap_or("<unknown>").to_string(),
+            message: stderr.trim().to_string(),
+        });
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
 #[cfg(test)]
 mod tests {
     use super::parse_track;
@@ -640,16 +652,4 @@ mod tests {
         assert_eq!(parse_track(""), (0, 0));
         assert_eq!(parse_track("gone"), (0, 0));
     }
-}
-
-fn run_in(dir: Option<&Path>, args: &[&str]) -> AppResult<String> {
-    let output = git_cmd(dir).args(args).output()?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(Error::Git {
-            command: args.first().copied().unwrap_or("<unknown>").to_string(),
-            message: stderr.trim().to_string(),
-        });
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
