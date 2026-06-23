@@ -246,12 +246,19 @@ pub fn remote_branch_exists(remote: &str, branch: &str) -> bool {
         .is_ok_and(|s| s.success())
 }
 
-/// Number of commits on `HEAD` that are absent from `<remote>/<branch>` — the
-/// local-only work a hard reset to that ref would discard.
-pub fn commits_not_on_remote(remote: &str, branch: &str) -> AppResult<u32> {
-    let range = format!("{remote}/{branch}..HEAD");
-    let output = run(&["rev-list", "--count", &range])?;
-    Ok(output.trim().parse()?)
+/// `(ahead, behind)` for `HEAD` relative to `<remote>/<branch>`: how many
+/// commits are local-only (a hard reset would discard them) and how many the
+/// remote has that aren't local. A rebase or amend gives commits new SHAs, so
+/// rewritten-but-equivalent work still counts as ahead.
+pub fn ahead_behind_remote(remote: &str, branch: &str) -> AppResult<(u32, u32)> {
+    let range = format!("{remote}/{branch}...HEAD");
+    let output = run(&["rev-list", "--left-right", "--count", &range])?;
+    // `--left-right --count` prints "<left>\t<right>": left is reachable from
+    // the remote only (behind), right from HEAD only (ahead).
+    let mut counts = output.split_whitespace();
+    let behind = counts.next().unwrap_or("0").parse()?;
+    let ahead = counts.next().unwrap_or("0").parse()?;
+    Ok((ahead, behind))
 }
 
 /// Hard-reset the current branch and working tree to `<remote>/<branch>`,

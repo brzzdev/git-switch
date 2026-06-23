@@ -35,7 +35,7 @@ git-switch main
 git-switch .
 ```
 
-`git-switch .` fetches and fast-forwards the branch you're on. If you've rebased it through a web UI (so local has diverged), or have uncommitted changes, it offers to **keep** that local work (rebase it onto the remote, restoring stashed edits) or **discard** it (hard reset to the remote).
+`git-switch .` fetches and brings the branch you're on up to date with its remote. A clean branch integrates with no prompt — fast-forwarding, or (when it has diverged, e.g. after rebasing through a web UI) rebasing your local commits onto the remote, which drops any already upstream and replays genuine new work. Only when the working tree is dirty does it stop to ask: **keep** the uncommitted work (stash, rebase, restore) or **discard** it (hard reset to the remote).
 
 ## Worktrees
 

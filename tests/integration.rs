@@ -307,11 +307,51 @@ fn refresh_dot_already_up_to_date_reports_so() {
 }
 
 #[test]
-fn refresh_dot_with_local_work_is_left_unchanged_non_interactively() {
+fn refresh_dot_clean_diverge_rebases_onto_remote() {
     let (bare, work) = setup();
 
-    // Local commit not on origin, plus a rewritten origin/main (a web-style
-    // rebase): the branch has diverged and carries local work.
+    // A local commit on a different file than the one the remote advances, so
+    // the branch diverges but the rebase replays cleanly.
+    fs::write(work.path().join("other.txt"), "local work\n").unwrap();
+    git(work.path(), &["add", "other.txt"]);
+    git(work.path(), &["commit", "-m", "local work"]);
+
+    let second = clone_bare(bare.path());
+    push_upstream_change(
+        second.path(),
+        "file.txt",
+        "remote change\n",
+        "remote change",
+    );
+    git(work.path(), &["fetch", "origin"]);
+
+    let output = git_switch(work.path(), ".");
+
+    // Clean tree: the local commit is rebased on top of the remote commit with
+    // no prompt. Both changes are present and origin/main is now in HEAD.
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+    assert_eq!(
+        fs::read_to_string(work.path().join("other.txt")).unwrap(),
+        "local work\n"
+    );
+    assert_eq!(
+        fs::read_to_string(work.path().join("file.txt")).unwrap(),
+        "remote change\n"
+    );
+    let behind = git(work.path(), &["rev-list", "--count", "HEAD..origin/main"]);
+    assert_eq!(
+        stdout_str(&behind).trim(),
+        "0",
+        "HEAD should contain origin/main after the rebase"
+    );
+}
+
+#[test]
+fn refresh_dot_clean_diverge_with_conflict_aborts() {
+    let (bare, work) = setup();
+
+    // Local commit and a rewritten origin commit that both touch file.txt, so
+    // rebasing the local commit onto origin conflicts.
     fs::write(work.path().join("file.txt"), "local diverge\n").unwrap();
     git(work.path(), &["add", "file.txt"]);
     git(work.path(), &["commit", "-m", "local diverge"]);
@@ -328,18 +368,73 @@ fn refresh_dot_with_local_work_is_left_unchanged_non_interactively() {
 
     let output = git_switch(work.path(), ".");
 
-    // No TTY to prompt on, so the destructive paths are skipped: the branch is
-    // left exactly as-is and the local commit survives.
-    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
-    let stderr = stderr_str(&output);
+    // The rebase conflicts, aborts, and restores the original HEAD.
+    assert!(!output.status.success());
+    let combined = format!("{}{}", stdout_str(&output), stderr_str(&output));
     assert!(
-        stderr.contains("not on origin/main") && stderr.contains("Left main unchanged"),
-        "expected local-work notice and no-op, got: {stderr}"
+        combined.contains("Rebase aborted"),
+        "expected rebase-aborted message, got: {combined}"
     );
     let head_after = stdout_str(&git(work.path(), &["rev-parse", "HEAD"]));
     assert_eq!(
         head_after, local_head,
+        "abort must restore the original HEAD"
+    );
+}
+
+#[test]
+fn refresh_dot_dirty_with_incoming_is_left_unchanged_non_interactively() {
+    let (_bare, work) = setup();
+
+    // Remote advances, then dirty a tracked file: there's work to integrate but
+    // the tree is dirty, so a non-interactive run can't prompt and does nothing.
+    push_upstream_change(work.path(), "file.txt", "remote change\n", "remote change");
+    fs::write(work.path().join("file.txt"), "uncommitted edit\n").unwrap();
+    let head_before = stdout_str(&git(work.path(), &["rev-parse", "HEAD"]));
+
+    let output = git_switch(work.path(), ".");
+
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+    let stderr = stderr_str(&output);
+    assert!(
+        stderr.contains("uncommitted changes") && stderr.contains("Left main unchanged"),
+        "expected dirty-tree notice and no-op, got: {stderr}"
+    );
+    assert_eq!(
+        stdout_str(&git(work.path(), &["rev-parse", "HEAD"])),
+        head_before,
         "HEAD must not move without a prompt"
+    );
+    assert_eq!(
+        fs::read_to_string(work.path().join("file.txt")).unwrap(),
+        "uncommitted edit\n",
+        "uncommitted changes must be preserved"
+    );
+}
+
+#[test]
+fn refresh_dot_with_unpushed_commit_reports_ahead_only() {
+    let (_bare, work) = setup();
+
+    // A local commit the remote doesn't have, but the remote hasn't moved on:
+    // ahead, not diverged.
+    fs::write(work.path().join("file.txt"), "local only\n").unwrap();
+    git(work.path(), &["add", "file.txt"]);
+    git(work.path(), &["commit", "-m", "local only"]);
+    let local_head = stdout_str(&git(work.path(), &["rev-parse", "HEAD"]));
+
+    let output = git_switch(work.path(), ".");
+
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+    let stderr = stderr_str(&output);
+    assert!(
+        stderr.contains("1 commit ahead of origin/main") && stderr.contains("nothing to pull"),
+        "expected ahead-only notice, got: {stderr}"
+    );
+    let head_after = stdout_str(&git(work.path(), &["rev-parse", "HEAD"]));
+    assert_eq!(
+        head_after, local_head,
+        "HEAD must not move when nothing to pull"
     );
 }
 

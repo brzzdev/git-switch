@@ -261,11 +261,13 @@ enum RefreshChoice {
 
 /// Refresh the branch we're on against its remote (`git-switch .`).
 ///
-/// A clean branch with no local-only commits simply fast-forwards (the common
-/// case after pulling someone else's pushes). When there's local work —
-/// uncommitted changes and/or commits not on the remote, e.g. after rebasing a
-/// branch through a web UI — it offers to keep that work (rebase onto the
-/// remote, restoring stashed edits) or discard it (hard reset to the remote).
+/// With nothing to pull it just reports status. When the remote has new
+/// commits, a clean tree integrates them with no prompt — fast-forwarding, or
+/// (when the branch has diverged, e.g. after rebasing through a web UI)
+/// rebasing local commits on top, which drops any already upstream and replays
+/// genuine new work. A dirty tree would be disturbed by that, so there it
+/// prompts to keep the uncommitted work (stash, rebase, restore) or discard it
+/// (hard reset to the remote).
 fn refresh_current(remote: &str, current: &str) -> AppResult<()> {
     let remote_ref = format!("{remote}/{current}");
 
@@ -289,70 +291,97 @@ fn refresh_current(remote: &str, current: &str) -> AppResult<()> {
         return Ok(());
     }
 
-    let dirty = git::has_tracked_changes()?;
-    let ahead = git::commits_not_on_remote(remote, current)?;
+    let (ahead, behind) = git::ahead_behind_remote(remote, current)?;
 
-    // No local work: fast-forward, or already up to date. The history always
-    // fast-forwards here, but the merge can still be refused by an untracked
-    // file in the way (`has_tracked_changes` ignores untracked files), so report
-    // that case honestly instead of claiming the branch is current.
-    if !dirty && ahead == 0 {
+    // Nothing incoming: report status and leave the working tree (and any
+    // uncommitted edits) untouched.
+    if behind == 0 {
+        if ahead == 0 {
+            report_update(&git::MergeReport::UpToDate);
+        } else {
+            eprintln!(
+                "{current} is {ahead} {} ahead of {remote_ref}; nothing to pull.",
+                plural(ahead, "commit")
+            );
+        }
+        return Ok(());
+    }
+
+    // A dirty tree would be disturbed by integrating, so let the user decide.
+    if git::has_tracked_changes()? {
+        match prompt_keep_discard(current, &remote_ref, ahead, behind)? {
+            Some(RefreshChoice::Keep) => keep_local_work(&remote_ref)?,
+            Some(RefreshChoice::Discard) => {
+                git::reset_hard(remote, current)?;
+                eprintln!("Reset {current} to {remote_ref}.");
+            }
+            None => eprintln!("Left {current} unchanged."),
+        }
+        return Ok(());
+    }
+
+    // Clean tree: integrate seamlessly. A fast-forward when the branch hasn't
+    // diverged; otherwise rebase local commits onto the remote.
+    if ahead == 0 {
         match git::fast_forward_merge(None, current, remote)? {
             git::FastForwardResult::Merged(report) => report_update(&report),
+            // History always fast-forwards here, so a refusal means an untracked
+            // file is in the way (`has_tracked_changes` ignores those).
             git::FastForwardResult::Diverged => eprintln!(
                 "{} couldn't fast-forward {current} to {remote_ref}; an untracked file is likely blocking it",
                 style("!").yellow().bold()
             ),
         }
-        return Ok(());
-    }
-
-    match prompt_keep_discard(current, &remote_ref, dirty, ahead)? {
-        Some(RefreshChoice::Discard) => {
-            git::reset_hard(remote, current)?;
-            eprintln!("Reset {current} to {remote_ref}.");
-        }
-        Some(RefreshChoice::Keep) => keep_local_work(&remote_ref, dirty)?,
-        None => eprintln!("Left {current} unchanged."),
+    } else {
+        rebase_onto(&remote_ref)?;
     }
     Ok(())
 }
 
-/// Keep local work while refreshing: stash any uncommitted edits, rebase the
-/// branch onto `remote_ref`, then restore the edits. Mirrors the auto-stash
-/// dance in [`run`] so conflicts and pop failures are surfaced the same way.
-fn keep_local_work(remote_ref: &str, dirty: bool) -> AppResult<()> {
-    if dirty {
-        git::stash_push()?;
-    }
-
-    let result = rebase_onto(remote_ref);
-
+/// Keep uncommitted work while integrating remote commits: stash the edits,
+/// rebase onto `remote_ref` (a fast-forward when the branch hasn't diverged),
+/// then restore the edits. Mirrors the auto-stash dance in [`run`] so conflicts
+/// and pop failures are surfaced the same way.
+fn keep_local_work(remote_ref: &str) -> AppResult<()> {
+    git::stash_push()?;
     // A clean rebase replays the stash cleanly; an abort leaves the tree at the
     // original HEAD, so the stash still applies. Restore either way.
-    if dirty {
-        report_stash_pop();
-    }
-
+    let result = rebase_onto(remote_ref);
+    report_stash_pop();
     result
 }
 
-/// Describe the local work, then ask whether to keep or discard it. Returns
-/// `None` on cancel or in non-interactive runs, where acting destructively
-/// without confirmation would be unsafe.
+/// `"{word}"` for one, `"{word}s"` otherwise.
+fn plural(n: u32, word: &str) -> String {
+    if n == 1 {
+        word.to_string()
+    } else {
+        format!("{word}s")
+    }
+}
+
+/// Describe the incoming remote work alongside the dirty tree, then ask whether
+/// to keep the uncommitted work or discard it. Reached only with a dirty tree
+/// and commits to integrate. Returns `None` on cancel or in non-interactive
+/// runs, where acting destructively without confirmation would be unsafe.
 fn prompt_keep_discard(
     branch: &str,
     remote_ref: &str,
-    dirty: bool,
     ahead: u32,
+    behind: u32,
 ) -> AppResult<Option<RefreshChoice>> {
     if ahead > 0 {
-        let commits = if ahead == 1 { "commit" } else { "commits" };
-        eprintln!("{branch} has {ahead} {commits} not on {remote_ref}.");
+        eprintln!(
+            "{branch} has diverged from {remote_ref}: {ahead} local {} not on the remote, {behind} on the remote not yet local.",
+            plural(ahead, "commit")
+        );
+    } else {
+        eprintln!(
+            "{remote_ref} has {behind} new {}.",
+            plural(behind, "commit")
+        );
     }
-    if dirty {
-        eprintln!("Working tree has uncommitted changes.");
-    }
+    eprintln!("Working tree has uncommitted changes.");
 
     let Some(term) = interactive_term() else {
         return Ok(None);
@@ -362,7 +391,7 @@ fn prompt_keep_discard(
         "{} {} {} ",
         style("?").green().bold(),
         style(format!("Refresh to {remote_ref}?")).bold(),
-        style("[k]eep (rebase) / [d]iscard (hard reset) / esc").dim(),
+        style("[k]eep (stash & rebase) / [d]iscard (hard reset) / esc").dim(),
     );
     let _cursor_guard = CursorGuard::hide();
     loop {
