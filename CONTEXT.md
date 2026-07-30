@@ -1,0 +1,61 @@
+# git-switch
+
+An interactive Git branch and worktree switcher. Its domain is the small set of judgements it makes on the user's behalf: which branches have outlived their purpose, which worktrees can go, and what may be destroyed without asking first.
+
+## Language
+
+### Branches
+
+**Stale**:
+A branch that has outlived its purpose — merged into the current branch, or with an upstream that has been deleted. Staleness is what qualifies a branch for the cleanup prompt; it says nothing about whether deleting it is safe.
+_Avoid_: Dead, old, obsolete
+
+**Unmerged**:
+Holding commits that `git branch -d` would refuse to discard — merged into neither HEAD nor its own upstream. A branch can be both stale and unmerged: an upstream deleted while unpushed work remained.
+_Avoid_: Unpushed, ahead, dirty
+
+**Kept**:
+Pinned out of the cleanup prompt, via `git-switch.keep` config or by being the remote's default branch.
+_Avoid_: Protected, ignored, excluded
+
+### Worktrees
+
+**Held**:
+Of a branch, checked out in some worktree. Git forbids the same branch in two worktrees, so a held stale branch is always held by a worktree other than the one you're in.
+_Avoid_: Locked, checked out, in use
+
+**Missing**:
+A worktree still registered in `.git/worktrees` whose directory is gone — git calls this *prunable*. It cannot be entered, but still blocks its branch from being checked out or deleted.
+_Avoid_: Stale (reserved for branches), dead, orphaned
+
+**Dirty**:
+Of a worktree, holding uncommitted changes: tracked edits or untracked, non-ignored files.
+_Avoid_: Modified, unclean
+
+**Main worktree**:
+The original checkout, which git will not let you remove. Every other worktree is *removable*.
+_Avoid_: Root, primary, parent
+
+### Destruction
+
+**Risk**:
+What removing something would irreversibly destroy — a dirty worktree's files, an unmerged branch's commits, or both. Something with no risk can be removed without asking.
+_Avoid_: Danger, safety, hazard
+
+**Marker**:
+The rendering of a risk in a picker row: `●` for dirty, `↑N` for unmerged. A marker is a warning, and per [ADR 0001](./docs/adr/0001-warned-means-forceable.md) a shown warning is what licenses forcing.
+_Avoid_: Flag, badge, indicator
+
+**Forcing**:
+Destroying something git would otherwise protect — `worktree remove --force`, `branch -D`. Only ever licensed by a warning the user has already seen.
+_Avoid_: Overriding, ignoring
+
+### Targets
+
+**`.`**:
+The one you're in. `git-switch .` refreshes the current branch; `git-switch wt rm .` removes the current worktree.
+_Avoid_: Here, current, self
+
+**Handoff**:
+Printing a directory to stdout for the shell wrapper to `cd` into, since a process cannot change its parent's working directory.
+_Avoid_: Jump, teleport, redirect
