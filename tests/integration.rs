@@ -68,6 +68,18 @@ fn git_switch(dir: &Path, branch: &str) -> Output {
     git_switch_args(dir, &[branch])
 }
 
+/// Point a bare repo's HEAD at `main`.
+///
+/// `git init --bare` derives HEAD from the host's `init.defaultBranch`, so on a
+/// machine that still defaults to `master` the bare ends up with a HEAD that
+/// names a ref the tests never create. Cloning it then checks out nothing —
+/// "remote HEAD refers to nonexistent ref" — and a later `push origin main`
+/// fails with "src refspec main does not match any". Pin it so the tests don't
+/// depend on the developer's git config.
+fn pin_default_branch(bare: &Path) {
+    git(bare, &["symbolic-ref", "HEAD", "refs/heads/main"]);
+}
+
 /// Like `setup`, but places the working clone inside a parent `TempDir` so
 /// worktrees created at `<parent>/worktrees/<repo>/...` land in cleanable
 /// space. Returns `(bare, parent, work_path)`.
@@ -78,6 +90,7 @@ fn setup_with_parent() -> (TempDir, TempDir, PathBuf) {
     fs::create_dir(&work).unwrap();
 
     git(bare.path(), &["init", "--bare"]);
+    pin_default_branch(bare.path());
 
     git(&work, &["init", "-b", "main"]);
     git(&work, &["config", "user.name", "test"]);
@@ -106,6 +119,7 @@ fn setup_with_remote(remote: &str) -> (TempDir, TempDir) {
     let work = TempDir::new().unwrap();
 
     git(bare.path(), &["init", "--bare"]);
+    pin_default_branch(bare.path());
 
     git(work.path(), &["init", "-b", "main"]);
     // Library code under test spawns its own `git` subprocesses without our
