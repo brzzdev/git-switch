@@ -22,6 +22,11 @@ pub enum Error {
 
     #[error("invalid number from git: {0}")]
     ParseInt(#[from] std::num::ParseIntError),
+
+    /// A destructive action was declined because its risk could not be shown:
+    /// there was no terminal to warn on or ask in, and `--force` wasn't given.
+    #[error("{0}")]
+    Unconfirmed(String),
 }
 
 impl Error {

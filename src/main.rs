@@ -45,7 +45,15 @@ fn dispatch_wt(args: &[String]) -> git_switch::AppResult<()> {
             Ok(())
         }
         Some("ls" | "list") => git_switch::app::wt::run_ls(),
-        Some("rm" | "remove") => git_switch::app::wt::run_rm(args.get(1).map(String::as_str)),
+        Some("rm" | "remove") => {
+            let rest = &args[1..];
+            let force = rest.iter().any(|a| a == "--force" || a == "-f");
+            let target = rest
+                .iter()
+                .find(|a| !a.starts_with('-'))
+                .map(String::as_str);
+            git_switch::app::wt::run_rm(target, force)
+        }
         Some(name) => git_switch::app::wt::run(Some(name)),
         None => git_switch::app::wt::run(None),
     }
@@ -57,11 +65,15 @@ fn print_help() {
     println!("       git-switch -- <branch>     Switch to a branch named wt/worktree");
     println!("       git-switch wt [<branch>]");
     println!("       git-switch wt ls");
-    println!("       git-switch wt rm [<branch>]");
+    println!("       git-switch wt rm [<branch>|.]");
 }
 
 fn print_wt_help() {
     println!("Usage: git-switch wt [<branch>]    Switch to or create a worktree");
     println!("       git-switch wt ls            List worktrees");
     println!("       git-switch wt rm [<branch>] Remove a worktree (deletes branch if merged)");
+    println!("       git-switch wt rm .          Remove the worktree you're in");
+    println!();
+    println!("Options:");
+    println!("  -f, --force   Skip the confirmation for uncommitted or unmerged work");
 }

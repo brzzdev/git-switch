@@ -6,9 +6,9 @@ use console::{measure_text_width, style};
 use indicatif::ProgressBar;
 
 use super::{
-    Availability, CursorGuard, Pick, PickKind, PickerOptions, Section, Selection, build_sections,
-    fetch_and_ff, handoff_cd, interactive_keys, multi_select, pick, prompt_delete_stale_branches,
-    report_update,
+    Availability, CursorGuard, Pick, PickKind, PickerOptions, Risk, Section, Selection,
+    build_sections, confirm, fetch_and_ff, handoff_cd, interactive_keys, multi_select, pick,
+    prompt_delete_stale_branches, report_update,
 };
 use crate::{AppResult, Error, git};
 
@@ -38,7 +38,9 @@ pub fn run(target: Option<&str>) -> AppResult<()> {
         },
     };
 
-    let target_path = match action {
+    // The branch comes back alongside the path so the stale prompt can leave the
+    // worktree we're about to enter alone.
+    let (target_path, target_branch) = match action {
         Action::CdToExisting(wt) => {
             let branch = wt.branch.clone().unwrap_or_default();
             // The worktree's branch may track a different remote than ours.
@@ -55,11 +57,12 @@ pub fn run(target: Option<&str>) -> AppResult<()> {
                 style("→").cyan().bold(),
                 wt.path.display()
             );
-            wt.path
+            (wt.path, branch)
         }
         Action::CreateForBranch(branch) => {
             let branch_remote = git::current_remote(Some(branch.as_str()));
-            create_worktree(&main.path, &branch, None, &branch_remote)?
+            let path = create_worktree(&main.path, &branch, None, &branch_remote)?;
+            (path, branch)
         }
         Action::CreateNewBranch(branch) => {
             let default = git::default_branch(&remote).ok_or_else(|| Error::Git {
@@ -67,11 +70,12 @@ pub fn run(target: Option<&str>) -> AppResult<()> {
                 message: format!("no default branch on {remote}; cannot pick a base"),
             })?;
             let base = format!("{remote}/{default}");
-            create_worktree(&main.path, &branch, Some(&base), &remote)?
+            let path = create_worktree(&main.path, &branch, Some(&base), &remote)?;
+            (path, branch)
         }
     };
 
-    if let Err(e) = prompt_delete_stale_branches(None, &remote) {
+    if let Err(e) = prompt_delete_stale_branches(None, Some(&target_branch), &remote) {
         if e.is_interrupt() {
             return Err(e);
         }
@@ -147,7 +151,7 @@ fn status_segment(dirty: bool, ahead: u32, behind: u32) -> String {
     parts.join(" ")
 }
 
-pub fn run_rm(target: Option<&str>) -> AppResult<()> {
+pub fn run_rm(target: Option<&str>, force: bool) -> AppResult<()> {
     let worktrees = git::worktree_list()?;
     let main = main_of(&worktrees)?.clone();
     // Include branchless (detached) and missing worktrees too: a worktree whose
@@ -178,35 +182,20 @@ pub fn run_rm(target: Option<&str>) -> AppResult<()> {
         .max_by_key(|(_, w)| w.path.as_os_str().len())
         .map(|(i, _)| i);
 
-    let selected_indices: Vec<usize> = if let Some(name) = target {
-        let i = removable
-            .iter()
-            .position(|w| rm_matches(w, name))
-            .ok_or_else(|| Error::Git {
-                command: "worktree remove".into(),
-                message: format!("no worktree matching '{name}'"),
-            })?;
-        vec![i]
-    } else {
-        // Non-interactive (piped/CI): we can't prompt, so remove nothing rather
-        // than blocking on key input.
-        let Some(mut keys) = interactive_keys() else {
-            return Ok(());
-        };
-        let items: Vec<String> = removable
-            .iter()
-            .enumerate()
-            .map(|(i, w)| rm_label(w, current == Some(i)))
-            .collect();
-        let defaults = vec![false; items.len()];
-        multi_select(
-            "Remove worktrees (space to toggle, →/← all/none)",
-            &items,
-            &defaults,
-            &mut keys,
-        )?
-    };
+    // Judge merged-ness from the main worktree: it's the HEAD that will be
+    // current when the branch delete runs, and it can't be one of the branches
+    // being removed. Asking from a doomed worktree would call its own branch
+    // merged and skip the warning.
+    let unmerged = git::unmerged_branches(Some(&main.path)).unwrap_or_default();
+    let risks: Vec<Risk> = removable
+        .iter()
+        .map(|w| Risk {
+            dirty: !w.prunable && git::worktree_dirty(&w.path),
+            unmerged: w.branch.as_deref().and_then(|b| unmerged.get(b).copied()),
+        })
+        .collect();
 
+    let selected_indices = select_for_removal(&removable, &risks, current, target, force)?;
     if selected_indices.is_empty() {
         return Ok(());
     }
@@ -220,15 +209,94 @@ pub fn run_rm(target: Option<&str>) -> AppResult<()> {
     }
 
     for &i in &selected_indices {
-        let wt = &removable[i];
-        match git::worktree_remove(&wt.path)? {
-            git::WorktreeRemoveOutcome::Removed => match wt.branch.as_deref() {
-                None => eprintln!(
-                    "{} removed worktree at {}",
-                    style("✓").green().bold(),
-                    wt.path.display()
-                ),
-                Some(branch) => match git::delete_branch_if_merged(branch)? {
+        remove_one(&removable[i], risks[i], force)?;
+    }
+
+    if cwd_will_vanish {
+        handoff_cd(&main.path);
+    }
+    Ok(())
+}
+
+/// Resolves which worktrees to remove: a single named target (`.` for the one
+/// the cwd sits in), or a multi-select whose rows carry risk markers.
+fn select_for_removal(
+    removable: &[git::Worktree],
+    risks: &[Risk],
+    current: Option<usize>,
+    target: Option<&str>,
+    force: bool,
+) -> AppResult<Vec<usize>> {
+    let Some(name) = target else {
+        // Non-interactive (piped/CI): we can't prompt, so remove nothing rather
+        // than blocking on key input.
+        let Some(mut keys) = interactive_keys() else {
+            return Ok(vec![]);
+        };
+        let items = super::align_labels(
+            &removable
+                .iter()
+                .enumerate()
+                .map(|(i, w)| (rm_label(w, current == Some(i)), risks[i].markers()))
+                .collect::<Vec<_>>(),
+        );
+        let defaults = vec![false; items.len()];
+        return multi_select(
+            "Remove worktrees (space to toggle, →/← all/none)",
+            &items,
+            &defaults,
+            &mut keys,
+        );
+    };
+
+    // `.` means the worktree the cwd sits in, matching `git-switch .` for the
+    // current branch. The main worktree isn't removable, so standing in it
+    // leaves nothing for `.` to name.
+    let i = if name == "." {
+        current.ok_or_else(|| Error::Git {
+            command: "worktree remove".into(),
+            message: "the main worktree cannot be removed".into(),
+        })?
+    } else {
+        removable
+            .iter()
+            .position(|w| rm_matches(w, name))
+            .ok_or_else(|| Error::Git {
+                command: "worktree remove".into(),
+                message: format!("no worktree matching '{name}'"),
+            })?
+    };
+
+    // A named target never passed through a picker, so no marker warned about
+    // what it would destroy; the confirmation stands in for one.
+    Ok(if confirm_removal(&removable[i], risks[i], force)? {
+        vec![i]
+    } else {
+        vec![]
+    })
+}
+
+/// Removes one worktree and, when it has a branch, deletes that too. Forcing is
+/// licensed only by the warning already given — a row marker in the picker, the
+/// confirmation for a named target, or an explicit `--force`. Anything that
+/// wasn't flagged keeps git's own guard, so a worktree that turns out to be
+/// dirty (or a branch that gained a commit) after the markers were built makes
+/// git refuse rather than destroying something unwarned.
+fn remove_one(wt: &git::Worktree, risk: Risk, force: bool) -> AppResult<()> {
+    match git::worktree_remove(&wt.path, risk.dirty || force)? {
+        git::WorktreeRemoveOutcome::Removed => match wt.branch.as_deref() {
+            None => eprintln!(
+                "{} removed worktree at {}",
+                style("✓").green().bold(),
+                wt.path.display()
+            ),
+            Some(branch) => {
+                let deleted = if risk.unmerged.is_some() || force {
+                    git::force_delete_branch(branch)?
+                } else {
+                    git::delete_branch_if_merged(branch)?
+                };
+                match deleted {
                     git::BranchDeleteOutcome::Deleted => eprintln!(
                         "{} removed worktree {branch} (branch deleted)",
                         style("✓").green().bold(),
@@ -242,23 +310,19 @@ pub fn run_rm(target: Option<&str>) -> AppResult<()> {
                         "{} removed worktree {branch} (branch delete failed: {detail})",
                         style("!").yellow().bold(),
                     ),
-                },
-            },
-            git::WorktreeRemoveOutcome::Failed(detail) => {
-                eprintln!(
-                    "{} failed to remove {}:",
-                    style("!").yellow().bold(),
-                    wt.path.display()
-                );
-                for line in detail.lines() {
-                    eprintln!("  {line}");
                 }
             }
+        },
+        git::WorktreeRemoveOutcome::Failed(detail) => {
+            eprintln!(
+                "{} failed to remove {}:",
+                style("!").yellow().bold(),
+                wt.path.display()
+            );
+            for line in detail.lines() {
+                eprintln!("  {line}");
+            }
         }
-    }
-
-    if cwd_will_vanish {
-        handoff_cd(&main.path);
     }
     Ok(())
 }
@@ -403,6 +467,36 @@ fn resolve_target(name: &str, worktrees: &[git::Worktree], remote: &str) -> AppR
         return Ok(Action::CreateForBranch(name.to_string()));
     }
     Ok(Action::CreateNewBranch(name.to_string()))
+}
+
+/// Gate for a worktree named on the command line, where there is no picker row
+/// to carry a marker. Nothing at risk means no prompt at all — `wt rm .` on a
+/// clean, merged worktree is silent. Otherwise the risks are named and
+/// confirmed, `--force` waives the prompt, and a run with no terminal to ask in
+/// refuses rather than destroying anything unwarned.
+fn confirm_removal(wt: &git::Worktree, risk: Risk, force: bool) -> AppResult<bool> {
+    if force || !risk.any() {
+        return Ok(true);
+    }
+
+    let subject = wt.branch.as_deref().unwrap_or("this worktree");
+    let risks = risk.describe(subject, &wt.path);
+
+    if !super::is_interactive() {
+        return Err(Error::Unconfirmed(format!(
+            "{}; not removing. Rerun in a terminal to confirm, or pass --force.",
+            risks.join(" and ")
+        )));
+    }
+
+    for line in &risks {
+        eprintln!("{} {line}", style("!").yellow().bold());
+    }
+    let question = match wt.branch.as_deref() {
+        Some(branch) => format!("Remove the worktree and delete {branch} anyway?"),
+        None => "Remove the worktree anyway?".to_string(),
+    };
+    confirm(&question, false)
 }
 
 /// Picker label for a removable worktree: its branch when it has one, else the

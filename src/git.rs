@@ -469,6 +469,63 @@ pub fn worktree_branches() -> AppResult<HashSet<String>> {
         .collect())
 }
 
+/// A branch `git branch -d` would refuse to delete, and why there is or isn't a
+/// commit count to show for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Unmerged {
+    /// Ahead of a live upstream by this many commits.
+    Ahead(u32),
+    /// No upstream (or a `[gone]` one), so there is nothing to count against.
+    NoUpstream,
+}
+
+/// Branches that `git branch -d` would refuse: those merged into neither the
+/// HEAD of `dir` nor their own upstream. Callers use this both to mark rows and
+/// to decide when a force-delete is licensed, so it must mirror `-d`'s rule
+/// rather than a proxy like ahead-of-upstream — a purely local branch has no
+/// upstream to be ahead of, yet is exactly the case worth warning about.
+///
+/// `dir` must be the worktree whose HEAD will be current when the delete runs.
+/// `--merged` is relative to HEAD, and every branch is merged into itself, so
+/// asking from inside the worktree being removed would report its own branch as
+/// merged and skip the warning it exists to give.
+pub fn unmerged_branches(dir: Option<&Path>) -> AppResult<HashMap<String, Unmerged>> {
+    let merged_output = run_in(dir, &["branch", "--format=%(refname:short)", "--merged"])?;
+    // Refs are shared across worktrees, so this half is `dir`-independent.
+    let refs_output = run(&[
+        "for-each-ref",
+        "--format=%(refname:short)%09%(upstream)%09%(upstream:track,nobracket)",
+        "refs/heads/",
+    ])?;
+    Ok(unmerged_from(&merged_output, &refs_output))
+}
+
+/// The parsing half of [`unmerged_branches`], split out so the rule can be
+/// tested against fixed git output.
+fn unmerged_from(merged_output: &str, refs_output: &str) -> HashMap<String, Unmerged> {
+    let merged: HashSet<&str> = merged_output.lines().collect();
+
+    refs_output
+        .lines()
+        .filter_map(|line| {
+            let mut parts = line.split('\t');
+            let name = parts.next()?;
+            let upstream = parts.next()?;
+            let track = parts.next().unwrap_or("");
+            if merged.contains(name) {
+                return None;
+            }
+            // A `[gone]` upstream reports no ahead count, so it must be treated
+            // as absent rather than as "zero ahead, therefore merged".
+            if upstream.is_empty() || track == "gone" {
+                return Some((name.to_string(), Unmerged::NoUpstream));
+            }
+            let (ahead, _) = parse_track(track);
+            (ahead > 0).then(|| (name.to_string(), Unmerged::Ahead(ahead)))
+        })
+        .collect()
+}
+
 #[must_use]
 pub fn worktree_for_branch(worktrees: &[Worktree], branch: &str) -> Option<Worktree> {
     worktrees
@@ -531,11 +588,18 @@ pub enum WorktreeRemoveOutcome {
     Failed(String),
 }
 
-pub fn worktree_remove(path: &Path) -> AppResult<WorktreeRemoveOutcome> {
+/// Remove the worktree at `path`. With `force`, uncommitted and untracked
+/// changes in it are discarded; without it, git refuses a dirty tree. A *locked*
+/// worktree survives either way (git wants `--force --force`) and is reported as
+/// a failure rather than escalated.
+pub fn worktree_remove(path: &Path, force: bool) -> AppResult<WorktreeRemoveOutcome> {
     let path_str = path_to_str(path)?;
-    let output = Command::new("git")
-        .args(["worktree", "remove", path_str])
-        .output()?;
+    let mut args = vec!["worktree", "remove"];
+    if force {
+        args.push("--force");
+    }
+    args.push(path_str);
+    let output = Command::new("git").args(&args).output()?;
     if output.status.success() {
         return Ok(WorktreeRemoveOutcome::Removed);
     }
@@ -564,11 +628,18 @@ fn path_to_str(path: &Path) -> AppResult<&str> {
     })
 }
 
-pub fn delete_branches(branches: &[&str]) -> AppResult<()> {
-    let mut args = vec!["branch", "-D", "--quiet"];
-    args.extend(branches);
-    run(&args)?;
-    Ok(())
+/// Delete a branch with `git branch -D`, discarding unmerged commits. Only for
+/// branches whose risk was shown to the user first — see [`unmerged_branches`].
+pub fn force_delete_branch(branch: &str) -> AppResult<BranchDeleteOutcome> {
+    let output = git_cmd(None)
+        .args(["branch", "-D", "--quiet", branch])
+        .output()?;
+    if output.status.success() {
+        return Ok(BranchDeleteOutcome::Deleted);
+    }
+    Ok(BranchDeleteOutcome::Failed(
+        String::from_utf8_lossy(&output.stderr).trim().to_string(),
+    ))
 }
 
 pub enum BranchDeleteOutcome {
@@ -645,7 +716,68 @@ fn run_in(dir: Option<&Path>, args: &[&str]) -> AppResult<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_track;
+    use super::{Unmerged, parse_track, unmerged_from};
+
+    /// One `for-each-ref` line: name, upstream, track.
+    fn refs(rows: &[(&str, &str, &str)]) -> String {
+        rows.iter()
+            .map(|(name, upstream, track)| format!("{name}\t{upstream}\t{track}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn merged_into_head_is_not_unmerged() {
+        let got = unmerged_from(
+            "main\nfeature",
+            &refs(&[("feature", "refs/remotes/origin/feature", "ahead 2")]),
+        );
+        assert!(
+            got.is_empty(),
+            "merged into HEAD wins regardless of upstream, got: {got:?}"
+        );
+    }
+
+    #[test]
+    fn in_sync_with_upstream_is_not_unmerged() {
+        let got = unmerged_from(
+            "main",
+            &refs(&[("feature", "refs/remotes/origin/feature", "")]),
+        );
+        assert!(got.is_empty(), "merged into upstream, got: {got:?}");
+    }
+
+    #[test]
+    fn ahead_of_upstream_is_unmerged_with_a_count() {
+        let got = unmerged_from(
+            "main",
+            &refs(&[(
+                "feature",
+                "refs/remotes/origin/feature",
+                "ahead 3, behind 1",
+            )]),
+        );
+        assert_eq!(got.get("feature"), Some(&Unmerged::Ahead(3)));
+    }
+
+    /// The case a plain ahead-of-upstream check misses: no upstream means
+    /// nothing to be ahead of, yet `git branch -d` still refuses.
+    #[test]
+    fn local_only_branch_is_unmerged_without_a_count() {
+        let got = unmerged_from("main", &refs(&[("scratch", "", "")]));
+        assert_eq!(got.get("scratch"), Some(&Unmerged::NoUpstream));
+    }
+
+    /// A `[gone]` upstream reports no ahead count, which must not be read as
+    /// "zero ahead, therefore merged".
+    #[test]
+    fn gone_upstream_is_unmerged_without_a_count() {
+        let got = unmerged_from(
+            "main",
+            &refs(&[("orphan", "refs/remotes/origin/orphan", "gone")]),
+        );
+        assert_eq!(got.get("orphan"), Some(&Unmerged::NoUpstream));
+    }
 
     #[test]
     fn parse_track_reads_ahead_behind() {

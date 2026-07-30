@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 
 use console::{Key, Term, measure_text_width, style};
 use indicatif::ProgressBar;
@@ -198,7 +199,8 @@ pub fn run(target: Option<&str>) -> AppResult<()> {
             target,
             held_by.path.display()
         );
-        if let Err(e) = prompt_delete_stale_branches(None, &remote) {
+        // `target` is where we're about to hand off, so it must not be on offer.
+        if let Err(e) = prompt_delete_stale_branches(None, Some(&target), &remote) {
             if e.is_interrupt() {
                 return Err(e);
             }
@@ -425,7 +427,12 @@ fn switch_and_update(target: &str, old_branch: Option<&str>, remote: &str) -> Ap
         git::FastForwardResult::Merged(report) => report_update(&report),
     }
 
-    prompt_delete_stale_branches(if already_on_target { None } else { old_branch }, remote)?;
+    // An in-place switch stays put, so there's no worktree to protect.
+    prompt_delete_stale_branches(
+        if already_on_target { None } else { old_branch },
+        None,
+        remote,
+    )?;
 
     Ok(())
 }
@@ -980,28 +987,90 @@ fn format_row(row: &RenderRow, is_cursor: bool) -> String {
     }
 }
 
+/// What removing something would irreversibly destroy.
+///
+/// The project rule is *warned means forceable*: a destructive step may skip
+/// confirmation only where the user was shown the specific risk first. In a
+/// picker the row markers are that warning; for a target named on the command
+/// line no marker is possible, so a confirmation naming these risks stands in
+/// for it. Either way, forcing is licensed only by a `Risk` the user has seen.
+#[derive(Default, Clone, Copy)]
+pub(crate) struct Risk {
+    /// The worktree holds uncommitted or untracked changes.
+    pub(crate) dirty: bool,
+    /// The branch has commits `git branch -d` would refuse to discard.
+    pub(crate) unmerged: Option<git::Unmerged>,
+}
+
+impl Risk {
+    pub(crate) fn any(self) -> bool {
+        self.dirty || self.unmerged.is_some()
+    }
+
+    /// Row markers: `●` for uncommitted changes, `↑N` for unmerged commits
+    /// (bare `↑` when there is no upstream to count against). Empty when there
+    /// is nothing to lose, which is what keeps the markers meaningful.
+    pub(crate) fn markers(self) -> String {
+        let mut parts: Vec<String> = Vec::new();
+        if self.dirty {
+            parts.push(style("●").yellow().to_string());
+        }
+        match self.unmerged {
+            Some(git::Unmerged::Ahead(n)) => parts.push(style(format!("↑{n}")).green().to_string()),
+            Some(git::Unmerged::NoUpstream) => parts.push(style("↑").green().to_string()),
+            None => {}
+        }
+        parts.join(" ")
+    }
+
+    /// One line per risk, for the confirmation shown when there is no row to
+    /// mark. `subject` names what the risk is attached to.
+    pub(crate) fn describe(self, subject: &str, path: &Path) -> Vec<String> {
+        let mut lines = Vec::new();
+        if self.dirty {
+            lines.push(format!("{} has uncommitted changes", display_path(path)));
+        }
+        match self.unmerged {
+            Some(git::Unmerged::Ahead(n)) => {
+                lines.push(format!("{subject} has {n} unmerged commit(s)"));
+            }
+            Some(git::Unmerged::NoUpstream) => {
+                lines.push(format!("{subject} has unmerged commits and no upstream"));
+            }
+            None => {}
+        }
+        lines
+    }
+}
+
+/// A stale branch, together with the worktree holding it (if any) and what
+/// deleting it would destroy.
+struct StaleRow {
+    branch: String,
+    worktree: Option<git::Worktree>,
+    risk: Risk,
+}
+
+/// Offers to delete stale branches, and the worktrees holding them.
+///
+/// `old_branch` is pre-ticked, being the branch just switched away from.
+/// `destination` is the branch we're about to hand the shell off into: it is
+/// never offered, since deleting it would remove the very worktree the caller
+/// is about to `cd` to.
 pub(crate) fn prompt_delete_stale_branches(
     old_branch: Option<&str>,
+    destination: Option<&str>,
     remote: &str,
 ) -> AppResult<()> {
-    let all_stale = git::stale_branches(remote)?;
-    if all_stale.is_empty() {
-        return Ok(());
-    }
-
-    let held = git::worktree_branches().unwrap_or_default();
-    let (locked, stale): (Vec<String>, Vec<String>) =
-        all_stale.into_iter().partition(|b| held.contains(b));
-
-    for branch in &locked {
-        eprintln!(
-            "{} stale but held by worktree, skipping: {}",
-            style("!").yellow().bold(),
-            branch
-        );
-    }
-
-    if stale.is_empty() {
+    let stale = git::stale_branches(remote)?;
+    let worktrees = git::worktree_list().unwrap_or_default();
+    // Ambient HEAD is right here: `stale_branches` excludes the current branch,
+    // so nothing in this list can be the HEAD we're measuring against.
+    let unmerged = git::unmerged_branches(None).unwrap_or_default();
+    let rows = stale_rows(stale, &worktrees, &unmerged, destination, &|path| {
+        git::worktree_dirty(path)
+    });
+    if rows.is_empty() {
         return Ok(());
     }
 
@@ -1011,24 +1080,175 @@ pub(crate) fn prompt_delete_stale_branches(
         return Ok(());
     };
 
-    let defaults: Vec<bool> = stale
+    // A branch held by a worktree is never the one just left — git forbids the
+    // same branch in two worktrees — so worktree rows always start unticked.
+    let defaults: Vec<bool> = rows
         .iter()
-        .map(|b| old_branch.is_some_and(|old| old == b))
+        .map(|r| old_branch.is_some_and(|old| old == r.branch))
         .collect();
+    let items = align_labels(&rows.iter().map(stale_label).collect::<Vec<_>>());
 
     let selections = multi_select(
         "Delete stale branches (space to toggle, →/← all/none)",
-        &stale,
+        &items,
         &defaults,
         &mut keys,
     )?;
 
-    let to_delete: Vec<&str> = selections.iter().map(|&i| stale[i].as_str()).collect();
-    if !to_delete.is_empty() {
-        git::delete_branches(&to_delete)?;
+    for &i in &selections {
+        delete_stale_row(&rows[i])?;
     }
 
     Ok(())
+}
+
+/// Builds the picker rows, pairing each stale branch with the worktree holding
+/// it and what deleting it would destroy. `dirty` is injected so the rule can be
+/// tested without a repo on disk.
+fn stale_rows(
+    stale: Vec<String>,
+    worktrees: &[git::Worktree],
+    unmerged: &std::collections::HashMap<String, git::Unmerged>,
+    destination: Option<&str>,
+    dirty: &dyn Fn(&Path) -> bool,
+) -> Vec<StaleRow> {
+    stale
+        .into_iter()
+        .filter(|branch| destination != Some(branch.as_str()))
+        .map(|branch| {
+            let worktree = git::worktree_for_branch(worktrees, &branch);
+            let risk = Risk {
+                dirty: worktree
+                    .as_ref()
+                    .is_some_and(|w| !w.prunable && dirty(&w.path)),
+                unmerged: unmerged.get(&branch).copied(),
+            };
+            StaleRow {
+                branch,
+                worktree,
+                risk,
+            }
+        })
+        .collect()
+}
+
+/// The picker row for a stale branch, as a (name, annotation) pair for
+/// [`align_labels`]. Dirtiness belongs to the worktree so it sits inside the
+/// parentheses; unmerged commits belong to the branch so they sit outside. The
+/// worktree's path is deliberately absent — it appears in the outcome line.
+fn stale_label(row: &StaleRow) -> (String, String) {
+    let worktree = match &row.worktree {
+        None => String::new(),
+        Some(w) if w.prunable => "(+ worktree, missing)".to_string(),
+        Some(_) if row.risk.dirty => {
+            format!("(+ worktree {})", style("●").yellow())
+        }
+        Some(_) => "(+ worktree)".to_string(),
+    };
+    let branch_risk = Risk {
+        dirty: false,
+        ..row.risk
+    }
+    .markers();
+
+    let annotation = [worktree, branch_risk]
+        .into_iter()
+        .filter(|p| !p.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    (row.branch.clone(), annotation)
+}
+
+/// Removes a ticked stale row: its worktree first (the branch can't be deleted
+/// while one holds it), then the branch. Every deletion reports itself, and a
+/// worktree that refuses to go — a locked one, say — leaves its branch alone.
+fn delete_stale_row(row: &StaleRow) -> AppResult<()> {
+    if let Some(wt) = &row.worktree {
+        // Force only what the row actually warned about. An unmarked worktree
+        // that turns out to be dirty — it changed since the markers were built,
+        // or `worktree_dirty` couldn't read it and reported clean — must make
+        // git refuse rather than silently discard files nobody was warned of.
+        match git::worktree_remove(&wt.path, row.risk.dirty)? {
+            git::WorktreeRemoveOutcome::Removed => {}
+            git::WorktreeRemoveOutcome::Failed(detail) => {
+                eprintln!(
+                    "{} kept {}: could not remove its worktree at {}",
+                    style("!").yellow().bold(),
+                    row.branch,
+                    display_path(&wt.path)
+                );
+                for line in detail.lines() {
+                    eprintln!("  {line}");
+                }
+                return Ok(());
+            }
+        }
+    }
+
+    // Likewise for the branch: `-D` only where an `↑` marker licensed it, so a
+    // branch that gained a commit since the markers were built fails safe.
+    let deleted = if row.risk.unmerged.is_some() {
+        git::force_delete_branch(&row.branch)?
+    } else {
+        git::delete_branch_if_merged(&row.branch)?
+    };
+    match (deleted, &row.worktree) {
+        (git::BranchDeleteOutcome::Deleted, None) => {
+            eprintln!("{} deleted {}", style("✓").green().bold(), row.branch);
+        }
+        (git::BranchDeleteOutcome::Deleted, Some(wt)) => {
+            eprintln!(
+                "{} removed worktree {}, deleted {}",
+                style("✓").green().bold(),
+                display_path(&wt.path),
+                row.branch
+            );
+        }
+        (git::BranchDeleteOutcome::NotMerged | git::BranchDeleteOutcome::Failed(_), _) => {
+            eprintln!(
+                "{} could not delete {}",
+                style("!").yellow().bold(),
+                row.branch
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Pads (name, annotation) pairs so annotations line up in a column. Rows
+/// without an annotation are left bare, so an unannotated list gains no
+/// trailing whitespace.
+pub(crate) fn align_labels(rows: &[(String, String)]) -> Vec<String> {
+    let width = rows
+        .iter()
+        .filter(|(_, a)| !a.is_empty())
+        .map(|(name, _)| measure_text_width(name))
+        .max()
+        .unwrap_or(0);
+
+    rows.iter()
+        .map(|(name, annotation)| {
+            if annotation.is_empty() {
+                return name.clone();
+            }
+            let pad = " ".repeat(width.saturating_sub(measure_text_width(name)));
+            format!("{name}{pad}  {annotation}")
+        })
+        .collect()
+}
+
+/// Contracts a leading home directory to `~` so paths stay readable in prompts.
+pub(crate) fn display_path(path: &Path) -> String {
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    match home.and_then(|home| path.strip_prefix(home).ok().map(Path::to_path_buf)) {
+        Some(rest) => format!("~/{}", rest.display()),
+        None => path.display().to_string(),
+    }
+}
+
+/// True when there's a terminal to show a warning on and read an answer from.
+pub(crate) fn is_interactive() -> bool {
+    interactive_term().is_some()
 }
 
 /// Hand a target directory to the shell wrapper, which reads it from stdout and
@@ -1309,5 +1529,164 @@ mod tests {
     fn multi_select_escape_returns_empty() {
         let got = run_multi_select(&["a", "b"], &[true, true], vec![Key::Escape]);
         assert!(got.is_empty());
+    }
+
+    fn stale_row(branch: &str, worktree: Option<git::Worktree>, risk: Risk) -> StaleRow {
+        StaleRow {
+            branch: branch.to_string(),
+            worktree,
+            risk,
+        }
+    }
+
+    fn worktree(prunable: bool) -> git::Worktree {
+        git::Worktree {
+            path: PathBuf::from("/tmp/wt"),
+            branch: None,
+            is_main: false,
+            prunable,
+        }
+    }
+
+    /// Strips ANSI styling so assertions read as the user sees the row.
+    fn plain(s: &str) -> String {
+        console::strip_ansi_codes(s).into_owned()
+    }
+
+    #[test]
+    fn stale_label_without_worktree_is_bare() {
+        let row = stale_row("fix/typo", None, Risk::default());
+        let (name, annotation) = stale_label(&row);
+        assert_eq!(name, "fix/typo");
+        assert!(annotation.is_empty(), "got: {annotation}");
+    }
+
+    #[test]
+    fn stale_label_marks_a_dirty_worktree_inside_the_parens() {
+        let row = stale_row(
+            "chore/deps",
+            Some(worktree(false)),
+            Risk {
+                dirty: true,
+                unmerged: None,
+            },
+        );
+        assert_eq!(plain(&stale_label(&row).1), "(+ worktree ●)");
+    }
+
+    #[test]
+    fn stale_label_marks_a_missing_worktree() {
+        let row = stale_row("old/thing", Some(worktree(true)), Risk::default());
+        assert_eq!(plain(&stale_label(&row).1), "(+ worktree, missing)");
+    }
+
+    /// Dirtiness belongs to the worktree, unmerged commits to the branch — so
+    /// one sits inside the parentheses and the other outside.
+    #[test]
+    fn stale_label_puts_unmerged_outside_the_parens() {
+        let row = stale_row(
+            "spike/abandoned",
+            Some(worktree(false)),
+            Risk {
+                dirty: true,
+                unmerged: Some(git::Unmerged::Ahead(2)),
+            },
+        );
+        assert_eq!(plain(&stale_label(&row).1), "(+ worktree ●) ↑2");
+    }
+
+    #[test]
+    fn unmerged_without_upstream_renders_a_bare_arrow() {
+        let risk = Risk {
+            dirty: false,
+            unmerged: Some(git::Unmerged::NoUpstream),
+        };
+        assert_eq!(plain(&risk.markers()), "↑");
+    }
+
+    #[test]
+    fn no_risk_renders_no_markers() {
+        assert!(Risk::default().markers().is_empty());
+        assert!(!Risk::default().any());
+    }
+
+    fn named_worktree(branch: &str, path: &str) -> git::Worktree {
+        git::Worktree {
+            path: PathBuf::from(path),
+            branch: Some(branch.to_string()),
+            is_main: false,
+            prunable: false,
+        }
+    }
+
+    fn names(rows: &[StaleRow]) -> Vec<&str> {
+        rows.iter().map(|r| r.branch.as_str()).collect()
+    }
+
+    /// Regression: the caller hands the shell off into a worktree right after
+    /// this prompt. Offering that worktree for deletion means a `→` select-all
+    /// removes the directory we're about to `cd` into.
+    #[test]
+    fn stale_rows_never_offer_the_handoff_destination() {
+        let worktrees = vec![named_worktree("feature", "/tmp/wt")];
+        let stale = vec!["feature".to_string(), "fix/typo".to_string()];
+        let rows = stale_rows(
+            stale,
+            &worktrees,
+            &std::collections::HashMap::new(),
+            Some("feature"),
+            &|_| false,
+        );
+        assert_eq!(names(&rows), vec!["fix/typo"]);
+    }
+
+    #[test]
+    fn stale_rows_without_a_destination_offer_everything() {
+        let worktrees = vec![named_worktree("feature", "/tmp/wt")];
+        let stale = vec!["feature".to_string(), "fix/typo".to_string()];
+        let rows = stale_rows(
+            stale,
+            &worktrees,
+            &std::collections::HashMap::new(),
+            None,
+            &|_| false,
+        );
+        assert_eq!(names(&rows), vec!["feature", "fix/typo"]);
+    }
+
+    #[test]
+    fn stale_rows_flag_a_dirty_held_worktree() {
+        let worktrees = vec![named_worktree("feature", "/tmp/wt")];
+        let rows = stale_rows(
+            vec!["feature".to_string()],
+            &worktrees,
+            &std::collections::HashMap::new(),
+            None,
+            &|path| path == Path::new("/tmp/wt"),
+        );
+        assert!(rows[0].risk.dirty);
+        assert!(rows[0].worktree.is_some());
+    }
+
+    #[test]
+    fn align_labels_pads_annotations_into_a_column() {
+        let rows = vec![
+            ("short".to_string(), "(+ worktree)".to_string()),
+            ("much-longer-name".to_string(), "↑1".to_string()),
+        ];
+        let got = align_labels(&rows);
+        assert_eq!(got[0], "short             (+ worktree)");
+        assert_eq!(got[1], "much-longer-name  ↑1");
+    }
+
+    #[test]
+    fn align_labels_leaves_unannotated_rows_bare() {
+        let rows = vec![
+            ("a".to_string(), String::new()),
+            ("bb".to_string(), "↑1".to_string()),
+        ];
+        let got = align_labels(&rows);
+        assert_eq!(got[0], "a", "no trailing padding on a bare row");
+        assert_eq!(got[1], "bb  ↑1");
     }
 }

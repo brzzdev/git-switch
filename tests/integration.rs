@@ -548,7 +548,7 @@ fn tracked_branch_without_unique_commits_not_stale() {
 }
 
 #[test]
-fn delete_branches_removes_listed_branches() {
+fn force_delete_branch_removes_branch() {
     let (_bare, work) = setup();
 
     for name in ["feat-a", "feat-b"] {
@@ -564,9 +564,14 @@ fn delete_branches_removes_listed_branches() {
     }
 
     let _cwd = cwd_at(work.path());
-    let result = git_switch::git::delete_branches(&["feat-a", "feat-b"]);
-
-    result.expect("delete_branches should succeed");
+    for name in ["feat-a", "feat-b"] {
+        let outcome = git_switch::git::force_delete_branch(name)
+            .expect("force_delete_branch should not error");
+        assert!(
+            matches!(outcome, git_switch::git::BranchDeleteOutcome::Deleted),
+            "{name} should report as deleted"
+        );
+    }
 
     let listing = git(work.path(), &["branch", "--format=%(refname:short)"]);
     let names = stdout_str(&listing);
@@ -579,7 +584,7 @@ fn delete_branches_removes_listed_branches() {
 }
 
 #[test]
-fn worktree_held_stale_branch_is_skipped_with_warning() {
+fn worktree_held_stale_branch_is_no_longer_reported_as_skipped() {
     let (_bare, work) = setup();
 
     git(work.path(), &["checkout", "-b", "wip"]);
@@ -602,12 +607,16 @@ fn worktree_held_stale_branch_is_skipped_with_warning() {
 
     assert!(output.status.success(), "stderr: {}", stderr_str(&output));
 
+    // A held stale branch is now offered in the prompt alongside its worktree
+    // rather than dismissed as unactionable.
     let stderr = stderr_str(&output);
     assert!(
-        stderr.contains("stale but held by worktree, skipping: wip"),
-        "expected worktree-held warning, got: {stderr}"
+        !stderr.contains("skipping"),
+        "the dead-end skip message should be gone, got: {stderr}"
     );
 
+    // Non-interactively there's no prompt, so nothing is destroyed: the branch
+    // and its worktree both survive.
     let branches = git(
         work.path(),
         &["branch", "--list", "--format=%(refname:short)"],
@@ -616,6 +625,11 @@ fn worktree_held_stale_branch_is_skipped_with_warning() {
         stdout_str(&branches).lines().any(|l| l == "wip"),
         "wip should still exist, got: {}",
         stdout_str(&branches)
+    );
+    assert!(
+        worktree_path.is_dir(),
+        "worktree should survive a non-interactive run: {}",
+        worktree_path.display()
     );
 }
 
@@ -1090,43 +1104,209 @@ fn in_place_switch_hands_off_when_branch_is_held_by_worktree() {
     assert_eq!(stdout_str(&head).trim(), "main");
 }
 
+/// Creates a worktree for a new branch and returns its path.
+fn add_worktree(work: &Path, parent: &TempDir, branch: &str) -> PathBuf {
+    git(work, &["branch", branch]);
+    let path = parent.path().join("worktrees").join("repo").join(branch);
+    git(work, &["worktree", "add", path.to_str().unwrap(), branch]);
+    path
+}
+
+fn commit_in(path: &Path, file: &str, msg: &str) {
+    fs::write(path.join(file), "x\n").unwrap();
+    git(path, &["add", file]);
+    git(path, &["commit", "-m", msg]);
+}
+
+/// A named target carries risk but has no picker row to warn on, and a piped
+/// run can neither show a warning nor ask — so it must refuse outright rather
+/// than destroy something unwarned.
 #[test]
-fn wt_rm_keeps_branch_with_unmerged_commits() {
+fn wt_rm_refuses_unmerged_branch_non_interactively() {
     let (_bare, parent, work) = setup_with_parent();
-
-    git(&work, &["branch", "feature"]);
-    let path = parent.path().join("worktrees").join("repo").join("feature");
-    git(
-        &work,
-        &["worktree", "add", path.to_str().unwrap(), "feature"],
-    );
-
-    // A commit on `feature` that never lands on main → not fully merged.
-    fs::write(path.join("new.txt"), "unmerged\n").unwrap();
-    git(&path, &["add", "new.txt"]);
-    git(&path, &["commit", "-m", "unmerged work"]);
+    let path = add_worktree(&work, &parent, "feature");
+    commit_in(&path, "new.txt", "unmerged work");
 
     let output = git_switch_args(&work, &["wt", "rm", "feature"]);
+
+    assert!(
+        !output.status.success(),
+        "should exit non-zero; stderr: {}",
+        stderr_str(&output)
+    );
+    assert!(
+        path.exists(),
+        "worktree must survive a refusal: {}",
+        path.display()
+    );
+    let stderr = stderr_str(&output);
+    assert!(
+        stderr.contains("--force"),
+        "refusal should point at the escape hatch; got: {stderr}"
+    );
+
+    let branches = git(&work, &["branch", "--format=%(refname:short)"]);
+    assert!(
+        stdout_str(&branches).lines().any(|l| l == "feature"),
+        "branch must survive a refusal; got: {}",
+        stdout_str(&branches)
+    );
+}
+
+#[test]
+fn wt_rm_refuses_dirty_worktree_non_interactively() {
+    let (_bare, parent, work) = setup_with_parent();
+    let path = add_worktree(&work, &parent, "feature");
+    fs::write(path.join("scratch.txt"), "uncommitted\n").unwrap();
+
+    let output = git_switch_args(&work, &["wt", "rm", "feature"]);
+
+    assert!(
+        !output.status.success(),
+        "should exit non-zero; stderr: {}",
+        stderr_str(&output)
+    );
+    assert!(
+        stderr_str(&output).contains("uncommitted"),
+        "should name the risk; got: {}",
+        stderr_str(&output)
+    );
+    assert!(path.exists(), "worktree must survive: {}", path.display());
+}
+
+/// `--force` waives the confirmation, discarding uncommitted changes and the
+/// unmerged branch alike.
+#[test]
+fn wt_rm_force_removes_dirty_worktree_and_unmerged_branch() {
+    let (_bare, parent, work) = setup_with_parent();
+    let path = add_worktree(&work, &parent, "feature");
+    commit_in(&path, "new.txt", "unmerged work");
+    fs::write(path.join("scratch.txt"), "uncommitted\n").unwrap();
+
+    let output = git_switch_args(&work, &["wt", "rm", "feature", "--force"]);
     assert!(output.status.success(), "stderr: {}", stderr_str(&output));
 
     assert!(
         !path.exists(),
-        "worktree dir should be removed: {}",
+        "worktree should be removed: {}",
+        path.display()
+    );
+    let branches = git(&work, &["branch", "--format=%(refname:short)"]);
+    assert!(
+        !stdout_str(&branches).lines().any(|l| l == "feature"),
+        "unmerged branch should be force-deleted; got: {}",
+        stdout_str(&branches)
+    );
+}
+
+/// A clean, merged worktree has nothing to lose, so `.` needs no confirmation
+/// even though it names a target.
+#[test]
+fn wt_rm_dot_removes_the_current_worktree() {
+    let (_bare, parent, work) = setup_with_parent();
+    let path = add_worktree(&work, &parent, "feature");
+
+    let output = git_switch_args(&path, &["wt", "rm", "."]);
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+
+    assert!(
+        !path.exists(),
+        "the worktree we stood in should be removed: {}",
         path.display()
     );
 
-    // Branch must survive, since -d refuses to drop unmerged commits.
-    let branches = git(&work, &["branch", "--format=%(refname:short)"]);
+    // The cwd just vanished, so the shell wrapper is handed the main worktree.
+    let printed = stdout_str(&output).trim().to_string();
+    assert_eq!(
+        Path::new(&printed).canonicalize().ok(),
+        work.canonicalize().ok(),
+        "stdout should hand the main worktree to the shell wrapper; got: {printed}"
+    );
+}
+
+/// Regression: `git branch --merged` is relative to HEAD, and every branch is
+/// merged into itself — so judging risk from inside the worktree being removed
+/// reported its own branch as merged, skipped the warning, and left the branch
+/// behind after the worktree went. Risk must be judged from the main worktree.
+#[test]
+fn wt_rm_dot_sees_its_own_branch_as_unmerged() {
+    let (_bare, parent, work) = setup_with_parent();
+    let path = add_worktree(&work, &parent, "feature");
+    commit_in(&path, "new.txt", "unmerged work");
+
+    let output = git_switch_args(&path, &["wt", "rm", "."]);
+
     assert!(
-        stdout_str(&branches).lines().any(|l| l == "feature"),
-        "branch should be kept; got: {}",
-        stdout_str(&branches)
+        !output.status.success(),
+        "unmerged work should be flagged, not silently skipped; stderr: {}",
+        stderr_str(&output)
     );
     assert!(
         stderr_str(&output).contains("unmerged"),
-        "should warn about unmerged commits; got: {}",
+        "should name the unmerged commits; got: {}",
         stderr_str(&output)
     );
+    assert!(path.exists(), "worktree must survive: {}", path.display());
+}
+
+/// `--force` on `.` must finish the job: no worktree *and* no leftover branch.
+#[test]
+fn wt_rm_dot_force_leaves_no_branch_behind() {
+    let (_bare, parent, work) = setup_with_parent();
+    let path = add_worktree(&work, &parent, "feature");
+    commit_in(&path, "new.txt", "unmerged work");
+
+    let output = git_switch_args(&path, &["wt", "rm", ".", "--force"]);
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+
+    assert!(
+        !path.exists(),
+        "worktree should be gone: {}",
+        path.display()
+    );
+    let branches = git(&work, &["branch", "--format=%(refname:short)"]);
+    assert!(
+        !stdout_str(&branches).lines().any(|l| l == "feature"),
+        "no leftover branch; got: {}",
+        stdout_str(&branches)
+    );
+}
+
+#[test]
+fn wt_rm_dot_in_the_main_worktree_errors() {
+    let (_bare, parent, work) = setup_with_parent();
+    // A removable worktree exists, so `.` fails on its own merits rather than
+    // on there being nothing to remove at all.
+    add_worktree(&work, &parent, "feature");
+
+    let output = git_switch_args(&work, &["wt", "rm", "."]);
+
+    assert!(
+        !output.status.success(),
+        "should exit non-zero; stderr: {}",
+        stderr_str(&output)
+    );
+    assert!(
+        stderr_str(&output).contains("main worktree cannot be removed"),
+        "should explain why; got: {}",
+        stderr_str(&output)
+    );
+}
+
+#[test]
+fn wt_rm_dot_refuses_dirty_worktree_non_interactively() {
+    let (_bare, parent, work) = setup_with_parent();
+    let path = add_worktree(&work, &parent, "feature");
+    fs::write(path.join("scratch.txt"), "uncommitted\n").unwrap();
+
+    let output = git_switch_args(&path, &["wt", "rm", "."]);
+
+    assert!(
+        !output.status.success(),
+        "should exit non-zero; stderr: {}",
+        stderr_str(&output)
+    );
+    assert!(path.exists(), "worktree must survive: {}", path.display());
 }
 
 #[test]
@@ -1221,20 +1401,15 @@ fn handoff_fast_forwards_held_worktree_from_its_own_remote() {
 }
 
 #[test]
-fn wt_rm_reports_failure_and_keeps_branch_when_worktree_is_dirty() {
+fn wt_rm_reports_failure_and_keeps_branch_when_worktree_is_locked() {
     let (_bare, parent, work) = setup_with_parent();
+    let path = add_worktree(&work, &parent, "feature");
 
-    git(&work, &["branch", "feature"]);
-    let path = parent.path().join("worktrees").join("repo").join("feature");
-    git(
-        &work,
-        &["worktree", "add", path.to_str().unwrap(), "feature"],
-    );
+    // A locked worktree survives even `--force` (git wants `--force --force`),
+    // which we deliberately don't escalate to.
+    git(&work, &["worktree", "lock", path.to_str().unwrap()]);
 
-    // An untracked file makes `git worktree remove` refuse without --force.
-    fs::write(path.join("dirty.txt"), "uncommitted\n").unwrap();
-
-    let output = git_switch_args(&work, &["wt", "rm", "feature"]);
+    let output = git_switch_args(&work, &["wt", "rm", "feature", "--force"]);
     // The command itself succeeds (per-worktree failures are reported, not fatal).
     assert!(output.status.success(), "stderr: {}", stderr_str(&output));
     assert!(
