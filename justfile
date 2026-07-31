@@ -59,18 +59,85 @@ install-shell-integration:
 build-release:
   cargo build --release
 
-# Tag a release, bump Cargo.toml, push, and create a GitHub release.
+# Release a version. Run once to open the version-bump PR, again once it has merged to tag.
 release tag:
   #!/usr/bin/env sh
   set -e
   version="{{tag}}"
   version="${version#v}"
-  perl -i -pe "s/^version = \".*\"/version = \"$version\"/" Cargo.toml
-  cargo check --quiet
-  git add Cargo.toml Cargo.lock
-  git commit -m "chore: bump version to $version"
-  git push
-  echo "Now create a GitHub release: gh release create v$version --title v$version --notes '...'"
+  original="$(git rev-parse --abbrev-ref HEAD)"
+
+  # A dirty tree would drag unrelated work into the bump commit.
+  if [ -n "$(git status --porcelain)" ]; then
+    echo "error: working tree is dirty; commit or stash first" >&2
+    exit 1
+  fi
+
+  git fetch --quiet origin main --tags
+
+  # The tag is the one irreversible step of a release, so never reuse one.
+  if git rev-parse -q --verify "refs/tags/v$version" >/dev/null \
+    || [ -n "$(git ls-remote --tags origin "refs/tags/v$version")" ]; then
+    echo "error: tag v$version already exists" >&2
+    exit 1
+  fi
+
+  # Which phase we are in is read from main itself rather than tracked
+  # anywhere, so an interrupted release resumes just by re-running.
+  merged="$(git show origin/main:Cargo.toml | sed -n 's/^version = "\(.*\)"/\1/p' | head -1)"
+  highest="$(printf '%s\n%s\n' "$version" "$merged" | sort -V | tail -1)"
+  if [ "$version" != "$highest" ]; then
+    echo "error: $version is not newer than $merged, already on main" >&2
+    exit 1
+  fi
+
+  # Phase 1 — main is still on the old version, so open the bump PR. It has to
+  # go through a PR: main requires signed commits and a passing `test` check,
+  # and admin bypass is scoped to pull requests only.
+  if [ "$merged" != "$version" ]; then
+    branch="release/$version"
+
+    # Re-running while the PR is still open should say so, rather than die on
+    # `git checkout -b` with a raw "a branch named ... already exists".
+    if git rev-parse -q --verify "refs/heads/$branch" >/dev/null \
+      || [ -n "$(git ls-remote --heads origin "$branch")" ]; then
+      echo "error: $branch already exists; merge its PR, then re-run to tag" >&2
+      exit 1
+    fi
+
+    git checkout --quiet -b "$branch" origin/main
+    perl -i -pe "s/^version = \".*\"/version = \"$version\"/" Cargo.toml
+    cargo check --quiet
+    git add Cargo.toml Cargo.lock
+    git commit --quiet -m "chore: bump version to $version"
+    git push --quiet -u origin "$branch"
+    gh pr create --base main --head "$branch" \
+      --title "chore: bump version to $version" \
+      --body "Version bump for the v$version release."
+    git checkout --quiet "$original"
+    echo "Merge the PR, then run: just release $version"
+    exit 0
+  fi
+
+  # Phase 2 — the bump has landed, so tag it. Tags sit outside the branch
+  # ruleset, so this needs no PR.
+  # Take the newest run rather than whichever the API lists first, so a failed
+  # re-run can't hide behind an earlier success. A queued run has no conclusion
+  # yet, which is distinct from no run having reported at all.
+  commit="$(git rev-parse origin/main)"
+  check="$(gh api "repos/{owner}/{repo}/commits/$commit/check-runs" --jq \
+    '[.check_runs[] | select(.name == "test")]
+     | if length == 0 then "missing"
+       else (sort_by(.started_at) | last | .conclusion // "pending") end')"
+  if [ "$check" != "success" ]; then
+    echo "error: 'test' on origin/main ($commit) is '$check', refusing to tag" >&2
+    exit 1
+  fi
+
+  git tag "v$version" "$commit"
+  git push --quiet origin "v$version"
+  echo "Tagged v$version. The release workflow is building binaries; it will"
+  echo "open a draft release for you to write notes on and publish."
 
 # Run the test suite.
 test:
