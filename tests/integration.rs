@@ -137,6 +137,10 @@ fn setup_with_remote(remote: &str) -> (TempDir, TempDir) {
     git(work.path(), &["add", "file.txt"]);
     git(work.path(), &["commit", "-m", "initial"]);
     git(work.path(), &["push", "-u", remote, "main"]);
+    // `git clone` writes `refs/remotes/<remote>/HEAD`, but `init` + `remote add`
+    // + `push` does not. Staleness is judged against the default branch, so a
+    // setup without it wouldn't resemble any real clone.
+    git(work.path(), &["remote", "set-head", remote, "main"]);
 
     (bare, work)
 }
@@ -561,6 +565,154 @@ fn tracked_branch_without_unique_commits_not_stale() {
     );
 }
 
+/// Adds a worktree the way `git-switch wt` does: a new branch off
+/// `origin/main`, tracking it.
+fn add_worktree_branch(work: &Path, parent: &Path, branch: &str) -> PathBuf {
+    let path = parent.join("worktrees").join("repo").join(branch);
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    git(
+        work,
+        &[
+            "worktree",
+            "add",
+            "--track",
+            "-b",
+            branch,
+            path.to_str().unwrap(),
+            "origin/main",
+        ],
+    );
+    path
+}
+
+/// A branch created off `origin/main` and never committed to has its tip *equal*
+/// to main's, which the old `tip == HEAD` rule read as "fast-forward merged".
+#[test]
+fn fresh_worktree_branch_is_not_stale_from_the_main_worktree() {
+    let (_bare, parent, work) = setup_with_parent();
+    add_worktree_branch(&work, parent.path(), "feature-a");
+
+    let _cwd = cwd_at(&work);
+    let stale = git_switch::git::stale_branches("origin").unwrap();
+
+    assert!(
+        !stale.contains(&"feature-a".to_string()),
+        "an empty worktree branch should not be stale, got: {stale:?}"
+    );
+}
+
+/// The reported bug: staleness used to be judged against ambient HEAD, so
+/// committing in one worktree made every *sibling* worktree's branch look
+/// merged-and-behind.
+#[test]
+fn fresh_worktree_branch_is_not_stale_from_a_sibling_worktree() {
+    let (_bare, parent, work) = setup_with_parent();
+    add_worktree_branch(&work, parent.path(), "feature-a");
+    let b = add_worktree_branch(&work, parent.path(), "feature-b");
+
+    fs::write(b.join("work.txt"), "work\n").unwrap();
+    git(&b, &["add", "work.txt"]);
+    git(&b, &["commit", "-m", "sibling work"]);
+
+    let _cwd = cwd_at(&b);
+    let stale = git_switch::git::stale_branches("origin").unwrap();
+
+    assert!(
+        !stale.contains(&"feature-a".to_string()),
+        "a sibling's commits must not make feature-a stale, got: {stale:?}"
+    );
+}
+
+/// R1: merged with a merge commit, so the tip sits off main's first-parent
+/// chain. It is pushed and its tip differs from main's, so neither of the other
+/// two clauses would catch it.
+#[test]
+fn no_ff_merged_branch_is_stale() {
+    let (_bare, work) = setup();
+
+    git(work.path(), &["checkout", "-b", "feature-noff"]);
+    fs::write(work.path().join("noff.txt"), "work\n").unwrap();
+    git(work.path(), &["add", "noff.txt"]);
+    git(work.path(), &["commit", "-m", "work"]);
+    git(work.path(), &["push", "-u", "origin", "feature-noff"]);
+    git(work.path(), &["checkout", "main"]);
+    git(
+        work.path(),
+        &["merge", "--no-ff", "-m", "merge feature", "feature-noff"],
+    );
+
+    let _cwd = cwd_at(work.path());
+    let stale = git_switch::git::stale_branches("origin").unwrap();
+
+    assert!(
+        stale.contains(&"feature-noff".to_string()),
+        "a --no-ff merged branch should be stale, got: {stale:?}"
+    );
+}
+
+/// Without a default branch there is no main line to judge "merged" against, so
+/// the merged rule stands down rather than falling back to ambient HEAD. A
+/// deleted upstream still speaks for itself.
+#[test]
+fn without_a_default_branch_only_gone_upstreams_are_stale() {
+    let (bare, work) = setup();
+
+    // A merged branch that would otherwise qualify.
+    git(work.path(), &["checkout", "-b", "merged-work"]);
+    fs::write(work.path().join("merged.txt"), "work\n").unwrap();
+    git(work.path(), &["add", "merged.txt"]);
+    git(work.path(), &["commit", "-m", "work"]);
+    git(work.path(), &["checkout", "main"]);
+    git(
+        work.path(),
+        &["merge", "--no-ff", "-m", "merge", "merged-work"],
+    );
+
+    // A branch whose upstream is deleted on the remote.
+    git(work.path(), &["checkout", "-b", "abandoned"]);
+    git(work.path(), &["push", "-u", "origin", "abandoned"]);
+    git(work.path(), &["checkout", "main"]);
+    git(bare.path(), &["branch", "-D", "abandoned"]);
+    git(work.path(), &["fetch", "--prune", "origin"]);
+
+    git(work.path(), &["remote", "set-head", "origin", "--delete"]);
+
+    let _cwd = cwd_at(work.path());
+    let stale = git_switch::git::stale_branches("origin").unwrap();
+
+    assert!(
+        !stale.contains(&"merged-work".to_string()),
+        "no anchor means no merged rule, got: {stale:?}"
+    );
+    assert!(
+        stale.contains(&"abandoned".to_string()),
+        "a gone upstream is stale with or without an anchor, got: {stale:?}"
+    );
+}
+
+/// The upstream a new worktree branch carries is load-bearing for the staleness
+/// rules, so it must not depend on the user's `branch.autoSetupMerge`.
+#[test]
+fn worktree_add_sets_upstream_with_auto_setup_merge_off() {
+    let (_bare, parent, work) = setup_with_parent();
+    git(&work, &["config", "branch.autoSetupMerge", "false"]);
+    let path = parent.path().join("worktrees").join("repo").join("feature");
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+
+    let _cwd = cwd_at(&work);
+    git_switch::git::worktree_add(&path, "feature", Some("origin/main")).unwrap();
+
+    let upstream = git(
+        &work,
+        &["for-each-ref", "--format=%(upstream)", "refs/heads/feature"],
+    );
+    assert_eq!(
+        stdout_str(&upstream).trim(),
+        "refs/remotes/origin/main",
+        "worktree branches must track their base regardless of config"
+    );
+}
+
 #[test]
 fn force_delete_branch_removes_branch() {
     let (_bare, work) = setup();
@@ -579,7 +731,7 @@ fn force_delete_branch_removes_branch() {
 
     let _cwd = cwd_at(work.path());
     for name in ["feat-a", "feat-b"] {
-        let outcome = git_switch::git::force_delete_branch(name)
+        let outcome = git_switch::git::force_delete_branch(None, name)
             .expect("force_delete_branch should not error");
         assert!(
             matches!(outcome, git_switch::git::BranchDeleteOutcome::Deleted),

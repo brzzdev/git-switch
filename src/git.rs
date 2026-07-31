@@ -270,56 +270,142 @@ pub fn reset_hard(remote: &str, branch: &str) -> AppResult<()> {
     Ok(())
 }
 
+/// One `refs/heads/` entry: where the branch points and what it tracks.
+struct BranchRef<'a> {
+    tip: &'a str,
+    /// The full upstream ref (`refs/remotes/origin/foo`), empty when untracked.
+    upstream: &'a str,
+    /// The upstream was configured but no longer exists on the remote.
+    gone: bool,
+}
+
+impl BranchRef<'_> {
+    /// True when the upstream is this branch's own counterpart rather than some
+    /// other ref. A branch created off `origin/main` tracks *`main`*, which is
+    /// how a never-pushed branch is told apart from one that was published.
+    fn tracks_own_counterpart(&self, name: &str) -> bool {
+        self.upstream
+            .strip_prefix("refs/remotes/")
+            .and_then(|rest| rest.split_once('/'))
+            .is_some_and(|(_, counterpart)| counterpart == name)
+    }
+}
+
+fn branch_refs(refs_output: &str) -> HashMap<&str, BranchRef<'_>> {
+    refs_output
+        .lines()
+        .filter_map(|line| {
+            let mut parts = line.split('\t');
+            let name = parts.next()?;
+            let tip = parts.next()?;
+            let upstream = parts.next()?;
+            let track = parts.next().unwrap_or("");
+            Some((
+                name,
+                BranchRef {
+                    tip,
+                    upstream,
+                    gone: track == "gone",
+                },
+            ))
+        })
+        .collect()
+}
+
+/// The ref that staleness is judged against — the main line, not whatever
+/// branch the current worktree happens to be on.
+///
+/// The local default branch comes first: it is what you merge into, so work
+/// merged locally but not yet pushed still counts. Its remote counterpart
+/// stands in when there is no local copy. When neither resolves the repo has no
+/// discernible main line, and callers stand the merged rule down rather than
+/// falling back to `HEAD`.
+fn merged_anchor(remote: &str) -> Option<String> {
+    let default = default_branch(remote)?;
+    let local = format!("refs/heads/{default}");
+    if rev_parse(None, &local).is_ok() {
+        return Some(local);
+    }
+    let remote_ref = format!("refs/remotes/{remote}/{default}");
+    rev_parse(None, &remote_ref).ok().map(|_| remote_ref)
+}
+
+/// The commits on `anchor`'s first-parent chain. A branch merged with a merge
+/// commit hangs off a *second* parent, so its tip is absent here; a branch that
+/// was only ever branched off the main line sits squarely on it.
+fn first_parent_chain(anchor: &str) -> AppResult<HashSet<String>> {
+    let output = run(&["rev-list", "--first-parent", anchor])?;
+    Ok(output.lines().map(String::from).collect())
+}
+
+/// Branches that have outlived their purpose: a deleted upstream, or work that
+/// has landed on the main line.
+///
+/// Merged-ness alone doesn't settle it. Every branch reachable from the anchor
+/// has its tip as its own merge-base with it, so a branch freshly cut from the
+/// main line is topologically indistinguishable from one whose commits were
+/// fast-forwarded onto it. Three clauses separate them, and any one suffices:
+///
+/// - the tip lies off the anchor's first-parent chain, so it was merged in;
+/// - it tracks its own counterpart and its tip *is* the anchor's, so what it
+///   published was fast-forwarded onto the main line;
+/// - it tracks nothing and its tip is *behind* the anchor's, so it was merged
+///   locally and left behind.
+///
+/// A branch cut from the main line and never committed to satisfies none: it
+/// tracks the *anchor's* counterpart, not its own, and sits on the first-parent
+/// chain. Untracked ones are the exception — nothing distinguishes an empty
+/// branch from a locally merged one once the anchor moves past both.
 pub fn stale_branches(remote: &str) -> AppResult<Vec<String>> {
     let current = current_branch()?;
     let keep = kept_branches(remote);
 
-    let merged_output = run(&["branch", "--format=%(refname:short)", "--merged"])?;
     let refs_output = run(&[
         "for-each-ref",
-        "--format=%(refname:short) %(objectname) %(upstream) %(upstream:track)",
+        "--format=%(refname:short)%09%(objectname)%09%(upstream)%09%(upstream:track,nobracket)",
         "refs/heads/",
     ])?;
+    let refs = branch_refs(&refs_output);
 
-    let mut tips: HashMap<&str, &str> = HashMap::new();
-    let mut has_upstream: HashSet<&str> = HashSet::new();
-    let mut gone: HashSet<&str> = HashSet::new();
-    let mut local_only: HashSet<&str> = HashSet::new();
-    for line in refs_output.lines() {
-        let mut parts = line.split_whitespace();
-        let Some(name) = parts.next() else { continue };
-        let Some(sha) = parts.next() else { continue };
-        tips.insert(name, sha);
-        if parts.next().is_none() {
-            local_only.insert(name);
-            continue;
+    let mut branches: Vec<String> = refs
+        .iter()
+        .filter(|(_, r)| r.gone)
+        .map(|(name, _)| (*name).to_string())
+        .collect();
+
+    if let Some(anchor) = merged_anchor(remote) {
+        let anchor_tip = rev_parse(None, &anchor)?;
+        let merged_output = run(&["branch", "--format=%(refname:short)", "--merged", &anchor])?;
+
+        // Branches the cheap clauses can't settle, held back so the first-parent
+        // walk is only paid for when it can change an answer.
+        let mut undecided: Vec<&str> = Vec::new();
+        for name in merged_output.lines() {
+            let Some(r) = refs.get(name) else { continue };
+            if r.gone {
+                continue;
+            }
+            let published_and_merged = r.tracks_own_counterpart(name) && r.tip == anchor_tip;
+            let local_and_behind = r.upstream.is_empty() && r.tip != anchor_tip;
+            if published_and_merged || local_and_behind {
+                branches.push(name.to_string());
+            } else {
+                undecided.push(name);
+            }
         }
-        if line.ends_with("[gone]") {
-            gone.insert(name);
-        } else {
-            has_upstream.insert(name);
+
+        if !undecided.is_empty() {
+            let chain = first_parent_chain(&anchor)?;
+            branches.extend(
+                undecided
+                    .into_iter()
+                    .filter(|name| refs.get(name).is_some_and(|r| !chain.contains(r.tip)))
+                    .map(String::from),
+            );
         }
     }
 
-    let head = rev_parse(None, "HEAD")?;
-
-    let mut branches: Vec<String> = merged_output
-        .lines()
-        .filter(|b| {
-            let Some(tip) = tips.get(b) else { return false };
-            if has_upstream.contains(b) {
-                has_unique_commits(b, tip, &head)
-            } else if local_only.contains(b) {
-                *tip != head
-            } else {
-                false
-            }
-        })
-        .chain(gone.iter().copied())
-        .filter(|b| current.as_deref() != Some(*b) && !keep.contains(*b))
-        .map(String::from)
-        .collect();
-
+    branches.retain(|b| current.as_deref() != Some(b) && !keep.contains(b));
     branches.sort();
     branches.dedup();
     Ok(branches)
@@ -539,8 +625,12 @@ pub fn worktree_for_branch(worktrees: &[Worktree], branch: &str) -> Option<Workt
 /// local or remote-tracking branch.
 pub fn worktree_add(path: &Path, branch: &str, base: Option<&str>) -> AppResult<()> {
     let path_str = path_to_str(path)?;
+    // `--track` rather than relying on git's default: `branch.autoSetupMerge`
+    // can be off, and the upstream a new branch carries is what tells
+    // `stale_branches` it was branched off the main line rather than merged
+    // into it.
     let args: Vec<&str> = match base {
-        Some(base) => vec!["worktree", "add", "-b", branch, path_str, base],
+        Some(base) => vec!["worktree", "add", "--track", "-b", branch, path_str, base],
         None => vec!["worktree", "add", path_str, branch],
     };
 
@@ -630,8 +720,11 @@ fn path_to_str(path: &Path) -> AppResult<&str> {
 
 /// Delete a branch with `git branch -D`, discarding unmerged commits. Only for
 /// branches whose risk was shown to the user first — see [`unmerged_branches`].
-pub fn force_delete_branch(branch: &str) -> AppResult<BranchDeleteOutcome> {
-    let output = git_cmd(None)
+///
+/// `dir` must be the worktree whose HEAD the risk was judged from, so that the
+/// markers shown and the deletion performed agree about what is merged.
+pub fn force_delete_branch(dir: Option<&Path>, branch: &str) -> AppResult<BranchDeleteOutcome> {
+    let output = git_cmd(dir)
         .args(["branch", "-D", "--quiet", branch])
         .output()?;
     if output.status.success() {
@@ -652,8 +745,11 @@ pub enum BranchDeleteOutcome {
 /// Delete `branch` only if git considers it fully merged (`git branch -d`).
 /// Unlike [`delete_branches`] this never force-deletes, so unmerged work is
 /// preserved rather than silently discarded.
-pub fn delete_branch_if_merged(branch: &str) -> AppResult<BranchDeleteOutcome> {
-    let output = git_cmd(None)
+///
+/// `-d` judges merged-ness against the HEAD it runs under, so `dir` must be the
+/// worktree the caller measured risk from — see [`unmerged_branches`].
+pub fn delete_branch_if_merged(dir: Option<&Path>, branch: &str) -> AppResult<BranchDeleteOutcome> {
+    let output = git_cmd(dir)
         .args(["branch", "-d", "--quiet", branch])
         .output()?;
     if output.status.success() {
@@ -664,23 +760,6 @@ pub fn delete_branch_if_merged(branch: &str) -> AppResult<BranchDeleteOutcome> {
         return Ok(BranchDeleteOutcome::NotMerged);
     }
     Ok(BranchDeleteOutcome::Failed(stderr.trim().to_string()))
-}
-
-/// Returns true if the branch had unique commits that were merged, not just a
-/// pointer to a commit already on the main line that never diverged.
-///
-/// A branch created from main with no new commits has its tip equal to its
-/// merge-base with HEAD and is strictly behind HEAD — this is not stale.
-/// A fast-forward-merged branch also has tip == merge-base, but its tip equals
-/// HEAD (or HEAD hasn't moved past it yet).
-fn has_unique_commits(branch: &str, tip: &str, head: &str) -> bool {
-    let Ok(merge_base) = run(&["merge-base", head, branch]) else {
-        return false;
-    };
-    if merge_base.trim() != tip {
-        return true;
-    }
-    tip == head
 }
 
 fn rev_parse(dir: Option<&Path>, refname: &str) -> AppResult<String> {
