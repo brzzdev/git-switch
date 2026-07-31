@@ -304,8 +304,11 @@ impl BranchRef<'_> {
     /// see [`stale_branches`] for the cases where nothing shows it.
     fn landed_on(&self, anchor: &Anchor<'_>) -> bool {
         // Cut from the anchor, as `wt` creates them. Commits it holds that the
-        // published anchor doesn't are work of its own, and being merged into
-        // the local anchor is where that work went.
+        // published anchor doesn't are taken for work of its own, and being
+        // merged into the local anchor for where that work went. A branch cut
+        // from an anchor that was itself ahead inherits the same count without
+        // having earned it; nothing in the refs separates the two, and
+        // `stale_branches` documents that as a known cost.
         if self.tracks(anchor.branch) {
             return parse_track(self.track).0 > 0;
         }
@@ -416,8 +419,8 @@ fn stale_from(
 /// - it tracks nothing and its tip is *behind* the anchor's, so it was merged
 ///   locally and left behind.
 ///
-/// A branch cut from the anchor and never committed to satisfies neither: it
-/// tracks the anchor's counterpart but is never ahead of it.
+/// A branch cut from the anchor and never committed to satisfies neither, as
+/// long as the anchor it was cut from was level with what it tracks.
 ///
 /// Where a branch is published under a name of its own, neither applies.
 /// Whether the anchor holds its work is a question about two remote branches,
@@ -425,9 +428,14 @@ fn stale_from(
 /// deleted, as a rebased or squashed one does — neither is an ancestor of the
 /// anchor in any way this rule can read.
 ///
-/// Both clauses lapse where the branch comes to look untouched: an untracked
-/// branch once the anchor moves past it, and a `wt` branch once the anchor
-/// reaches its own upstream and the ahead count falls back to zero.
+/// Both clauses read a proxy, and both are wrong at the edges. They go quiet
+/// where the branch comes to look untouched — an untracked one once the anchor
+/// moves past it, a `wt` one once the anchor reaches its own upstream — and
+/// they misfire where an untouched branch comes to look worked on: cut from an
+/// anchor that was already behind, or already ahead. In each pair the two
+/// branches carry identical refs, so the proxy is the whole of the evidence.
+/// [ADR 0002](../docs/adr/0002-staleness-is-anchored-to-the-default-branch.md)
+/// records why that is accepted rather than guessed at.
 pub fn stale_branches(remote: &str) -> AppResult<Vec<String>> {
     let current = current_branch()?;
     let keep = kept_branches(remote);
@@ -963,19 +971,36 @@ mod tests {
         );
     }
 
-    /// A deleted upstream speaks for itself, with no anchor to measure against.
+    /// A deleted upstream speaks for itself, without appearing in `--merged`.
     #[test]
-    fn gone_upstream_is_stale_without_an_anchor() {
+    fn gone_upstream_is_stale_without_being_merged() {
         let refs_output = head_refs(&[
             ("main", "aaa", "refs/heads/main", ""),
             ("merged-work", "bbb", "", ""),
             ("abandoned", "ccc", "refs/heads/abandoned", "gone"),
         ]);
-        let got = stale(&refs_output, "", "");
+        let got = stale(&refs_output, "", "aaa");
         assert_eq!(
             got,
             vec!["abandoned".to_string()],
-            "without an anchor the merged rule stands down"
+            "a deleted upstream needs no merged listing"
+        );
+    }
+
+    /// An accepted misfire, recorded so the boundary is visible: cut from an
+    /// anchor that was itself ahead, the branch inherits a count it never
+    /// earned, and carries exactly the refs of one whose work the anchor took.
+    #[test]
+    fn branch_cut_from_an_anchor_already_ahead_is_offered() {
+        let refs_output = head_refs(&[
+            ("main", "bbb", "refs/heads/main", "ahead 1"),
+            ("feature", "bbb", "refs/heads/main", "ahead 1"),
+        ]);
+        let got = stale(&refs_output, "feature", "bbb");
+        assert_eq!(
+            got,
+            vec!["feature".to_string()],
+            "indistinguishable from an absorbed branch; see ADR 0002"
         );
     }
 
