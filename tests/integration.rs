@@ -650,7 +650,7 @@ fn no_ff_merged_branch_is_stale() {
     );
 }
 
-/// Without a default branch there is no main line to judge "merged" against, so
+/// Without a default branch there is nothing to judge "merged" against, so
 /// the merged rule stands down rather than falling back to ambient HEAD. A
 /// deleted upstream still speaks for itself.
 #[test]
@@ -709,7 +709,7 @@ fn worktree_add_sets_upstream_with_auto_setup_merge_off() {
     assert_eq!(
         stdout_str(&upstream).trim(),
         "refs/remotes/origin/main",
-        "worktree branches must track their base regardless of config"
+        "worktree branches must track what they were created from, whatever the config"
     );
 }
 
