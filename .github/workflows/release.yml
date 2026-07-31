@@ -1,14 +1,19 @@
 name: Release
 
 on:
+  push:
+    tags: ["v*"]
   workflow_dispatch:
     inputs:
-      version:
-        description: "Version to release (e.g. 0.2.0)"
+      tag:
+        description: "Existing tag to rebuild (e.g. v1.0.12)"
         required: true
 
 permissions:
   contents: write
+
+env:
+  TAG: ${{ inputs.tag || github.ref_name }}
 
 jobs:
   build:
@@ -17,18 +22,33 @@ jobs:
         include:
           - target: aarch64-apple-darwin
             os: macos-latest
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-24.04-arm
           - target: x86_64-apple-darwin
             os: macos-latest
-          - target: x86_64-unknown-linux-gnu
+          - target: x86_64-unknown-linux-musl
             os: ubuntu-latest
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.TAG }}
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
       - run: cargo build --release --target ${{ matrix.target }}
-      - run: tar -czf git-switch-${{ matrix.target }}.tar.gz -C target/${{ matrix.target }}/release git-switch
+
+      # The archive unpacks to a self-contained directory: the binary plus the
+      # completions and shell wrappers `just install-*` would otherwise supply.
+      - name: Stage the archive contents
+        run: |
+          stage="git-switch-${{ matrix.target }}"
+          mkdir -p "$stage"
+          cp "target/${{ matrix.target }}/release/git-switch" "$stage/"
+          cp -R completions shell "$stage/"
+          cp README.md LICENSE "$stage/"
+          tar -czf "$stage.tar.gz" "$stage"
+
       - uses: actions/upload-artifact@v7
         with:
           name: git-switch-${{ matrix.target }}
@@ -38,11 +58,30 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
       - uses: actions/download-artifact@v8
         with:
           path: artifacts
           merge-multiple: true
-      - run: gh release create "v${{ inputs.version }}" artifacts/*.tar.gz --title "v${{ inputs.version }}" --generate-notes
+
+      - name: Checksum the archives
+        working-directory: artifacts
+        run: sha256sum -- *.tar.gz > SHA256SUMS
+
+      # Created as a draft so the release notes can be written by hand before
+      # anything goes public; --generate-notes only seeds a starting point.
+      # A rebuild of an existing tag replaces its assets instead of failing,
+      # and --verify-tag keeps a mistyped dispatch input from inventing a tag.
+      - name: Draft the release
         env:
+          GH_REPO: ${{ github.repository }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" artifacts/* --clobber
+          else
+            gh release create "$TAG" artifacts/* \
+              --title "$TAG" \
+              --draft \
+              --generate-notes \
+              --verify-tag
+          fi

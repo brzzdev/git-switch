@@ -12,6 +12,45 @@ A fast, interactive Git branch switcher. Pick a branch, fetch & fast-forward it,
 
 ## Install
 
+### Download a binary
+
+Pick your platform and run:
+
+```sh
+# macOS (Apple silicon)
+TARGET=aarch64-apple-darwin
+# macOS (Intel)
+TARGET=x86_64-apple-darwin
+# Linux (arm64)
+TARGET=aarch64-unknown-linux-musl
+# Linux (x86_64)
+TARGET=x86_64-unknown-linux-musl
+
+curl -fsSL "https://github.com/brzzdev/git-switch/releases/latest/download/git-switch-$TARGET.tar.gz" | tar -xz
+cd "git-switch-$TARGET"
+
+# The binary
+mkdir -p ~/.local/bin && mv git-switch ~/.local/bin/
+
+# Shell integration — required for worktree `cd` hand-off (see below)
+mkdir -p ~/.config/git-switch && cp shell/* ~/.config/git-switch/
+
+# Completions, for zsh
+mkdir -p ~/.zsh/completions && cp completions/_git-switch ~/.zsh/completions/
+```
+
+Make sure `~/.local/bin` is on your `PATH`, then add the shell integration line to your rc — see [Shell integration](#shell-integration-required-for-cd) for that and [Shell Completions](#shell-completions) for bash and fish.
+
+The Linux builds are statically linked against musl, so they run on any distribution regardless of its glibc version.
+
+The macOS binaries aren't signed or notarized. Downloading with `curl` as above is fine — quarantine is applied by the downloader, and `curl` doesn't set it. If you download through a browser instead, macOS will refuse to run the binary until you clear the flag:
+
+```sh
+xattr -d com.apple.quarantine ~/.local/bin/git-switch
+```
+
+### Build from source
+
 Requires [Rust](https://rustup.rs) and [just](https://github.com/casey/just).
 
 ```sh
@@ -85,6 +124,8 @@ just install-shell-integration
 #   source ~/.config/git-switch/git-switch.sh
 ```
 
+Installing from a release tarball? The same files ship in its `shell/` directory — copy them to `~/.config/git-switch/` and source the one for your shell (`git-switch.sh` for zsh and bash, `git-switch.fish` for fish).
+
 Without the wrapper, `git-switch wt foo` still creates / finds the worktree and prints its path — you'd just `cd` there manually.
 
 ## Shell Completions
@@ -95,7 +136,15 @@ Tab completions are available for zsh, bash, and fish.
 just install-completions
 ```
 
-This installs the appropriate completion script for your current shell. For zsh, make sure `~/.zsh/completions` is in your `fpath` before `compinit`:
+This installs the appropriate completion script for your current shell. From a release tarball, the same scripts are in its `completions/` directory:
+
+| Shell | File | Destination |
+| ----- | ---- | ----------- |
+| zsh | `_git-switch` | `~/.zsh/completions/_git-switch` |
+| bash | `git-switch.bash` | `~/.local/share/bash-completion/completions/git-switch` |
+| fish | `git-switch.fish` | `~/.config/fish/completions/git-switch.fish` |
+
+For zsh, make sure `~/.zsh/completions` is in your `fpath` before `compinit`:
 
 ```sh
 fpath=(~/.zsh/completions $fpath)
@@ -126,4 +175,4 @@ git config --add git-switch.keep staging
 
 ## License
 
-MIT
+MIT — see [LICENSE](LICENSE).
