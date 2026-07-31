@@ -583,8 +583,8 @@ fn empty_published_branch_is_not_stale_from_a_branch_past_main() {
 }
 
 /// History is no more telling than the tip. An empty branch pushed at a merged
-/// topic's tip sits off main's first-parent chain exactly as the topic itself
-/// does, so a published branch must be kept out of that walk too.
+/// topic's tip presents the same refs as the topic itself, so no shape of
+/// history can tell them apart.
 #[test]
 fn empty_published_branch_at_a_merged_tip_is_not_stale() {
     let (_bare, work) = setup();
@@ -699,8 +699,8 @@ fn fresh_worktree_branch_is_not_stale_from_a_sibling_worktree() {
 
 /// `git-switch wt`'s own merge-locally workflow: a worktree branch that did real
 /// work, fast-forwarded into main. It tracks `origin/main` rather than its own
-/// counterpart and sits on main's first-parent chain, so only being *ahead* of
-/// what it tracks separates it from a branch that never held a commit.
+/// counterpart rather than its own, so only being *ahead* of what it tracks
+/// separates it from a branch that never held a commit.
 #[test]
 fn worktree_branch_fast_forwarded_into_main_is_stale() {
     let (_bare, parent, work) = setup_with_parent();
@@ -720,11 +720,12 @@ fn worktree_branch_fast_forwarded_into_main_is_stale() {
     );
 }
 
-/// Merged with a merge commit, so the tip sits off main's first-parent chain.
-/// The branch tracks `origin/main` and main has been pushed, so its ahead count
-/// is back to zero — only its history still shows the work.
+/// How a merge commit reshapes history is not evidence either way, so a `wt`
+/// branch merged with `--no-ff` rests on the same ahead count as any other:
+/// offered while main still holds commits its upstream doesn't, and silent once
+/// main is pushed and the count falls back to zero.
 #[test]
-fn no_ff_merged_branch_is_stale() {
+fn no_ff_merged_branch_is_stale_until_main_is_pushed() {
     let (_bare, parent, work) = setup_with_parent();
     let path = add_worktree_branch(&work, parent.path(), "feature-noff");
 
@@ -735,14 +736,60 @@ fn no_ff_merged_branch_is_stale() {
         &work,
         &["merge", "--no-ff", "-m", "merge feature", "feature-noff"],
     );
+
+    {
+        let _cwd = cwd_at(&work);
+        let stale = git_switch::git::stale_branches("origin").unwrap();
+        assert!(
+            stale.contains(&"feature-noff".to_string()),
+            "work main holds and origin/main doesn't should be offered, got: {stale:?}"
+        );
+    }
+
     git(&work, &["push", "origin", "main"]);
 
     let _cwd = cwd_at(&work);
     let stale = git_switch::git::stale_branches("origin").unwrap();
+    assert!(
+        !stale.contains(&"feature-noff".to_string()),
+        "once pushed it cannot be told from an untouched branch, got: {stale:?}"
+    );
+}
+
+/// The same shape reached from the other side: an empty branch pointed at a
+/// merged topic's tip and set to track `origin/main`. Nothing separates it from
+/// the merged worktree branch above once main is pushed, so neither is offered.
+#[test]
+fn empty_anchor_tracking_branch_at_a_merged_tip_is_not_stale() {
+    let (_bare, work) = setup();
+
+    git(work.path(), &["checkout", "-b", "topic"]);
+    fs::write(work.path().join("topic.txt"), "work\n").unwrap();
+    git(work.path(), &["add", "topic.txt"]);
+    git(work.path(), &["commit", "-m", "topic work"]);
+    git(work.path(), &["checkout", "main"]);
+    git(
+        work.path(),
+        &["merge", "--no-ff", "-m", "merge topic", "topic"],
+    );
+    git(work.path(), &["push", "origin", "main"]);
+
+    git(work.path(), &["branch", "feature", "topic"]);
+    git(
+        work.path(),
+        &["branch", "--set-upstream-to=origin/main", "feature"],
+    );
+
+    let _cwd = cwd_at(work.path());
+    let stale = git_switch::git::stale_branches("origin").unwrap();
 
     assert!(
-        stale.contains(&"feature-noff".to_string()),
-        "a --no-ff merged branch should be stale, got: {stale:?}"
+        !stale.contains(&"feature".to_string()),
+        "a branch with no commits of its own must not be offered, got: {stale:?}"
+    );
+    assert!(
+        stale.contains(&"topic".to_string()),
+        "the untracked topic that did the work should still be offered, got: {stale:?}"
     );
 }
 
