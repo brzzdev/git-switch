@@ -137,6 +137,10 @@ fn setup_with_remote(remote: &str) -> (TempDir, TempDir) {
     git(work.path(), &["add", "file.txt"]);
     git(work.path(), &["commit", "-m", "initial"]);
     git(work.path(), &["push", "-u", remote, "main"]);
+    // `git clone` writes `refs/remotes/<remote>/HEAD`, but `init` + `remote add`
+    // + `push` does not. Staleness is judged against the default branch, so a
+    // setup without it wouldn't resemble any real clone.
+    git(work.path(), &["remote", "set-head", remote, "main"]);
 
     (bare, work)
 }
@@ -515,12 +519,14 @@ fn local_only_branch_stale_after_main_advances() {
     );
 }
 
+/// A branch that published its own counterpart hands the question over to the
+/// remote: once both are pushed, a branch whose commits main fast-forwarded
+/// over is byte-identical to one pushed without any commits at all. Deleting
+/// the remote branch is the signal that settles it.
 #[test]
-fn merged_tracked_branch_is_stale() {
-    let (_bare, work) = setup();
+fn merged_tracked_branch_waits_for_its_upstream_to_go() {
+    let (bare, work) = setup();
 
-    // Create a branch, push it, then merge into main.
-    // The upstream is in sync (not gone), but the branch is fully merged.
     git(work.path(), &["checkout", "-b", "feature-done"]);
     fs::write(work.path().join("feature.txt"), "done\n").unwrap();
     git(work.path(), &["add", "feature.txt"]);
@@ -530,12 +536,84 @@ fn merged_tracked_branch_is_stale() {
     git(work.path(), &["merge", "feature-done"]);
     git(work.path(), &["push", "origin", "main"]);
 
+    {
+        let _cwd = cwd_at(work.path());
+        let stale = git_switch::git::stale_branches("origin").unwrap();
+        assert!(
+            !stale.contains(&"feature-done".to_string()),
+            "a live upstream is indistinguishable from an unstarted branch, got: {stale:?}"
+        );
+    }
+
+    git(bare.path(), &["branch", "-D", "feature-done"]);
+    git(work.path(), &["fetch", "--prune", "origin"]);
+
+    let _cwd = cwd_at(work.path());
+    let stale = git_switch::git::stale_branches("origin").unwrap();
+    assert!(
+        stale.contains(&"feature-done".to_string()),
+        "a deleted upstream settles it, got: {stale:?}"
+    );
+}
+
+/// The other half of the same ambiguity: a branch pushed before any work was
+/// done on it. Judging it by its tip would offer it the moment you switched
+/// away — and, being the branch just left, pre-tick it.
+#[test]
+fn empty_published_branch_is_not_stale_from_a_branch_past_main() {
+    let (_bare, work) = setup();
+
+    git(work.path(), &["checkout", "-b", "feature"]);
+    git(work.path(), &["push", "-u", "origin", "feature"]);
+
+    // Somewhere further along than main, so the old ambient-HEAD rule and the
+    // anchor rule disagree about `feature`.
+    git(work.path(), &["checkout", "-b", "other"]);
+    fs::write(work.path().join("other.txt"), "x\n").unwrap();
+    git(work.path(), &["add", "other.txt"]);
+    git(work.path(), &["commit", "-m", "other advances"]);
+
     let _cwd = cwd_at(work.path());
     let stale = git_switch::git::stale_branches("origin").unwrap();
 
     assert!(
-        stale.contains(&"feature-done".to_string()),
-        "merged branch with upstream should be stale, got: {stale:?}"
+        !stale.contains(&"feature".to_string()),
+        "a branch pushed without commits must not be offered, got: {stale:?}"
+    );
+}
+
+/// History is no more telling than the tip. An empty branch pushed at a merged
+/// topic's tip presents the same refs as the topic itself, so no shape of
+/// history can tell them apart.
+#[test]
+fn empty_published_branch_at_a_merged_tip_is_not_stale() {
+    let (_bare, work) = setup();
+
+    git(work.path(), &["checkout", "-b", "topic"]);
+    fs::write(work.path().join("topic.txt"), "work\n").unwrap();
+    git(work.path(), &["add", "topic.txt"]);
+    git(work.path(), &["commit", "-m", "topic work"]);
+    git(work.path(), &["checkout", "main"]);
+    git(
+        work.path(),
+        &["merge", "--no-ff", "-m", "merge topic", "topic"],
+    );
+
+    // Branch off the merged topic without adding anything, and publish it.
+    git(work.path(), &["checkout", "-b", "feature", "topic"]);
+    git(work.path(), &["push", "-u", "origin", "feature"]);
+    git(work.path(), &["checkout", "main"]);
+
+    let _cwd = cwd_at(work.path());
+    let stale = git_switch::git::stale_branches("origin").unwrap();
+
+    assert!(
+        !stale.contains(&"feature".to_string()),
+        "a branch pushed without commits must not be offered, got: {stale:?}"
+    );
+    assert!(
+        stale.contains(&"topic".to_string()),
+        "the untracked topic that did the work should still be offered, got: {stale:?}"
     );
 }
 
@@ -561,6 +639,223 @@ fn tracked_branch_without_unique_commits_not_stale() {
     );
 }
 
+/// Adds a worktree the way `git-switch wt` does: a new branch off
+/// `origin/main`, tracking it.
+fn add_worktree_branch(work: &Path, parent: &Path, branch: &str) -> PathBuf {
+    let path = parent.join("worktrees").join("repo").join(branch);
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    git(
+        work,
+        &[
+            "worktree",
+            "add",
+            "--track",
+            "-b",
+            branch,
+            path.to_str().unwrap(),
+            "origin/main",
+        ],
+    );
+    path
+}
+
+/// A branch created off `origin/main` and never committed to has its tip *equal*
+/// to main's, which the old `tip == HEAD` rule read as "fast-forward merged".
+#[test]
+fn fresh_worktree_branch_is_not_stale_from_the_main_worktree() {
+    let (_bare, parent, work) = setup_with_parent();
+    add_worktree_branch(&work, parent.path(), "feature-a");
+
+    let _cwd = cwd_at(&work);
+    let stale = git_switch::git::stale_branches("origin").unwrap();
+
+    assert!(
+        !stale.contains(&"feature-a".to_string()),
+        "an empty worktree branch should not be stale, got: {stale:?}"
+    );
+}
+
+/// The reported bug: staleness used to be judged against ambient HEAD, so
+/// committing in one worktree made every *sibling* worktree's branch look
+/// merged-and-behind.
+#[test]
+fn fresh_worktree_branch_is_not_stale_from_a_sibling_worktree() {
+    let (_bare, parent, work) = setup_with_parent();
+    add_worktree_branch(&work, parent.path(), "feature-a");
+    let b = add_worktree_branch(&work, parent.path(), "feature-b");
+
+    fs::write(b.join("work.txt"), "work\n").unwrap();
+    git(&b, &["add", "work.txt"]);
+    git(&b, &["commit", "-m", "sibling work"]);
+
+    let _cwd = cwd_at(&b);
+    let stale = git_switch::git::stale_branches("origin").unwrap();
+
+    assert!(
+        !stale.contains(&"feature-a".to_string()),
+        "a sibling's commits must not make feature-a stale, got: {stale:?}"
+    );
+}
+
+/// `git-switch wt`'s own merge-locally workflow: a worktree branch that did real
+/// work, fast-forwarded into main. It tracks `origin/main` rather than its own
+/// counterpart rather than its own, so only being *ahead* of what it tracks
+/// separates it from a branch that never held a commit.
+#[test]
+fn worktree_branch_fast_forwarded_into_main_is_stale() {
+    let (_bare, parent, work) = setup_with_parent();
+    let path = add_worktree_branch(&work, parent.path(), "feature-a");
+
+    fs::write(path.join("work.txt"), "real work\n").unwrap();
+    git(&path, &["add", "work.txt"]);
+    git(&path, &["commit", "-m", "real work"]);
+    git(&work, &["merge", "--ff-only", "feature-a"]);
+
+    let _cwd = cwd_at(&work);
+    let stale = git_switch::git::stale_branches("origin").unwrap();
+
+    assert!(
+        stale.contains(&"feature-a".to_string()),
+        "a worktree branch merged into main should be stale, got: {stale:?}"
+    );
+}
+
+/// How a merge commit reshapes history is not evidence either way, so a `wt`
+/// branch merged with `--no-ff` rests on the same ahead count as any other:
+/// offered while main still holds commits its upstream doesn't, and silent once
+/// main is pushed and the count falls back to zero.
+#[test]
+fn no_ff_merged_branch_is_stale_until_main_is_pushed() {
+    let (_bare, parent, work) = setup_with_parent();
+    let path = add_worktree_branch(&work, parent.path(), "feature-noff");
+
+    fs::write(path.join("noff.txt"), "work\n").unwrap();
+    git(&path, &["add", "noff.txt"]);
+    git(&path, &["commit", "-m", "work"]);
+    git(
+        &work,
+        &["merge", "--no-ff", "-m", "merge feature", "feature-noff"],
+    );
+
+    {
+        let _cwd = cwd_at(&work);
+        let stale = git_switch::git::stale_branches("origin").unwrap();
+        assert!(
+            stale.contains(&"feature-noff".to_string()),
+            "work main holds and origin/main doesn't should be offered, got: {stale:?}"
+        );
+    }
+
+    git(&work, &["push", "origin", "main"]);
+
+    let _cwd = cwd_at(&work);
+    let stale = git_switch::git::stale_branches("origin").unwrap();
+    assert!(
+        !stale.contains(&"feature-noff".to_string()),
+        "once pushed it cannot be told from an untouched branch, got: {stale:?}"
+    );
+}
+
+/// The same shape reached from the other side: an empty branch pointed at a
+/// merged topic's tip and set to track `origin/main`. Nothing separates it from
+/// the merged worktree branch above once main is pushed, so neither is offered.
+#[test]
+fn empty_anchor_tracking_branch_at_a_merged_tip_is_not_stale() {
+    let (_bare, work) = setup();
+
+    git(work.path(), &["checkout", "-b", "topic"]);
+    fs::write(work.path().join("topic.txt"), "work\n").unwrap();
+    git(work.path(), &["add", "topic.txt"]);
+    git(work.path(), &["commit", "-m", "topic work"]);
+    git(work.path(), &["checkout", "main"]);
+    git(
+        work.path(),
+        &["merge", "--no-ff", "-m", "merge topic", "topic"],
+    );
+    git(work.path(), &["push", "origin", "main"]);
+
+    git(work.path(), &["branch", "feature", "topic"]);
+    git(
+        work.path(),
+        &["branch", "--set-upstream-to=origin/main", "feature"],
+    );
+
+    let _cwd = cwd_at(work.path());
+    let stale = git_switch::git::stale_branches("origin").unwrap();
+
+    assert!(
+        !stale.contains(&"feature".to_string()),
+        "a branch with no commits of its own must not be offered, got: {stale:?}"
+    );
+    assert!(
+        stale.contains(&"topic".to_string()),
+        "the untracked topic that did the work should still be offered, got: {stale:?}"
+    );
+}
+
+/// Without a default branch there is nothing to judge "merged" against, so
+/// the merged rule stands down rather than falling back to ambient HEAD. A
+/// deleted upstream still speaks for itself.
+#[test]
+fn without_a_default_branch_only_gone_upstreams_are_stale() {
+    let (bare, work) = setup();
+
+    // A merged branch that would otherwise qualify.
+    git(work.path(), &["checkout", "-b", "merged-work"]);
+    fs::write(work.path().join("merged.txt"), "work\n").unwrap();
+    git(work.path(), &["add", "merged.txt"]);
+    git(work.path(), &["commit", "-m", "work"]);
+    git(work.path(), &["checkout", "main"]);
+    git(
+        work.path(),
+        &["merge", "--no-ff", "-m", "merge", "merged-work"],
+    );
+
+    // A branch whose upstream is deleted on the remote.
+    git(work.path(), &["checkout", "-b", "abandoned"]);
+    git(work.path(), &["push", "-u", "origin", "abandoned"]);
+    git(work.path(), &["checkout", "main"]);
+    git(bare.path(), &["branch", "-D", "abandoned"]);
+    git(work.path(), &["fetch", "--prune", "origin"]);
+
+    git(work.path(), &["remote", "set-head", "origin", "--delete"]);
+
+    let _cwd = cwd_at(work.path());
+    let stale = git_switch::git::stale_branches("origin").unwrap();
+
+    assert!(
+        !stale.contains(&"merged-work".to_string()),
+        "no anchor means no merged rule, got: {stale:?}"
+    );
+    assert!(
+        stale.contains(&"abandoned".to_string()),
+        "a gone upstream is stale with or without an anchor, got: {stale:?}"
+    );
+}
+
+/// The upstream a new worktree branch carries is load-bearing for the staleness
+/// rules, so it must not depend on the user's `branch.autoSetupMerge`.
+#[test]
+fn worktree_add_sets_upstream_with_auto_setup_merge_off() {
+    let (_bare, parent, work) = setup_with_parent();
+    git(&work, &["config", "branch.autoSetupMerge", "false"]);
+    let path = parent.path().join("worktrees").join("repo").join("feature");
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+
+    let _cwd = cwd_at(&work);
+    git_switch::git::worktree_add(&path, "feature", Some("origin/main")).unwrap();
+
+    let upstream = git(
+        &work,
+        &["for-each-ref", "--format=%(upstream)", "refs/heads/feature"],
+    );
+    assert_eq!(
+        stdout_str(&upstream).trim(),
+        "refs/remotes/origin/main",
+        "worktree branches must track what they were created from, whatever the config"
+    );
+}
+
 #[test]
 fn force_delete_branch_removes_branch() {
     let (_bare, work) = setup();
@@ -579,7 +874,7 @@ fn force_delete_branch_removes_branch() {
 
     let _cwd = cwd_at(work.path());
     for name in ["feat-a", "feat-b"] {
-        let outcome = git_switch::git::force_delete_branch(name)
+        let outcome = git_switch::git::force_delete_branch(None, name)
             .expect("force_delete_branch should not error");
         assert!(
             matches!(outcome, git_switch::git::BranchDeleteOutcome::Deleted),
@@ -703,7 +998,7 @@ fn non_origin_remote_pulls_via_branch_config() {
 
 #[test]
 fn non_origin_remote_detects_stale_branch() {
-    let (_bare, work) = setup_with_remote("upstream");
+    let (bare, work) = setup_with_remote("upstream");
 
     git(work.path(), &["checkout", "-b", "feature-done"]);
     fs::write(work.path().join("feature.txt"), "done\n").unwrap();
@@ -713,6 +1008,8 @@ fn non_origin_remote_detects_stale_branch() {
     git(work.path(), &["checkout", "main"]);
     git(work.path(), &["merge", "feature-done"]);
     git(work.path(), &["push", "upstream", "main"]);
+    git(bare.path(), &["branch", "-D", "feature-done"]);
+    git(work.path(), &["fetch", "--prune", "upstream"]);
 
     let _cwd = cwd_at(work.path());
     let stale = git_switch::git::stale_branches("upstream").unwrap();
@@ -1088,6 +1385,56 @@ fn wt_rm_removes_worktree_and_deletes_branch() {
     assert!(
         !stdout_str(&branches).lines().any(|l| l == "feature"),
         "branch should be deleted; got: {}",
+        stdout_str(&branches)
+    );
+}
+
+/// Risk is judged from the main worktree, so the delete must run there too.
+/// `git branch -d` consults HEAD only where no upstream is set, so an untracked
+/// branch is where the difference shows: removing it while standing in an
+/// unrelated worktree used to ask `-d` from that unrelated HEAD, which refuses.
+/// The row was marked safe and the branch survived anyway.
+#[test]
+fn wt_rm_deletes_an_untracked_merged_branch_from_an_unrelated_worktree() {
+    let (_bare, parent, work) = setup_with_parent();
+
+    let done = parent
+        .path()
+        .join("worktrees")
+        .join("repo")
+        .join("feature-done");
+    fs::create_dir_all(done.parent().unwrap()).unwrap();
+    git(
+        &work,
+        &[
+            "worktree",
+            "add",
+            "--no-track",
+            "-b",
+            "feature-done",
+            done.to_str().unwrap(),
+            "main",
+        ],
+    );
+    fs::write(done.join("done.txt"), "work\n").unwrap();
+    git(&done, &["add", "done.txt"]);
+    git(&done, &["commit", "-m", "done"]);
+    git(&work, &["merge", "--ff-only", "feature-done"]);
+
+    // Diverge the worktree we run from, so `feature-done` is merged into main
+    // but not into this HEAD.
+    let elsewhere = add_worktree_branch(&work, parent.path(), "feature-elsewhere");
+    fs::write(elsewhere.join("other.txt"), "other\n").unwrap();
+    git(&elsewhere, &["add", "other.txt"]);
+    git(&elsewhere, &["commit", "-m", "other"]);
+
+    let output = git_switch_args(&elsewhere, &["wt", "rm", "feature-done"]);
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+
+    let branches = git(&work, &["branch", "--format=%(refname:short)"]);
+    assert!(
+        !stdout_str(&branches).lines().any(|l| l == "feature-done"),
+        "branch merged into main should be deleted; got: {}",
         stdout_str(&branches)
     );
 }

@@ -209,7 +209,9 @@ pub fn run_rm(target: Option<&str>, force: bool) -> AppResult<()> {
     }
 
     for &i in &selected_indices {
-        remove_one(&removable[i], risks[i], force)?;
+        // Delete from the same worktree the risk was judged in, so `-d`'s idea
+        // of merged matches the marker that licensed the removal.
+        remove_one(Some(&main.path), &removable[i], risks[i], force)?;
     }
 
     if cwd_will_vanish {
@@ -282,7 +284,7 @@ fn select_for_removal(
 /// wasn't flagged keeps git's own guard, so a worktree that turns out to be
 /// dirty (or a branch that gained a commit) after the markers were built makes
 /// git refuse rather than destroying something unwarned.
-fn remove_one(wt: &git::Worktree, risk: Risk, force: bool) -> AppResult<()> {
+fn remove_one(dir: Option<&Path>, wt: &git::Worktree, risk: Risk, force: bool) -> AppResult<()> {
     match git::worktree_remove(&wt.path, risk.dirty || force)? {
         git::WorktreeRemoveOutcome::Removed => match wt.branch.as_deref() {
             None => eprintln!(
@@ -292,9 +294,9 @@ fn remove_one(wt: &git::Worktree, risk: Risk, force: bool) -> AppResult<()> {
             ),
             Some(branch) => {
                 let deleted = if risk.unmerged.is_some() || force {
-                    git::force_delete_branch(branch)?
+                    git::force_delete_branch(dir, branch)?
                 } else {
-                    git::delete_branch_if_merged(branch)?
+                    git::delete_branch_if_merged(dir, branch)?
                 };
                 match deleted {
                     git::BranchDeleteOutcome::Deleted => eprintln!(

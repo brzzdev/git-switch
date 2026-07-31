@@ -1064,9 +1064,13 @@ pub(crate) fn prompt_delete_stale_branches(
 ) -> AppResult<()> {
     let stale = git::stale_branches(remote)?;
     let worktrees = git::worktree_list().unwrap_or_default();
-    // Ambient HEAD is right here: `stale_branches` excludes the current branch,
-    // so nothing in this list can be the HEAD we're measuring against.
-    let unmerged = git::unmerged_branches(None).unwrap_or_default();
+    // Judge risk — and later delete — from the main worktree, where HEAD is
+    // normally the branch staleness was measured against. Asking from the
+    // current worktree would call a branch merged into the anchor "unmerged"
+    // whenever that worktree sits on something unrelated, and per ADR 0001 the
+    // marker would then license a force-delete it never warned about.
+    let main_dir = worktrees.iter().find(|w| w.is_main).map(|w| w.path.clone());
+    let unmerged = git::unmerged_branches(main_dir.as_deref()).unwrap_or_default();
     let rows = stale_rows(stale, &worktrees, &unmerged, destination, &|path| {
         git::worktree_dirty(path)
     });
@@ -1096,7 +1100,7 @@ pub(crate) fn prompt_delete_stale_branches(
     )?;
 
     for &i in &selections {
-        delete_stale_row(&rows[i])?;
+        delete_stale_row(main_dir.as_deref(), &rows[i])?;
     }
 
     Ok(())
@@ -1162,7 +1166,7 @@ fn stale_label(row: &StaleRow) -> (String, String) {
 /// Removes a ticked stale row: its worktree first (the branch can't be deleted
 /// while one holds it), then the branch. Every deletion reports itself, and a
 /// worktree that refuses to go — a locked one, say — leaves its branch alone.
-fn delete_stale_row(row: &StaleRow) -> AppResult<()> {
+fn delete_stale_row(dir: Option<&Path>, row: &StaleRow) -> AppResult<()> {
     if let Some(wt) = &row.worktree {
         // Force only what the row actually warned about. An unmarked worktree
         // that turns out to be dirty — it changed since the markers were built,
@@ -1188,9 +1192,9 @@ fn delete_stale_row(row: &StaleRow) -> AppResult<()> {
     // Likewise for the branch: `-D` only where an `↑` marker licensed it, so a
     // branch that gained a commit since the markers were built fails safe.
     let deleted = if row.risk.unmerged.is_some() {
-        git::force_delete_branch(&row.branch)?
+        git::force_delete_branch(dir, &row.branch)?
     } else {
-        git::delete_branch_if_merged(&row.branch)?
+        git::delete_branch_if_merged(dir, &row.branch)?
     };
     match (deleted, &row.worktree) {
         (git::BranchDeleteOutcome::Deleted, None) => {
