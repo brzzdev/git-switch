@@ -623,6 +623,29 @@ fn fresh_worktree_branch_is_not_stale_from_a_sibling_worktree() {
     );
 }
 
+/// `git-switch wt`'s own merge-locally workflow: a worktree branch that did real
+/// work, fast-forwarded into main. It tracks `origin/main` rather than its own
+/// counterpart and sits on main's first-parent chain, so only being *ahead* of
+/// what it tracks separates it from a branch that never held a commit.
+#[test]
+fn worktree_branch_fast_forwarded_into_main_is_stale() {
+    let (_bare, parent, work) = setup_with_parent();
+    let path = add_worktree_branch(&work, parent.path(), "feature-a");
+
+    fs::write(path.join("work.txt"), "real work\n").unwrap();
+    git(&path, &["add", "work.txt"]);
+    git(&path, &["commit", "-m", "real work"]);
+    git(&work, &["merge", "--ff-only", "feature-a"]);
+
+    let _cwd = cwd_at(&work);
+    let stale = git_switch::git::stale_branches("origin").unwrap();
+
+    assert!(
+        stale.contains(&"feature-a".to_string()),
+        "a worktree branch merged into main should be stale, got: {stale:?}"
+    );
+}
+
 /// R1: merged with a merge commit, so the tip sits off main's first-parent
 /// chain. It is pushed and its tip differs from main's, so neither of the other
 /// two clauses would catch it.
@@ -1240,6 +1263,56 @@ fn wt_rm_removes_worktree_and_deletes_branch() {
     assert!(
         !stdout_str(&branches).lines().any(|l| l == "feature"),
         "branch should be deleted; got: {}",
+        stdout_str(&branches)
+    );
+}
+
+/// Risk is judged from the main worktree, so the delete must run there too.
+/// `git branch -d` consults HEAD only where no upstream is set, so an untracked
+/// branch is where the difference shows: removing it while standing in an
+/// unrelated worktree used to ask `-d` from that unrelated HEAD, which refuses.
+/// The row was marked safe and the branch survived anyway.
+#[test]
+fn wt_rm_deletes_an_untracked_merged_branch_from_an_unrelated_worktree() {
+    let (_bare, parent, work) = setup_with_parent();
+
+    let done = parent
+        .path()
+        .join("worktrees")
+        .join("repo")
+        .join("feature-done");
+    fs::create_dir_all(done.parent().unwrap()).unwrap();
+    git(
+        &work,
+        &[
+            "worktree",
+            "add",
+            "--no-track",
+            "-b",
+            "feature-done",
+            done.to_str().unwrap(),
+            "main",
+        ],
+    );
+    fs::write(done.join("done.txt"), "work\n").unwrap();
+    git(&done, &["add", "done.txt"]);
+    git(&done, &["commit", "-m", "done"]);
+    git(&work, &["merge", "--ff-only", "feature-done"]);
+
+    // Diverge the worktree we run from, so `feature-done` is merged into main
+    // but not into this HEAD.
+    let elsewhere = add_worktree_branch(&work, parent.path(), "feature-elsewhere");
+    fs::write(elsewhere.join("other.txt"), "other\n").unwrap();
+    git(&elsewhere, &["add", "other.txt"]);
+    git(&elsewhere, &["commit", "-m", "other"]);
+
+    let output = git_switch_args(&elsewhere, &["wt", "rm", "feature-done"]);
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+
+    let branches = git(&work, &["branch", "--format=%(refname:short)"]);
+    assert!(
+        !stdout_str(&branches).lines().any(|l| l == "feature-done"),
+        "branch merged into main should be deleted; got: {}",
         stdout_str(&branches)
     );
 }

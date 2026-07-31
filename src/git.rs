@@ -270,11 +270,20 @@ pub fn reset_hard(remote: &str, branch: &str) -> AppResult<()> {
     Ok(())
 }
 
+/// What the staleness clauses measure against: the default branch's short name
+/// and the commit it points at.
+struct Anchor<'a> {
+    branch: &'a str,
+    tip: &'a str,
+}
+
 /// One `refs/heads/` entry: where the branch points and what it tracks.
 struct BranchRef<'a> {
     tip: &'a str,
-    /// The full upstream ref (`refs/remotes/origin/foo`), empty when untracked.
-    upstream: &'a str,
+    /// The branch this one tracks, as named *on the remote*
+    /// (`refs/heads/main`), empty when untracked. Git resolves this itself, so
+    /// it holds for remote names that contain a `/`.
+    upstream_branch: &'a str,
     /// Git's `upstream:track` summary: `ahead 2, behind 1`, `gone`, or empty.
     track: &'a str,
 }
@@ -285,26 +294,31 @@ impl BranchRef<'_> {
         self.track == "gone"
     }
 
-    /// True when the upstream is this branch's own counterpart — on any remote,
-    /// since a branch published to a second remote is no less published. A
-    /// branch created off `origin/main` tracks *`main`*, which is how a
-    /// never-pushed branch is told apart from one that was published.
-    fn tracks_own_counterpart(&self, name: &str) -> bool {
-        self.upstream
-            .strip_prefix("refs/remotes/")
-            .and_then(|rest| rest.split_once('/'))
-            .is_some_and(|(_, counterpart)| counterpart == name)
+    /// True when this tracks the remote branch called `name` — on any remote,
+    /// since a branch published to a second remote is no less published.
+    fn tracks(&self, name: &str) -> bool {
+        self.upstream_branch.strip_prefix("refs/heads/") == Some(name)
     }
 
-    /// True when what the branch tracks already shows its work has landed on the
-    /// anchor: either it published its own counterpart and the anchor was
-    /// fast-forwarded onto it, or it tracks nothing and the anchor has moved
-    /// past it. Neither settles a branch merely cut from the anchor — see
-    /// [`stale_branches`].
-    fn landed_on(&self, name: &str, anchor_tip: &str) -> bool {
-        let published_and_merged = self.tracks_own_counterpart(name) && self.tip == anchor_tip;
-        let local_and_behind = self.upstream.is_empty() && self.tip != anchor_tip;
-        published_and_merged || local_and_behind
+    /// True when what the branch tracks already shows its work has landed on
+    /// the anchor. Nothing here settles a branch merely cut from the anchor and
+    /// never committed to — see [`stale_branches`].
+    fn landed_on(&self, name: &str, anchor: &Anchor<'_>) -> bool {
+        // Published its own counterpart, and the anchor was fast-forwarded onto
+        // it.
+        if self.tracks(name) {
+            return self.tip == anchor.tip;
+        }
+        // Cut from the anchor, as `wt` creates them. Commits it holds that the
+        // published anchor doesn't are work of its own, and being merged into
+        // the local anchor is where that work went. Once the anchor is pushed
+        // the count drops to zero and the branch is indistinguishable from an
+        // empty one.
+        if self.tracks(anchor.branch) {
+            return parse_track(self.track).0 > 0;
+        }
+        // Tracks nothing, and the anchor has moved past it.
+        self.upstream_branch.is_empty() && self.tip != anchor.tip
     }
 }
 
@@ -313,7 +327,8 @@ impl BranchRef<'_> {
 fn read_branch_refs() -> AppResult<String> {
     run(&[
         "for-each-ref",
-        "--format=%(refname:short)%09%(objectname)%09%(upstream)%09%(upstream:track,nobracket)",
+        "--format=%(refname:short)%09%(objectname)%09%(upstream:remoteref)%09\
+         %(upstream:track,nobracket)",
         "refs/heads/",
     ])
 }
@@ -325,13 +340,13 @@ fn branch_refs(refs_output: &str) -> HashMap<&str, BranchRef<'_>> {
             let mut parts = line.split('\t');
             let name = parts.next()?;
             let tip = parts.next()?;
-            let upstream = parts.next()?;
+            let upstream_branch = parts.next()?;
             let track = parts.next().unwrap_or("");
             Some((
                 name,
                 BranchRef {
                     tip,
-                    upstream,
+                    upstream_branch,
                     track,
                 },
             ))
@@ -347,14 +362,16 @@ fn branch_refs(refs_output: &str) -> HashMap<&str, BranchRef<'_>> {
 /// where there is no local copy. When neither resolves there is nothing to
 /// judge "merged" against, and callers stand the merged rule down rather than
 /// falling back to `HEAD`.
-fn merged_anchor(remote: &str) -> Option<String> {
+fn merged_anchor(remote: &str) -> Option<(String, String)> {
     let default = default_branch(remote)?;
     let local = format!("refs/heads/{default}");
     if rev_parse(None, &local).is_ok() {
-        return Some(local);
+        return Some((local, default));
     }
     let remote_ref = format!("refs/remotes/{remote}/{default}");
-    rev_parse(None, &remote_ref).ok().map(|_| remote_ref)
+    rev_parse(None, &remote_ref)
+        .ok()
+        .map(|_| (remote_ref, default))
 }
 
 /// The commits on `anchor`'s first-parent chain. A branch merged with a merge
@@ -368,14 +385,14 @@ fn first_parent_chain(anchor: &str) -> AppResult<HashSet<String>> {
 /// The rule half of [`stale_branches`], split out so it can be tested against
 /// fixed git output.
 ///
-/// `merged` is the anchor's `--merged` list and `anchor_tip` its commit; both
-/// are empty where no anchor resolved, which leaves only deleted upstreams
-/// without needing a special case. `first_parent` is deferred so the walk is
-/// only paid for when it can still change an answer.
+/// `merged` is the anchor's `--merged` list; it and the anchor's fields are
+/// empty where no anchor resolved, which leaves only deleted upstreams without
+/// needing a special case. `first_parent` is deferred so the walk is only paid
+/// for when it can still change an answer.
 fn stale_from(
     refs: &HashMap<&str, BranchRef<'_>>,
     merged: &str,
-    anchor_tip: &str,
+    anchor: &Anchor<'_>,
     first_parent: impl FnOnce() -> AppResult<HashSet<String>>,
 ) -> AppResult<Vec<String>> {
     let mut stale: Vec<String> = refs
@@ -391,7 +408,7 @@ fn stale_from(
         if r.gone() {
             continue;
         }
-        if r.landed_on(name, anchor_tip) {
+        if r.landed_on(name, anchor) {
             stale.push(name.to_string());
         } else {
             undecided.push(name);
@@ -417,18 +434,22 @@ fn stale_from(
 /// Merged-ness alone doesn't settle it. Every branch reachable from the anchor
 /// has its tip as its own merge-base with it, so a branch freshly cut from the
 /// anchor is topologically indistinguishable from one whose commits were
-/// fast-forwarded onto it. Three clauses separate them, and any one suffices:
+/// fast-forwarded onto it. Four clauses separate them, and any one suffices:
 ///
 /// - the tip lies off the anchor's first-parent chain, so it was merged in;
 /// - it tracks its own counterpart and its tip *is* the anchor's, so what it
 ///   published was fast-forwarded on;
+/// - it tracks the anchor's counterpart and is *ahead* of it, so it holds work
+///   of its own that the local anchor has since taken;
 /// - it tracks nothing and its tip is *behind* the anchor's, so it was merged
 ///   locally and left behind.
 ///
 /// A branch cut from the anchor and never committed to satisfies none: it
-/// tracks the *anchor's* counterpart, not its own, and sits on the first-parent
-/// chain. Untracked ones are the exception — nothing distinguishes an empty
-/// branch from a locally merged one once the anchor moves past both.
+/// tracks the anchor's counterpart but is never ahead of it, and it sits on the
+/// first-parent chain. Two cases stay out of reach, both because the branch
+/// ends up character-for-character identical to an empty one: an untracked
+/// branch once the anchor moves past it, and a branch whose work reached the
+/// anchor's own upstream, since the ahead count then falls to zero.
 ///
 /// A branch merged by rebasing or squashing is no ancestor of the anchor at
 /// all, so no clause here can see it; that case belongs to the deleted upstream
@@ -440,17 +461,26 @@ pub fn stale_branches(remote: &str) -> AppResult<Vec<String>> {
     let refs_output = read_branch_refs()?;
     let refs = branch_refs(&refs_output);
 
-    let anchor = merged_anchor(remote);
-    let (merged, anchor_tip) = match &anchor {
-        Some(anchor) => (
-            run(&["branch", "--format=%(refname:short)", "--merged", anchor])?,
-            rev_parse(None, anchor)?,
+    let resolved = merged_anchor(remote);
+    let (merged, anchor_tip) = match &resolved {
+        Some((anchor_ref, _)) => (
+            run(&[
+                "branch",
+                "--format=%(refname:short)",
+                "--merged",
+                anchor_ref,
+            ])?,
+            rev_parse(None, anchor_ref)?,
         ),
         None => (String::new(), String::new()),
     };
+    let anchor = Anchor {
+        branch: resolved.as_ref().map_or("", |(_, branch)| branch.as_str()),
+        tip: &anchor_tip,
+    };
 
-    let mut branches = stale_from(&refs, &merged, &anchor_tip, || {
-        first_parent_chain(anchor.as_deref().unwrap_or_default())
+    let mut branches = stale_from(&refs, &merged, &anchor, || {
+        first_parent_chain(resolved.as_ref().map_or("", |(r, _)| r.as_str()))
     })?;
 
     branches.retain(|b| current.as_deref() != Some(b) && !keep.contains(b));
@@ -613,16 +643,18 @@ pub enum Unmerged {
     NoUpstream,
 }
 
-/// Branches that `git branch -d` would refuse: those merged into neither the
-/// HEAD of `dir` nor their own upstream. Callers use this both to mark rows and
-/// to decide when a force-delete is licensed, so it must mirror `-d`'s rule
-/// rather than a proxy like ahead-of-upstream — a purely local branch has no
-/// upstream to be ahead of, yet is exactly the case worth warning about.
+/// Branches that `git branch -d` would refuse. Callers use this both to mark
+/// rows and to decide when a force-delete is licensed, so it must mirror `-d`'s
+/// rule exactly: *"the branch must be fully merged in its upstream branch, or
+/// in HEAD if no upstream was set"*. The two are alternatives, not a pair —
+/// where an upstream exists it alone decides, and a branch merged into HEAD but
+/// ahead of its upstream is still refused.
 ///
-/// `dir` must be the worktree whose HEAD will be current when the delete runs.
-/// `--merged` is relative to HEAD, and every branch is merged into itself, so
-/// asking from inside the worktree being removed would report its own branch as
-/// merged and skip the warning it exists to give.
+/// `dir` supplies the HEAD half, and must be the worktree whose HEAD will be
+/// current when the delete runs. `--merged` is relative to HEAD, and every
+/// branch is merged into itself, so asking from inside the worktree being
+/// removed would report its own branch as merged and skip the warning it exists
+/// to give.
 pub fn unmerged_branches(dir: Option<&Path>) -> AppResult<HashMap<String, Unmerged>> {
     let merged_output = run_in(dir, &["branch", "--format=%(refname:short)", "--merged"])?;
     let refs_output = read_branch_refs()?;
@@ -638,12 +670,11 @@ fn unmerged_from(
     let merged: HashSet<&str> = merged_output.lines().collect();
 
     refs.iter()
-        .filter(|(name, _)| !merged.contains(*name))
         .filter_map(|(&name, r)| {
             // A `[gone]` upstream reports no ahead count, so it must be treated
             // as absent rather than as "zero ahead, therefore merged".
-            if r.upstream.is_empty() || r.gone() {
-                return Some((name.to_string(), Unmerged::NoUpstream));
+            if r.upstream_branch.is_empty() || r.gone() {
+                return (!merged.contains(name)).then(|| (name.to_string(), Unmerged::NoUpstream));
             }
             let (ahead, _) = parse_track(r.track);
             (ahead > 0).then(|| (name.to_string(), Unmerged::Ahead(ahead)))
@@ -834,10 +865,10 @@ fn run_in(dir: Option<&Path>, args: &[&str]) -> AppResult<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Unmerged, branch_refs, parse_track, stale_from, unmerged_from};
+    use super::{Anchor, Unmerged, branch_refs, parse_track, stale_from, unmerged_from};
     use std::collections::{HashMap, HashSet};
 
-    /// One `for-each-ref` line per row: name, tip, upstream, track.
+    /// One `for-each-ref` line per row: name, tip, upstream branch, track.
     fn head_refs(rows: &[(&str, &str, &str, &str)]) -> String {
         rows.iter()
             .map(|(name, tip, upstream, track)| format!("{name}\t{tip}\t{upstream}\t{track}"))
@@ -869,7 +900,11 @@ mod tests {
         first_parent: &[&str],
     ) -> Vec<String> {
         let refs = branch_refs(refs_output);
-        let mut got = stale_from(&refs, merged, anchor_tip, || Ok(chain(first_parent))).unwrap();
+        let anchor = Anchor {
+            branch: "main",
+            tip: anchor_tip,
+        };
+        let mut got = stale_from(&refs, merged, &anchor, || Ok(chain(first_parent))).unwrap();
         got.sort();
         got
     }
@@ -880,8 +915,8 @@ mod tests {
     #[test]
     fn branch_cut_from_the_anchor_is_not_stale() {
         let refs_output = head_refs(&[
-            ("main", "aaa", "refs/remotes/origin/main", ""),
-            ("feature", "bbb", "refs/remotes/origin/main", "behind 1"),
+            ("main", "aaa", "refs/heads/main", ""),
+            ("feature", "bbb", "refs/heads/main", "behind 1"),
         ]);
         let got = stale(&refs_output, "feature", "aaa", &["aaa", "bbb"]);
         assert!(
@@ -890,12 +925,26 @@ mod tests {
         );
     }
 
+    /// A `wt` branch tracks the anchor's counterpart, so being ahead of it is
+    /// what marks the commits as its own — and being in `--merged` is where
+    /// they went. This is the fast-forward-merged case an empty branch of the
+    /// same shape must not be confused with.
+    #[test]
+    fn branch_cut_from_the_anchor_that_did_work_is_stale_once_merged() {
+        let refs_output = head_refs(&[
+            ("main", "bbb", "refs/heads/main", "ahead 1"),
+            ("feature", "bbb", "refs/heads/main", "ahead 1"),
+        ]);
+        let got = stale(&refs_output, "feature", "bbb", &["aaa", "bbb"]);
+        assert_eq!(got, vec!["feature".to_string()]);
+    }
+
     /// Published its own counterpart, and the anchor was fast-forwarded onto it.
     #[test]
     fn published_branch_the_anchor_fast_forwarded_to_is_stale() {
         let refs_output = head_refs(&[
-            ("main", "bbb", "refs/remotes/origin/main", ""),
-            ("feature", "bbb", "refs/remotes/origin/feature", ""),
+            ("main", "bbb", "refs/heads/main", ""),
+            ("feature", "bbb", "refs/heads/feature", ""),
         ]);
         let got = stale(&refs_output, "feature", "bbb", &["aaa", "bbb"]);
         assert_eq!(got, vec!["feature".to_string()]);
@@ -906,7 +955,7 @@ mod tests {
     #[test]
     fn untracked_branch_behind_the_anchor_is_stale() {
         let refs_output = head_refs(&[
-            ("main", "ccc", "refs/remotes/origin/main", ""),
+            ("main", "ccc", "refs/heads/main", ""),
             ("scratch", "bbb", "", ""),
         ]);
         let got = stale(&refs_output, "scratch", "ccc", &["aaa", "bbb", "ccc"]);
@@ -918,8 +967,8 @@ mod tests {
     #[test]
     fn branch_merged_off_the_first_parent_chain_is_stale() {
         let refs_output = head_refs(&[
-            ("main", "ccc", "refs/remotes/origin/main", ""),
-            ("feature", "bbb", "refs/remotes/origin/feature", ""),
+            ("main", "ccc", "refs/heads/main", ""),
+            ("feature", "bbb", "refs/heads/feature", ""),
         ]);
         // `bbb` is reachable from main but not on its first-parent chain.
         let got = stale(&refs_output, "feature", "ccc", &["aaa", "ccc"]);
@@ -930,9 +979,9 @@ mod tests {
     #[test]
     fn gone_upstream_is_stale_without_an_anchor() {
         let refs_output = head_refs(&[
-            ("main", "aaa", "refs/remotes/origin/main", ""),
+            ("main", "aaa", "refs/heads/main", ""),
             ("merged-work", "bbb", "", ""),
-            ("abandoned", "ccc", "refs/remotes/origin/abandoned", "gone"),
+            ("abandoned", "ccc", "refs/heads/abandoned", "gone"),
         ]);
         let got = stale(&refs_output, "", "", &[]);
         assert_eq!(
@@ -947,32 +996,43 @@ mod tests {
     #[test]
     fn first_parent_walk_is_skipped_when_tracking_settles_everything() {
         let refs_output = head_refs(&[
-            ("main", "bbb", "refs/remotes/origin/main", ""),
-            ("feature", "bbb", "refs/remotes/origin/feature", ""),
+            ("main", "bbb", "refs/heads/main", ""),
+            ("feature", "bbb", "refs/heads/feature", ""),
         ]);
         let refs = branch_refs(&refs_output);
-        let got = stale_from(&refs, "feature", "bbb", || {
+        let anchor = Anchor {
+            branch: "main",
+            tip: "bbb",
+        };
+        let got = stale_from(&refs, "feature", &anchor, || {
             panic!("first-parent walk should not have been needed")
         })
         .unwrap();
         assert_eq!(got, vec!["feature".to_string()]);
     }
 
+    /// `-d` accepts merged-into-HEAD *or* merged-into-upstream, but they are
+    /// alternatives: where an upstream exists it alone decides, and git refuses
+    /// with "not yet merged to <upstream>, even though it is merged to HEAD".
     #[test]
-    fn merged_into_head_is_not_unmerged() {
+    fn ahead_of_upstream_is_unmerged_even_when_merged_into_head() {
         let got = unmerged(
             "main\nfeature",
-            &[("feature", "refs/remotes/origin/feature", "ahead 2")],
+            &[("feature", "refs/heads/feature", "ahead 2")],
         );
-        assert!(
-            got.is_empty(),
-            "merged into HEAD wins regardless of upstream, got: {got:?}"
-        );
+        assert_eq!(got.get("feature"), Some(&Unmerged::Ahead(2)));
+    }
+
+    /// HEAD decides only where no upstream was set.
+    #[test]
+    fn untracked_branch_merged_into_head_is_not_unmerged() {
+        let got = unmerged("main\nscratch", &[("scratch", "", "")]);
+        assert!(got.is_empty(), "merged into HEAD, got: {got:?}");
     }
 
     #[test]
     fn in_sync_with_upstream_is_not_unmerged() {
-        let got = unmerged("main", &[("feature", "refs/remotes/origin/feature", "")]);
+        let got = unmerged("main", &[("feature", "refs/heads/feature", "")]);
         assert!(got.is_empty(), "merged into upstream, got: {got:?}");
     }
 
@@ -980,11 +1040,7 @@ mod tests {
     fn ahead_of_upstream_is_unmerged_with_a_count() {
         let got = unmerged(
             "main",
-            &[(
-                "feature",
-                "refs/remotes/origin/feature",
-                "ahead 3, behind 1",
-            )],
+            &[("feature", "refs/heads/feature", "ahead 3, behind 1")],
         );
         assert_eq!(got.get("feature"), Some(&Unmerged::Ahead(3)));
     }
@@ -1001,7 +1057,7 @@ mod tests {
     /// "zero ahead, therefore merged".
     #[test]
     fn gone_upstream_is_unmerged_without_a_count() {
-        let got = unmerged("main", &[("orphan", "refs/remotes/origin/orphan", "gone")]);
+        let got = unmerged("main", &[("orphan", "refs/heads/orphan", "gone")]);
         assert_eq!(got.get("orphan"), Some(&Unmerged::NoUpstream));
     }
 
