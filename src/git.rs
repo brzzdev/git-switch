@@ -275,11 +275,16 @@ struct BranchRef<'a> {
     tip: &'a str,
     /// The full upstream ref (`refs/remotes/origin/foo`), empty when untracked.
     upstream: &'a str,
-    /// The upstream was configured but no longer exists on the remote.
-    gone: bool,
+    /// Git's `upstream:track` summary: `ahead 2, behind 1`, `gone`, or empty.
+    track: &'a str,
 }
 
 impl BranchRef<'_> {
+    /// The upstream was configured but no longer exists on the remote.
+    fn gone(&self) -> bool {
+        self.track == "gone"
+    }
+
     /// True when the upstream is this branch's own counterpart — on any remote,
     /// since a branch published to a second remote is no less published. A
     /// branch created off `origin/main` tracks *`main`*, which is how a
@@ -303,6 +308,16 @@ impl BranchRef<'_> {
     }
 }
 
+/// Every local branch's ref state. Refs are shared across worktrees, so this is
+/// independent of which one the caller is standing in.
+fn read_branch_refs() -> AppResult<String> {
+    run(&[
+        "for-each-ref",
+        "--format=%(refname:short)%09%(objectname)%09%(upstream)%09%(upstream:track,nobracket)",
+        "refs/heads/",
+    ])
+}
+
 fn branch_refs(refs_output: &str) -> HashMap<&str, BranchRef<'_>> {
     refs_output
         .lines()
@@ -317,7 +332,7 @@ fn branch_refs(refs_output: &str) -> HashMap<&str, BranchRef<'_>> {
                 BranchRef {
                     tip,
                     upstream,
-                    gone: track == "gone",
+                    track,
                 },
             ))
         })
@@ -365,7 +380,7 @@ fn stale_from(
 ) -> AppResult<Vec<String>> {
     let mut stale: Vec<String> = refs
         .iter()
-        .filter(|(_, r)| r.gone)
+        .filter(|(_, r)| r.gone())
         .map(|(name, _)| (*name).to_string())
         .collect();
 
@@ -373,7 +388,7 @@ fn stale_from(
     let mut undecided: Vec<&str> = Vec::new();
     for name in merged.lines() {
         let Some(r) = refs.get(name) else { continue };
-        if r.gone {
+        if r.gone() {
             continue;
         }
         if r.landed_on(name, anchor_tip) {
@@ -422,11 +437,7 @@ pub fn stale_branches(remote: &str) -> AppResult<Vec<String>> {
     let current = current_branch()?;
     let keep = kept_branches(remote);
 
-    let refs_output = run(&[
-        "for-each-ref",
-        "--format=%(refname:short)%09%(objectname)%09%(upstream)%09%(upstream:track,nobracket)",
-        "refs/heads/",
-    ])?;
+    let refs_output = read_branch_refs()?;
     let refs = branch_refs(&refs_output);
 
     let anchor = merged_anchor(remote);
@@ -614,36 +625,27 @@ pub enum Unmerged {
 /// merged and skip the warning it exists to give.
 pub fn unmerged_branches(dir: Option<&Path>) -> AppResult<HashMap<String, Unmerged>> {
     let merged_output = run_in(dir, &["branch", "--format=%(refname:short)", "--merged"])?;
-    // Refs are shared across worktrees, so this half is `dir`-independent.
-    let refs_output = run(&[
-        "for-each-ref",
-        "--format=%(refname:short)%09%(upstream)%09%(upstream:track,nobracket)",
-        "refs/heads/",
-    ])?;
-    Ok(unmerged_from(&merged_output, &refs_output))
+    let refs_output = read_branch_refs()?;
+    Ok(unmerged_from(&merged_output, &branch_refs(&refs_output)))
 }
 
-/// The parsing half of [`unmerged_branches`], split out so the rule can be
-/// tested against fixed git output.
-fn unmerged_from(merged_output: &str, refs_output: &str) -> HashMap<String, Unmerged> {
+/// The rule half of [`unmerged_branches`], split out so it can be tested
+/// against fixed git output.
+fn unmerged_from(
+    merged_output: &str,
+    refs: &HashMap<&str, BranchRef<'_>>,
+) -> HashMap<String, Unmerged> {
     let merged: HashSet<&str> = merged_output.lines().collect();
 
-    refs_output
-        .lines()
-        .filter_map(|line| {
-            let mut parts = line.split('\t');
-            let name = parts.next()?;
-            let upstream = parts.next()?;
-            let track = parts.next().unwrap_or("");
-            if merged.contains(name) {
-                return None;
-            }
+    refs.iter()
+        .filter(|(name, _)| !merged.contains(*name))
+        .filter_map(|(&name, r)| {
             // A `[gone]` upstream reports no ahead count, so it must be treated
             // as absent rather than as "zero ahead, therefore merged".
-            if upstream.is_empty() || track == "gone" {
+            if r.upstream.is_empty() || r.gone() {
                 return Some((name.to_string(), Unmerged::NoUpstream));
             }
-            let (ahead, _) = parse_track(track);
+            let (ahead, _) = parse_track(r.track);
             (ahead > 0).then(|| (name.to_string(), Unmerged::Ahead(ahead)))
         })
         .collect()
@@ -833,23 +835,25 @@ fn run_in(dir: Option<&Path>, args: &[&str]) -> AppResult<String> {
 #[cfg(test)]
 mod tests {
     use super::{Unmerged, branch_refs, parse_track, stale_from, unmerged_from};
-    use std::collections::HashSet;
+    use std::collections::{HashMap, HashSet};
 
-    /// One `for-each-ref` line: name, upstream, track.
-    fn refs(rows: &[(&str, &str, &str)]) -> String {
-        rows.iter()
-            .map(|(name, upstream, track)| format!("{name}\t{upstream}\t{track}"))
-            .collect::<Vec<_>>()
-            .join("\n")
-    }
-
-    /// One `for-each-ref` line in the richer shape `stale_branches` asks for:
-    /// name, tip, upstream, track.
+    /// One `for-each-ref` line per row: name, tip, upstream, track.
     fn head_refs(rows: &[(&str, &str, &str, &str)]) -> String {
         rows.iter()
             .map(|(name, tip, upstream, track)| format!("{name}\t{tip}\t{upstream}\t{track}"))
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    /// Run the `-d` mirror. Tips play no part in it, so rows name only the
+    /// branch, its upstream, and its track summary.
+    fn unmerged(merged: &str, rows: &[(&str, &str, &str)]) -> HashMap<String, Unmerged> {
+        let rows: Vec<_> = rows
+            .iter()
+            .map(|(name, upstream, track)| (*name, "tip", *upstream, *track))
+            .collect();
+        let refs_output = head_refs(&rows);
+        unmerged_from(merged, &branch_refs(&refs_output))
     }
 
     fn chain(shas: &[&str]) -> HashSet<String> {
@@ -956,9 +960,9 @@ mod tests {
 
     #[test]
     fn merged_into_head_is_not_unmerged() {
-        let got = unmerged_from(
+        let got = unmerged(
             "main\nfeature",
-            &refs(&[("feature", "refs/remotes/origin/feature", "ahead 2")]),
+            &[("feature", "refs/remotes/origin/feature", "ahead 2")],
         );
         assert!(
             got.is_empty(),
@@ -968,22 +972,19 @@ mod tests {
 
     #[test]
     fn in_sync_with_upstream_is_not_unmerged() {
-        let got = unmerged_from(
-            "main",
-            &refs(&[("feature", "refs/remotes/origin/feature", "")]),
-        );
+        let got = unmerged("main", &[("feature", "refs/remotes/origin/feature", "")]);
         assert!(got.is_empty(), "merged into upstream, got: {got:?}");
     }
 
     #[test]
     fn ahead_of_upstream_is_unmerged_with_a_count() {
-        let got = unmerged_from(
+        let got = unmerged(
             "main",
-            &refs(&[(
+            &[(
                 "feature",
                 "refs/remotes/origin/feature",
                 "ahead 3, behind 1",
-            )]),
+            )],
         );
         assert_eq!(got.get("feature"), Some(&Unmerged::Ahead(3)));
     }
@@ -992,7 +993,7 @@ mod tests {
     /// nothing to be ahead of, yet `git branch -d` still refuses.
     #[test]
     fn local_only_branch_is_unmerged_without_a_count() {
-        let got = unmerged_from("main", &refs(&[("scratch", "", "")]));
+        let got = unmerged("main", &[("scratch", "", "")]);
         assert_eq!(got.get("scratch"), Some(&Unmerged::NoUpstream));
     }
 
@@ -1000,10 +1001,7 @@ mod tests {
     /// "zero ahead, therefore merged".
     #[test]
     fn gone_upstream_is_unmerged_without_a_count() {
-        let got = unmerged_from(
-            "main",
-            &refs(&[("orphan", "refs/remotes/origin/orphan", "gone")]),
-        );
+        let got = unmerged("main", &[("orphan", "refs/remotes/origin/orphan", "gone")]);
         assert_eq!(got.get("orphan"), Some(&Unmerged::NoUpstream));
     }
 

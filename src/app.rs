@@ -1064,12 +1064,11 @@ pub(crate) fn prompt_delete_stale_branches(
 ) -> AppResult<()> {
     let stale = git::stale_branches(remote)?;
     let worktrees = git::worktree_list().unwrap_or_default();
-    // Judge risk — and later delete — from the main worktree. Staleness is
-    // measured against the default branch, which normally lives there, so
-    // asking from here keeps `git branch -d`'s own idea of merged in step with
-    // the rule that offered the row. Asking from the current worktree would
-    // call a branch merged into the anchor "unmerged" whenever the worktree
-    // sits on something unrelated, and quietly license a force-delete.
+    // Judge risk — and later delete — from the main worktree, where HEAD is
+    // normally the branch staleness was measured against. Asking from the
+    // current worktree would call a branch merged into the anchor "unmerged"
+    // whenever that worktree sits on something unrelated, and per ADR 0001 the
+    // marker would then license a force-delete it never warned about.
     let main_dir = worktrees.iter().find(|w| w.is_main).map(|w| w.path.clone());
     let unmerged = git::unmerged_branches(main_dir.as_deref()).unwrap_or_default();
     let rows = stale_rows(stale, &worktrees, &unmerged, destination, &|path| {
