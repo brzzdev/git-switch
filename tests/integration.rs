@@ -582,6 +582,41 @@ fn empty_published_branch_is_not_stale_from_a_branch_past_main() {
     );
 }
 
+/// History is no more telling than the tip. An empty branch pushed at a merged
+/// topic's tip sits off main's first-parent chain exactly as the topic itself
+/// does, so a published branch must be kept out of that walk too.
+#[test]
+fn empty_published_branch_at_a_merged_tip_is_not_stale() {
+    let (_bare, work) = setup();
+
+    git(work.path(), &["checkout", "-b", "topic"]);
+    fs::write(work.path().join("topic.txt"), "work\n").unwrap();
+    git(work.path(), &["add", "topic.txt"]);
+    git(work.path(), &["commit", "-m", "topic work"]);
+    git(work.path(), &["checkout", "main"]);
+    git(
+        work.path(),
+        &["merge", "--no-ff", "-m", "merge topic", "topic"],
+    );
+
+    // Branch off the merged topic without adding anything, and publish it.
+    git(work.path(), &["checkout", "-b", "feature", "topic"]);
+    git(work.path(), &["push", "-u", "origin", "feature"]);
+    git(work.path(), &["checkout", "main"]);
+
+    let _cwd = cwd_at(work.path());
+    let stale = git_switch::git::stale_branches("origin").unwrap();
+
+    assert!(
+        !stale.contains(&"feature".to_string()),
+        "a branch pushed without commits must not be offered, got: {stale:?}"
+    );
+    assert!(
+        stale.contains(&"topic".to_string()),
+        "the untracked topic that did the work should still be offered, got: {stale:?}"
+    );
+}
+
 #[test]
 fn tracked_branch_without_unique_commits_not_stale() {
     let (_bare, work) = setup();
@@ -685,25 +720,24 @@ fn worktree_branch_fast_forwarded_into_main_is_stale() {
     );
 }
 
-/// R1: merged with a merge commit, so the tip sits off main's first-parent
-/// chain. It is pushed and its tip differs from main's, so neither of the other
-/// two clauses would catch it.
+/// Merged with a merge commit, so the tip sits off main's first-parent chain.
+/// The branch tracks `origin/main` and main has been pushed, so its ahead count
+/// is back to zero — only its history still shows the work.
 #[test]
 fn no_ff_merged_branch_is_stale() {
-    let (_bare, work) = setup();
+    let (_bare, parent, work) = setup_with_parent();
+    let path = add_worktree_branch(&work, parent.path(), "feature-noff");
 
-    git(work.path(), &["checkout", "-b", "feature-noff"]);
-    fs::write(work.path().join("noff.txt"), "work\n").unwrap();
-    git(work.path(), &["add", "noff.txt"]);
-    git(work.path(), &["commit", "-m", "work"]);
-    git(work.path(), &["push", "-u", "origin", "feature-noff"]);
-    git(work.path(), &["checkout", "main"]);
+    fs::write(path.join("noff.txt"), "work\n").unwrap();
+    git(&path, &["add", "noff.txt"]);
+    git(&path, &["commit", "-m", "work"]);
     git(
-        work.path(),
+        &work,
         &["merge", "--no-ff", "-m", "merge feature", "feature-noff"],
     );
+    git(&work, &["push", "origin", "main"]);
 
-    let _cwd = cwd_at(work.path());
+    let _cwd = cwd_at(&work);
     let stale = git_switch::git::stale_branches("origin").unwrap();
 
     assert!(
