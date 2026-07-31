@@ -84,51 +84,62 @@ release tag:
 
   # Which phase we are in is read from main itself rather than tracked
   # anywhere, so an interrupted release resumes just by re-running.
-  merged="$(git show origin/main:Cargo.toml | sed -n 's/^version = "\(.*\)"/\1/p' | head -1)"
-  highest="$(printf '%s\n%s\n' "$version" "$merged" | sort -V | tail -1)"
-  if [ "$version" != "$highest" ]; then
-    echo "error: $version is not newer than $merged, already on main" >&2
+  main_version="$(git show origin/main:Cargo.toml | sed -n 's/^version = "\(.*\)"/\1/p' | head -1)"
+  max_version="$(printf '%s\n%s\n' "$version" "$main_version" | sort -V | tail -1)"
+  if [ "$version" != "$max_version" ]; then
+    echo "error: $version is not newer than $main_version, already on main" >&2
     exit 1
   fi
 
   # Phase 1 — main is still on the old version, so open the bump PR. It has to
   # go through a PR: main requires signed commits and a passing `test` check,
   # and admin bypass is scoped to pull requests only.
-  if [ "$merged" != "$version" ]; then
+  if [ "$main_version" != "$version" ]; then
     branch="release/$version"
 
-    # Re-running while the PR is still open should say so, rather than die on
-    # `git checkout -b` with a raw "a branch named ... already exists".
+    # An earlier run may have stopped part-way — branch committed or pushed,
+    # but `gh pr create` never landed. Pick up from wherever it stopped rather
+    # than dead-ending on "a branch named ... already exists".
     if git rev-parse -q --verify "refs/heads/$branch" >/dev/null \
       || [ -n "$(git ls-remote --heads origin "$branch")" ]; then
-      echo "error: $branch already exists; merge its PR, then re-run to tag" >&2
-      exit 1
+      if [ -n "$(gh pr list --head "$branch" --state open --json number --jq '.[].number')" ]; then
+        echo "error: the bump PR for $version is already open; merge it, then re-run to tag" >&2
+        exit 1
+      fi
+      echo "resuming: $branch already exists with no open PR"
+    else
+      git checkout --quiet -b "$branch" origin/main
+      perl -i -pe "s/^version = \".*\"/version = \"$version\"/" Cargo.toml
+      cargo check --quiet
+      git add Cargo.toml Cargo.lock
+      git commit --quiet -m "chore: bump version to $version"
+      # Back to where you started before anything can fail, so an interrupted
+      # run never strands you on the release branch.
+      git checkout --quiet "$original"
     fi
 
-    git checkout --quiet -b "$branch" origin/main
-    perl -i -pe "s/^version = \".*\"/version = \"$version\"/" Cargo.toml
-    cargo check --quiet
-    git add Cargo.toml Cargo.lock
-    git commit --quiet -m "chore: bump version to $version"
-    git push --quiet -u origin "$branch"
+    if git rev-parse -q --verify "refs/heads/$branch" >/dev/null; then
+      git push --quiet -u origin "$branch"
+    fi
     gh pr create --base main --head "$branch" \
       --title "chore: bump version to $version" \
       --body "Version bump for the v$version release."
-    git checkout --quiet "$original"
     echo "Merge the PR, then run: just release $version"
     exit 0
   fi
 
   # Phase 2 — the bump has landed, so tag it. Tags sit outside the branch
   # ruleset, so this needs no PR.
-  # Take the newest run rather than whichever the API lists first, so a failed
-  # re-run can't hide behind an earlier success. A queued run has no conclusion
-  # yet, which is distinct from no run having reported at all.
+  # Any run still going means the answer isn't in yet — a queued check-run can
+  # carry a null started_at, which jq sorts *first*, so ordering alone would
+  # let an older success mask it. Only once every run has completed is the
+  # newest by id (monotonic, unlike timestamps) the one that decides.
   commit="$(git rev-parse origin/main)"
   check="$(gh api "repos/{owner}/{repo}/commits/$commit/check-runs" --jq \
     '[.check_runs[] | select(.name == "test")]
      | if length == 0 then "missing"
-       else (sort_by(.started_at) | last | .conclusion // "pending") end')"
+       elif any(.status != "completed") then "pending"
+       else (sort_by(.id) | last | .conclusion) end')"
   if [ "$check" != "success" ]; then
     echo "error: 'test' on origin/main ($commit) is '$check', refusing to tag" >&2
     exit 1
