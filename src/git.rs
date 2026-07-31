@@ -304,10 +304,12 @@ impl BranchRef<'_> {
     /// the anchor. Nothing here settles a branch merely cut from the anchor and
     /// never committed to — see [`stale_branches`].
     fn landed_on(&self, name: &str, anchor: &Anchor<'_>) -> bool {
-        // Published its own counterpart, and the anchor was fast-forwarded onto
-        // it.
+        // Published its own counterpart. Whether the anchor holds its work is
+        // then a question about two remote branches, and a local ref cannot
+        // answer it: a branch whose commits were fast-forwarded on looks exactly
+        // like one pushed empty. Leave it to the deleted upstream.
         if self.tracks(name) {
-            return self.tip == anchor.tip;
+            return false;
         }
         // Cut from the anchor, as `wt` creates them. Commits it holds that the
         // published anchor doesn't are work of its own, and being merged into
@@ -434,11 +436,9 @@ fn stale_from(
 /// Merged-ness alone doesn't settle it. Every branch reachable from the anchor
 /// has its tip as its own merge-base with it, so a branch freshly cut from the
 /// anchor is topologically indistinguishable from one whose commits were
-/// fast-forwarded onto it. Four clauses separate them, and any one suffices:
+/// fast-forwarded onto it. Three clauses separate them, and any one suffices:
 ///
 /// - the tip lies off the anchor's first-parent chain, so it was merged in;
-/// - it tracks its own counterpart and its tip *is* the anchor's, so what it
-///   published was fast-forwarded on;
 /// - it tracks the anchor's counterpart and is *ahead* of it, so it holds work
 ///   of its own that the local anchor has since taken;
 /// - it tracks nothing and its tip is *behind* the anchor's, so it was merged
@@ -446,13 +446,15 @@ fn stale_from(
 ///
 /// A branch cut from the anchor and never committed to satisfies none: it
 /// tracks the anchor's counterpart but is never ahead of it, and it sits on the
-/// first-parent chain. Two cases stay out of reach, both because the branch
-/// ends up character-for-character identical to an empty one: an untracked
-/// branch once the anchor moves past it, and a branch whose work reached the
-/// anchor's own upstream, since the ahead count then falls to zero.
+/// first-parent chain.
 ///
-/// A branch merged by rebasing or squashing is no ancestor of the anchor at
-/// all, so no clause here can see it; that case belongs to the deleted upstream
+/// Where a branch published its own counterpart, no local ref can settle it —
+/// one the anchor fast-forwarded over and one pushed before any work began are
+/// byte-identical — so it is left alone until its upstream is deleted. The same
+/// wall bounds the other clauses: an untracked branch once the anchor moves
+/// past it, and a `wt` branch once the anchor reaches its own upstream and the
+/// ahead count falls to zero. A branch merged by rebasing or squashing is no
+/// ancestor of the anchor at all, so it too belongs to the deleted upstream
 /// after a pruning fetch.
 pub fn stale_branches(remote: &str) -> AppResult<Vec<String>> {
     let current = current_branch()?;
@@ -939,15 +941,20 @@ mod tests {
         assert_eq!(got, vec!["feature".to_string()]);
     }
 
-    /// Published its own counterpart, and the anchor was fast-forwarded onto it.
+    /// A branch that published its own counterpart is never judged by its tip:
+    /// one whose commits the anchor fast-forwarded over is identical to one
+    /// pushed without any. Offering it would delete branches nobody finished.
     #[test]
-    fn published_branch_the_anchor_fast_forwarded_to_is_stale() {
+    fn published_branch_sharing_the_anchors_tip_is_not_stale() {
         let refs_output = head_refs(&[
             ("main", "bbb", "refs/heads/main", ""),
             ("feature", "bbb", "refs/heads/feature", ""),
         ]);
         let got = stale(&refs_output, "feature", "bbb", &["aaa", "bbb"]);
-        assert_eq!(got, vec!["feature".to_string()]);
+        assert!(
+            got.is_empty(),
+            "an empty published branch must not be offered, got: {got:?}"
+        );
     }
 
     /// Tracks nothing and the anchor has moved past it: merged locally, then
@@ -996,19 +1003,19 @@ mod tests {
     #[test]
     fn first_parent_walk_is_skipped_when_tracking_settles_everything() {
         let refs_output = head_refs(&[
-            ("main", "bbb", "refs/heads/main", ""),
-            ("feature", "bbb", "refs/heads/feature", ""),
+            ("main", "ccc", "refs/heads/main", ""),
+            ("scratch", "bbb", "", ""),
         ]);
         let refs = branch_refs(&refs_output);
         let anchor = Anchor {
             branch: "main",
-            tip: "bbb",
+            tip: "ccc",
         };
-        let got = stale_from(&refs, "feature", &anchor, || {
+        let got = stale_from(&refs, "scratch", &anchor, || {
             panic!("first-parent walk should not have been needed")
         })
         .unwrap();
-        assert_eq!(got, vec!["feature".to_string()]);
+        assert_eq!(got, vec!["scratch".to_string()]);
     }
 
     /// `-d` accepts merged-into-HEAD *or* merged-into-upstream, but they are

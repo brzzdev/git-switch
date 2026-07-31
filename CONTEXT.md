@@ -11,7 +11,7 @@ The ref staleness is judged against: the local default branch, or its remote cou
 _Avoid_: Mainline, main line, HEAD, trunk
 
 **Stale**:
-A branch that has outlived its purpose — its work has landed on the anchor, or its upstream has been deleted. Landing is read from four signals, any of which suffices: a tip off the anchor's first-parent chain, a branch tracking its own counterpart whose tip *is* the anchor's, a branch tracking the anchor's counterpart while *ahead* of it, or an untracked branch whose tip is *behind* the anchor. Staleness is what qualifies a branch for the cleanup prompt; it says nothing about whether deleting it is safe.
+A branch that has outlived its purpose — its work has landed on the anchor, or its upstream has been deleted. Landing is read from three signals, any of which suffices: a tip off the anchor's first-parent chain, a branch tracking the anchor's counterpart while *ahead* of it, or an untracked branch whose tip is *behind* the anchor. A branch that published its own counterpart is never judged by its tip, since one the anchor fast-forwarded over cannot be told from one pushed before any work began; a deleted upstream is what settles those. Staleness is what qualifies a branch for the cleanup prompt; it says nothing about whether deleting it is safe.
 _Avoid_: Dead, old, obsolete
 
 **Unmerged**:

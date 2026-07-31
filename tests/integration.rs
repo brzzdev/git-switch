@@ -519,12 +519,14 @@ fn local_only_branch_stale_after_main_advances() {
     );
 }
 
+/// A branch that published its own counterpart hands the question over to the
+/// remote: once both are pushed, a branch whose commits main fast-forwarded
+/// over is byte-identical to one pushed without any commits at all. Deleting
+/// the remote branch is the signal that settles it.
 #[test]
-fn merged_tracked_branch_is_stale() {
-    let (_bare, work) = setup();
+fn merged_tracked_branch_waits_for_its_upstream_to_go() {
+    let (bare, work) = setup();
 
-    // Create a branch, push it, then merge into main.
-    // The upstream is in sync (not gone), but the branch is fully merged.
     git(work.path(), &["checkout", "-b", "feature-done"]);
     fs::write(work.path().join("feature.txt"), "done\n").unwrap();
     git(work.path(), &["add", "feature.txt"]);
@@ -534,12 +536,49 @@ fn merged_tracked_branch_is_stale() {
     git(work.path(), &["merge", "feature-done"]);
     git(work.path(), &["push", "origin", "main"]);
 
+    {
+        let _cwd = cwd_at(work.path());
+        let stale = git_switch::git::stale_branches("origin").unwrap();
+        assert!(
+            !stale.contains(&"feature-done".to_string()),
+            "a live upstream is indistinguishable from an unstarted branch, got: {stale:?}"
+        );
+    }
+
+    git(bare.path(), &["branch", "-D", "feature-done"]);
+    git(work.path(), &["fetch", "--prune", "origin"]);
+
+    let _cwd = cwd_at(work.path());
+    let stale = git_switch::git::stale_branches("origin").unwrap();
+    assert!(
+        stale.contains(&"feature-done".to_string()),
+        "a deleted upstream settles it, got: {stale:?}"
+    );
+}
+
+/// The other half of the same ambiguity: a branch pushed before any work was
+/// done on it. Judging it by its tip would offer it the moment you switched
+/// away — and, being the branch just left, pre-tick it.
+#[test]
+fn empty_published_branch_is_not_stale_from_a_branch_past_main() {
+    let (_bare, work) = setup();
+
+    git(work.path(), &["checkout", "-b", "feature"]);
+    git(work.path(), &["push", "-u", "origin", "feature"]);
+
+    // Somewhere further along than main, so the old ambient-HEAD rule and the
+    // anchor rule disagree about `feature`.
+    git(work.path(), &["checkout", "-b", "other"]);
+    fs::write(work.path().join("other.txt"), "x\n").unwrap();
+    git(work.path(), &["add", "other.txt"]);
+    git(work.path(), &["commit", "-m", "other advances"]);
+
     let _cwd = cwd_at(work.path());
     let stale = git_switch::git::stale_branches("origin").unwrap();
 
     assert!(
-        stale.contains(&"feature-done".to_string()),
-        "merged branch with upstream should be stale, got: {stale:?}"
+        !stale.contains(&"feature".to_string()),
+        "a branch pushed without commits must not be offered, got: {stale:?}"
     );
 }
 
@@ -878,7 +917,7 @@ fn non_origin_remote_pulls_via_branch_config() {
 
 #[test]
 fn non_origin_remote_detects_stale_branch() {
-    let (_bare, work) = setup_with_remote("upstream");
+    let (bare, work) = setup_with_remote("upstream");
 
     git(work.path(), &["checkout", "-b", "feature-done"]);
     fs::write(work.path().join("feature.txt"), "done\n").unwrap();
@@ -888,6 +927,8 @@ fn non_origin_remote_detects_stale_branch() {
     git(work.path(), &["checkout", "main"]);
     git(work.path(), &["merge", "feature-done"]);
     git(work.path(), &["push", "upstream", "main"]);
+    git(bare.path(), &["branch", "-D", "feature-done"]);
+    git(work.path(), &["fetch", "--prune", "upstream"]);
 
     let _cwd = cwd_at(work.path());
     let stale = git_switch::git::stale_branches("upstream").unwrap();
