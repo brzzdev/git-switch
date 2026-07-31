@@ -6,8 +6,12 @@ An interactive Git branch and worktree switcher. Its domain is the small set of 
 
 ### Branches
 
+**Anchor**:
+The ref staleness is judged against: the local default branch, or its remote counterpart where there is no local copy. Never the current branch — with worktrees in play, "current" is an accident of which directory you are standing in. Where no anchor resolves, the merged rule stands down and only a deleted upstream marks a branch stale. See [ADR 0002](./docs/adr/0002-staleness-is-anchored-to-the-main-line.md).
+_Avoid_: Base, mainline, HEAD, trunk
+
 **Stale**:
-A branch that has outlived its purpose — merged into the current branch, or with an upstream that has been deleted. Staleness is what qualifies a branch for the cleanup prompt; it says nothing about whether deleting it is safe.
+A branch that has outlived its purpose — its work has landed on the anchor, or its upstream has been deleted. Landing is read from three signals, any of which suffices: a tip off the anchor's first-parent chain, a branch tracking its own counterpart whose tip *is* the anchor's, or an untracked branch whose tip is *behind* it. Staleness is what qualifies a branch for the cleanup prompt; it says nothing about whether deleting it is safe.
 _Avoid_: Dead, old, obsolete
 
 **Unmerged**:

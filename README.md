@@ -153,7 +153,7 @@ autoload -Uz compinit && compinit
 
 ## Cleaning up stale branches
 
-After a switch, git-switch offers to delete branches that have outlived their purpose — merged into your current branch, or whose upstream has been deleted. A branch checked out in another worktree appears here too, annotated with the worktree that holds it; deleting it removes that worktree as well:
+After a switch, git-switch offers to delete branches that have outlived their purpose — those whose work has landed on your default branch, and those whose upstream has been deleted. A branch you just created and haven't committed to isn't offered, and neither is anything judged against the worktree you happen to be standing in: the default branch is the yardstick. A branch checked out in another worktree appears here too, annotated with the worktree that holds it; deleting it removes that worktree as well:
 
 ```
 ? Delete stale branches (space to toggle, →/← all/none)
