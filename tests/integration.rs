@@ -2,6 +2,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
 /// Serializes tests that mutate process cwd while calling library functions.
@@ -1810,5 +1811,147 @@ fn wt_rm_clears_missing_detached_worktree_by_dir_name() {
     assert!(
         !list.contains("prunable") && !list.contains("scratch"),
         "stale registration should be cleared; got: {list}"
+    );
+}
+
+/// How long the pty test is willing to wait on its child. Generous enough that
+/// a loaded CI host redrawing a pty is never mistaken for a hang, but finite so
+/// a child that wedges fails the test instead of stalling the whole run.
+const PATIENCE: Duration = Duration::from_secs(30);
+/// Gap between polls: short enough to add no perceptible delay to a run that
+/// behaves, long enough not to spin a core while waiting.
+const POLL: Duration = Duration::from_millis(10);
+
+/// Waits for `ready` to hold, reporting whether it did before `PATIENCE` ran
+/// out. Polling what the child has actually done keeps the pty test off a fixed
+/// sleep, so a slow CI host waits longer instead of racing ahead.
+fn poll_until(mut ready: impl FnMut() -> bool) -> bool {
+    let deadline = Instant::now() + PATIENCE;
+    while Instant::now() < deadline {
+        if ready() {
+            return true;
+        }
+        std::thread::sleep(POLL);
+    }
+    false
+}
+
+/// Kills the child when the test ends, however it ends. An assertion that fires
+/// mid-session — a `wait_for` timeout, say — unwinds with the picker still on
+/// screen, and an orphaned pty-attached git-switch would outlive the test.
+struct ChildGuard(Box<dyn portable_pty::Child + Send + Sync>);
+
+impl Drop for ChildGuard {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+impl ChildGuard {
+    /// Blocks until the child exits, giving up after `PATIENCE`. Polling rather
+    /// than a plain `wait()` keeps a child that never exits from hanging the
+    /// test binary indefinitely.
+    fn wait_bounded(&mut self) {
+        let exited = poll_until(|| self.0.try_wait().expect("failed to poll child").is_some());
+        assert!(exited, "child did not exit within {PATIENCE:?}");
+    }
+}
+
+/// Blocks until the child has written `needle` to the pty, so keys are only
+/// sent once the prompt they answer is on screen.
+fn wait_for(seen: &Mutex<Vec<u8>>, needle: &str) {
+    let drawn = poll_until(|| {
+        let buf = seen.lock().unwrap();
+        buf.windows(needle.len()).any(|w| w == needle.as_bytes())
+    });
+    assert!(
+        drawn,
+        "timed out waiting for {needle:?}; got: {}",
+        String::from_utf8_lossy(&seen.lock().unwrap())
+    );
+}
+
+/// The stale-branch picker holds the terminal in raw mode, where a bare `\n`
+/// drops a line without returning to column 0. Printing the deletion outcomes
+/// before that mode is released staircases them across the screen, so this
+/// drives the picker over a real pty and insists every newline is a CRLF.
+#[test]
+fn stale_deletion_outcomes_are_not_printed_in_raw_mode() {
+    use portable_pty::{CommandBuilder, PtySize, native_pty_system};
+    use std::io::{Read, Write};
+    use std::sync::Arc;
+
+    let (_bare, work) = setup();
+
+    // Three stale branches — each published, then its upstream deleted — plus a
+    // destination to switch to, so the post-switch cleanup prompt fires.
+    for branch in ["aaa", "bbb", "ccc"] {
+        git(work.path(), &["checkout", "-b", branch]);
+        git(work.path(), &["push", "-u", "origin", branch]);
+        git(work.path(), &["push", "origin", "--delete", branch]);
+    }
+    git(work.path(), &["checkout", "main"]);
+    git(work.path(), &["fetch", "--prune", "origin"]);
+    git(work.path(), &["branch", "dest", "main"]);
+
+    let pty = native_pty_system()
+        .openpty(PtySize::default())
+        .expect("failed to open pty");
+    let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_git-switch"));
+    cmd.arg("dest");
+    cmd.cwd(work.path());
+    let mut child = ChildGuard(pty.slave.spawn_command(cmd).expect("failed to spawn"));
+    drop(pty.slave);
+
+    let mut reader = pty.master.try_clone_reader().unwrap();
+    let mut writer = pty.master.take_writer().unwrap();
+    // Read on a thread into a buffer the test can watch: the pty must keep
+    // draining or the child blocks on a full buffer while we wait to send keys.
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let collected = Arc::clone(&seen);
+    let output = std::thread::spawn(move || {
+        // The loop reassembles the stream whatever the chunk size, so 1 KiB is
+        // simply enough to swallow a picker redraw in a read or two.
+        let mut chunk = [0u8; 1024];
+        while let Ok(n) = reader.read(&mut chunk) {
+            if n == 0 {
+                break;
+            }
+            collected.lock().unwrap().extend_from_slice(&chunk[..n]);
+        }
+    });
+
+    // Drive the picker off what it has drawn rather than off a clock: `→` ticks
+    // every row, Enter confirms, and each key waits for the redraw that proves
+    // the last one landed.
+    wait_for(&seen, "[ ] ccc");
+    writer.write_all(b"\x1b[C").unwrap();
+    writer.flush().unwrap();
+    wait_for(&seen, "[x] ccc");
+    writer.write_all(b"\r").unwrap();
+    writer.flush().unwrap();
+
+    child.wait_bounded();
+    drop(writer);
+    drop(pty.master);
+    output.join().unwrap();
+    let raw = Arc::try_unwrap(seen).unwrap().into_inner().unwrap();
+    let text = String::from_utf8_lossy(&raw);
+
+    let deletions = text.matches(" deleted ").count();
+    assert_eq!(
+        deletions, 3,
+        "expected all three ticked branches to report a deletion; got: {text}"
+    );
+
+    let staircased = raw
+        .iter()
+        .enumerate()
+        .filter(|&(i, &b)| b == b'\n' && (i == 0 || raw[i - 1] != b'\r'))
+        .count();
+    assert_eq!(
+        staircased, 0,
+        "every newline written to a tty must be CRLF; got: {text}"
     );
 }

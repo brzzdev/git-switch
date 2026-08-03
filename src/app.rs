@@ -1078,12 +1078,6 @@ pub(crate) fn prompt_delete_stale_branches(
         return Ok(());
     }
 
-    // Non-interactive (piped/CI): we can't prompt, so delete nothing rather than
-    // blocking on key input or silently acting on the defaults.
-    let Some(mut keys) = interactive_keys() else {
-        return Ok(());
-    };
-
     // A branch held by a worktree is never the one just left — git forbids the
     // same branch in two worktrees — so worktree rows always start unticked.
     let defaults: Vec<bool> = rows
@@ -1092,12 +1086,22 @@ pub(crate) fn prompt_delete_stale_branches(
         .collect();
     let items = align_labels(&rows.iter().map(stale_label).collect::<Vec<_>>());
 
-    let selections = multi_select(
-        "Delete stale branches (space to toggle, →/← all/none)",
-        &items,
-        &defaults,
-        &mut keys,
-    )?;
+    // Scoped so the picker's raw mode is released before anything is printed:
+    // under raw mode a newline moves down without returning to column 0, and
+    // the outcome lines below would staircase across the terminal.
+    let selections = {
+        // Non-interactive (piped/CI): we can't prompt, so delete nothing rather
+        // than blocking on key input or silently acting on the defaults.
+        let Some(mut keys) = interactive_keys() else {
+            return Ok(());
+        };
+        multi_select(
+            "Delete stale branches (space to toggle, →/← all/none)",
+            &items,
+            &defaults,
+            &mut keys,
+        )?
+    };
 
     for &i in &selections {
         delete_stale_row(main_dir.as_deref(), &rows[i])?;
