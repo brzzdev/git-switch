@@ -2,12 +2,10 @@
 
 Interactive Git branch switcher with merged branch cleanup, written in Rust.
 
-## Commands
+## Releasing
 
-- `just test` — run tests
-- `just build-release` — build release binary
-- `just install` — build and install to `~/.local/bin`
-- `just release <tag>` — open the version-bump PR; run again once it has merged to tag and trigger the release build
+`just release <tag>` opens the version-bump PR. Run it again once that has merged, to tag and
+trigger the release build.
 
 ## Style
 
