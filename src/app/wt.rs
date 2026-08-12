@@ -7,9 +7,8 @@ use indicatif::ProgressBar;
 
 use super::{
     Availability, CursorGuard, Pick, PickKind, PickerOptions, Risk, Section, Selection,
-    build_sections, confirm, deletion_outcome, display_path, fetch_and_ff, handoff_cd,
-    interactive_keys, multi_select, pick, prompt_delete_stale_branches, removal_failure,
-    removed_worktree, report_update,
+    build_sections, confirm, display_path, fetch_and_ff, handoff_cd, interactive_keys,
+    multi_select, pick, prompt_delete_stale_branches, report_update,
 };
 use crate::{AppResult, Error, git};
 
@@ -289,9 +288,9 @@ fn remove_one(dir: Option<&Path>, wt: &git::Worktree, risk: Risk, force: bool) -
     match git::worktree_remove(&wt.path, risk.dirty || force)? {
         git::WorktreeRemoveOutcome::Removed => match wt.branch.as_deref() {
             None => eprintln!(
-                "{} {}",
+                "{} removed worktree at {}",
                 style("✓").green().bold(),
-                removed_worktree(&wt.path)
+                display_path(&wt.path)
             ),
             Some(branch) => {
                 let deleted = if risk.unmerged.is_some() || force {
@@ -299,14 +298,41 @@ fn remove_one(dir: Option<&Path>, wt: &git::Worktree, risk: Risk, force: bool) -
                 } else {
                     git::delete_branch_if_merged(dir, branch)?
                 };
-                eprintln!("{}", deletion_outcome(branch, Some(&wt.path), &deleted));
+                // Worded exactly as the stale-branch prompt words the same
+                // outcomes, so the answer doesn't depend on how you got here.
+                let removed = format!("removed worktree at {}", display_path(&wt.path));
+                match deleted {
+                    git::BranchDeleteOutcome::Deleted => {
+                        eprintln!("{} {removed}, deleted {branch}", style("✓").green().bold());
+                    }
+                    git::BranchDeleteOutcome::NotMerged => eprintln!(
+                        "{} {removed}, kept {branch} with unmerged commits \
+                         (run `git branch -D {branch}` to force-delete)",
+                        style("!").yellow().bold(),
+                    ),
+                    git::BranchDeleteOutcome::Failed(detail) => eprintln!(
+                        "{} {removed}, could not delete {branch}: {detail}",
+                        style("!").yellow().bold(),
+                    ),
+                }
             }
         },
         git::WorktreeRemoveOutcome::Failed(detail) => {
-            eprintln!(
-                "{}",
-                removal_failure(wt.branch.as_deref(), &wt.path, &detail)
-            );
+            match wt.branch.as_deref() {
+                Some(branch) => eprintln!(
+                    "{} failed to remove the worktree at {}; leaving {branch} alone:",
+                    style("!").yellow().bold(),
+                    display_path(&wt.path),
+                ),
+                None => eprintln!(
+                    "{} failed to remove the worktree at {}:",
+                    style("!").yellow().bold(),
+                    display_path(&wt.path)
+                ),
+            }
+            for line in detail.lines() {
+                eprintln!("  {line}");
+            }
         }
     }
     Ok(())

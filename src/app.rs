@@ -1179,7 +1179,15 @@ fn delete_stale_row(dir: Option<&Path>, row: &StaleRow) -> AppResult<()> {
         match git::worktree_remove(&wt.path, row.risk.dirty)? {
             git::WorktreeRemoveOutcome::Removed => {}
             git::WorktreeRemoveOutcome::Failed(detail) => {
-                eprintln!("{}", removal_failure(Some(&row.branch), &wt.path, &detail));
+                eprintln!(
+                    "{} failed to remove the worktree at {}; leaving {} alone:",
+                    style("!").yellow().bold(),
+                    display_path(&wt.path),
+                    row.branch,
+                );
+                for line in detail.lines() {
+                    eprintln!("  {line}");
+                }
                 return Ok(());
             }
         }
@@ -1192,33 +1200,24 @@ fn delete_stale_row(dir: Option<&Path>, row: &StaleRow) -> AppResult<()> {
     } else {
         git::delete_branch_if_merged(dir, &row.branch)?
     };
-    eprintln!(
-        "{}",
-        deletion_outcome(
-            &row.branch,
-            row.worktree.as_ref().map(|wt| wt.path.as_path()),
-            &deleted
-        )
-    );
+    eprintln!("{}", stale_outcome(row, &deleted));
     Ok(())
 }
 
-/// What became of a branch, as one line, with the worktree that went with it
-/// when there was one. A branch kept for unmerged commits reads differently
-/// from one whose delete failed, the failure carries git's own reason, and
-/// keeping one carries the `git branch -D` hint for forcing it by hand.
-///
-/// Both destruction flows render through here, so the same situation cannot
-/// come out worded two ways depending on which command you arrived through.
-pub(crate) fn deletion_outcome(
-    branch: &str,
-    removed: Option<&Path>,
-    outcome: &git::BranchDeleteOutcome,
-) -> String {
+/// What became of a ticked stale row's branch, as one line. A branch kept for
+/// unmerged commits reads differently from one whose delete failed, the failure
+/// carries git's own reason, and keeping one carries the `git branch -D` hint
+/// for forcing it by hand — matching, word for word, what `wt rm` reports for
+/// the same situations. Kept apart from the printing so the wording can be
+/// tested without a repo on disk.
+fn stale_outcome(row: &StaleRow, outcome: &git::BranchDeleteOutcome) -> String {
+    let branch = &row.branch;
     // The worktree goes first, so a removal that happened is reported alongside
     // whatever the branch did afterwards — success or not.
-    let prefix = removed
-        .map(|path| format!("{}, ", removed_worktree(path)))
+    let prefix = row
+        .worktree
+        .as_ref()
+        .map(|wt| format!("removed worktree at {}, ", display_path(&wt.path)))
         .unwrap_or_default();
 
     match outcome {
@@ -1235,32 +1234,6 @@ pub(crate) fn deletion_outcome(
             style("!").yellow().bold(),
         ),
     }
-}
-
-/// How a worktree that went is named, wherever one did — on its own for a
-/// detached worktree, or in front of what became of the branch it held. One
-/// spelling, so the two cannot drift into wording the same event differently.
-pub(crate) fn removed_worktree(path: &Path) -> String {
-    format!("removed worktree at {}", display_path(path))
-}
-
-/// A worktree that refused to go, with git's reason indented beneath. Its
-/// branch is named where it has one: git will not delete a branch a worktree
-/// still holds, so saying the branch was left alone is half the report.
-pub(crate) fn removal_failure(branch: Option<&str>, path: &Path, detail: &str) -> String {
-    let leaving = branch
-        .map(|branch| format!("; leaving {branch} alone"))
-        .unwrap_or_default();
-    let reason = detail.lines().fold(String::new(), |mut reason, line| {
-        reason.push_str("\n  ");
-        reason.push_str(line);
-        reason
-    });
-    format!(
-        "{} failed to remove the worktree at {}{leaving}:{reason}",
-        style("!").yellow().bold(),
-        display_path(path),
-    )
 }
 
 /// Pads (name, annotation) pairs so annotations line up in a column. Rows
@@ -1602,70 +1575,40 @@ mod tests {
     }
 
     #[test]
-    fn deletion_outcome_reports_a_branch_that_went_alone() {
+    fn stale_outcome_reports_a_branch_that_went_alone() {
+        let row = stale_row("fix/typo", None, Risk::default());
         assert_eq!(
-            plain(&deletion_outcome(
-                "fix/typo",
-                None,
-                &git::BranchDeleteOutcome::Deleted
-            )),
+            plain(&stale_outcome(&row, &git::BranchDeleteOutcome::Deleted)),
             "✓ deleted fix/typo"
         );
     }
 
     #[test]
-    fn deletion_outcome_names_the_worktree_that_went_with_the_branch() {
+    fn stale_outcome_names_the_worktree_that_went_with_the_branch() {
+        let row = stale_row("fix/typo", Some(worktree(false)), Risk::default());
         assert_eq!(
-            plain(&deletion_outcome(
-                "fix/typo",
-                Some(Path::new("/tmp/wt")),
-                &git::BranchDeleteOutcome::Deleted
-            )),
+            plain(&stale_outcome(&row, &git::BranchDeleteOutcome::Deleted)),
             "✓ removed worktree at /tmp/wt, deleted fix/typo"
         );
     }
 
     #[test]
-    fn deletion_outcome_hints_at_forcing_an_unmerged_branch() {
+    fn stale_outcome_hints_at_forcing_an_unmerged_branch() {
+        let row = stale_row("spike/abandoned", None, Risk::default());
         assert_eq!(
-            plain(&deletion_outcome(
-                "spike/abandoned",
-                None,
-                &git::BranchDeleteOutcome::NotMerged
-            )),
+            plain(&stale_outcome(&row, &git::BranchDeleteOutcome::NotMerged)),
             "! kept spike/abandoned with unmerged commits \
              (run `git branch -D spike/abandoned` to force-delete)"
         );
     }
 
     #[test]
-    fn deletion_outcome_surfaces_gits_reason_for_a_failed_delete() {
+    fn stale_outcome_surfaces_gits_reason_for_a_failed_delete() {
+        let row = stale_row("old/thing", None, Risk::default());
         let failed = git::BranchDeleteOutcome::Failed("error: cannot delete branch".into());
         assert_eq!(
-            plain(&deletion_outcome("old/thing", None, &failed)),
+            plain(&stale_outcome(&row, &failed)),
             "! could not delete old/thing: error: cannot delete branch"
-        );
-    }
-
-    #[test]
-    fn removal_failure_names_the_branch_left_behind() {
-        assert_eq!(
-            plain(&removal_failure(
-                Some("feature"),
-                Path::new("/tmp/wt"),
-                "fatal: cannot remove a locked working tree"
-            )),
-            "! failed to remove the worktree at /tmp/wt; leaving feature alone:\n  \
-             fatal: cannot remove a locked working tree"
-        );
-    }
-
-    /// A detached worktree has no branch to leave alone.
-    #[test]
-    fn removal_failure_of_a_detached_worktree_names_no_branch() {
-        assert_eq!(
-            plain(&removal_failure(None, Path::new("/tmp/wt"), "fatal: nope")),
-            "! failed to remove the worktree at /tmp/wt:\n  fatal: nope"
         );
     }
 
