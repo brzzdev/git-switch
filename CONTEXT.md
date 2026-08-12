@@ -55,11 +55,11 @@ Destroying something git would otherwise protect — `worktree remove --force`, 
 _Avoid_: Overriding, ignoring
 
 **License**:
-What permits *Forcing*: the *Markers* already shown to the user, or an explicit `--force`. It covers what was warned about and nothing else, so anything that became risky after its row was drawn meets git's own guard instead. See [ADR 0001](./docs/adr/0001-warned-means-forceable.md).
+What permits forcing: the markers already shown to the user, or an explicit `--force`. It covers what was warned about and nothing else, so anything that became risky after its row was drawn meets git's own guard instead. See [ADR 0001](./docs/adr/0001-warned-means-forceable.md).
 _Avoid_: Permission, approval, consent
 
 **Removal**:
-Destroying a branch, a worktree, or a branch together with the worktree *Holding* it. The worktree goes first, and one that refuses to go leaves its branch alone — git will not delete a branch something still holds.
+Destroying a branch, a worktree, or a branch together with the worktree holding it. The worktree goes first, and one that refuses to go leaves its branch alone — git will not delete a branch something still holds.
 _Avoid_: Deletion (reserved for branches), cleanup, teardown
 
 ### Targets
