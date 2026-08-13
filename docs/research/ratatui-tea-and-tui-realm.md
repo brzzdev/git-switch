@@ -6,13 +6,20 @@ to the Elm Architecture as a pattern, and even that is not worth a rewrite today
 There is no existing convention in this repo for research notes — `docs/` held only `adr/` and
 `agents/` before this file (`docs/adr/`, `docs/agents/`) — so this lives at
 `docs/research/ratatui-tea-and-tui-realm.md`, matching the ADRs' style: no frontmatter, one `#`
-title, `##` sections.
+title, `##` sections. Citations name files rather than lines, so that moving code cannot silently
+falsify them.
+
+**What this describes.** The codebase as it stood at `2b1f3f7`, before any of this was acted on. The
+recommendation against ratatui and tui-realm still holds and the reasoning below is why. The TEA
+half was acted on immediately after: the pickers now have the explicit `Msg` enum and `update`
+function this note argues *would* be the sharper seam, so read every "there is no `Model`" and "a
+`Message` enum would…" below as the state of play that prompted the change, not as the code today.
 
 ## What git-switch actually is today
 
 ### Terminal machinery
 
-Five runtime dependencies, all direct (`Cargo.toml:12-17`):
+Five runtime dependencies, all direct (`Cargo.toml`):
 
 | Crate | Requirement | Resolved | Role |
 | --- | --- | --- | --- |
@@ -22,52 +29,52 @@ Five runtime dependencies, all direct (`Cargo.toml:12-17`):
 | `indicatif` | `0.18` | 0.18.6 | fetch spinner |
 | `thiserror` | `2` | 2.0.20 | error enum |
 
-Dev-dependencies are `portable-pty` and `tempfile` (`Cargo.toml:19-21`).
+Dev-dependencies are `portable-pty` and `tempfile` (`Cargo.toml`).
 
 There is no full-screen machinery anywhere: no alternate screen, no double buffer, no widget tree.
 Rendering is `eprint!` of pre-formatted strings, one line at a time, with an explicit `\r\n` because
-raw mode disables newline translation (`src/app.rs:1249-1254`). Redraw is "count the visual rows I
-printed, then `Term::clear_last_lines(n)` and print again" (`src/app.rs:822`, `src/app.rs:893-894`,
-`src/app.rs:1298-1320`). Everything goes to **stderr**, because stdout is reserved for the `cd`
-handoff to the shell wrapper (`src/app.rs:1227-1239`).
+raw mode disables newline translation (`src/app.rs`). Redraw is "count the visual rows I
+printed, then `Term::clear_last_lines(n)` and print again" (`src/app.rs`,
+`src/app.rs`). Everything goes to **stderr**, because stdout is reserved for the `cd`
+handoff to the shell wrapper (`src/app.rs`).
 
 `crossterm` is already present but used for exactly two things: `enable_raw_mode`/`disable_raw_mode`
 behind an RAII guard, and `event::read()` translated into `console::Key`
-(`src/app.rs:75-153`). The comment there records why: `console::read_key` re-arms raw mode on every
-keystroke and was fragile around split escape sequences (`src/app.rs:72-74`).
+(`src/app.rs`). The comment there records why: `console::read_key` re-arms raw mode on every
+keystroke and was fragile around split escape sequences (`src/app.rs`).
 
 ### How the pickers are structured
 
 Two pickers, both in `src/app.rs`:
 
 - `pick` — single-select with fuzzy filter, sections, sticky headings, scrolling
-  (`src/app.rs:803-896`).
-- `multi_select` — checkbox list with select-all/none (`src/app.rs:1258-1329`).
+  (`src/app.rs`).
+- `multi_select` — checkbox list with select-all/none (`src/app.rs`).
 
-They are called from four sites: branch selection (`src/app.rs:615-635`), the stale-branch cleanup
-prompt (`src/app.rs:1078-1083`), worktree removal (`src/app/wt.rs:231`) and worktree selection
-(`src/app/wt.rs:368`).
+They are called from four sites: branch selection (`src/app.rs`), the stale-branch cleanup
+prompt (`src/app.rs`), worktree removal (`src/app/wt.rs`) and worktree selection
+(`src/app/wt.rs`).
 
 State is **local variables in the loop** — `filter`, `cursor`, `view`, `drawn`
-(`src/app.rs:812-822`); `selected`, `cursor`, `drawn` (`src/app.rs:1264-1302`). There is no `Model`
+(`src/app.rs`); `selected`, `cursor`, `drawn` (`src/app.rs`). There is no `Model`
 struct and no `Message` enum. What *does* exist is a pure state-derivation function:
-`build_view(sections, filter, opts) -> View` (`src/app.rs:738-779`), plus pure helpers
-`fuzzy_match`, `cursor_selection`, `selectable_position`, `format_row` (`src/app.rs:722-736`,
+`build_view(sections, filter, opts) -> View` (`src/app.rs`), plus pure helpers
+`fuzzy_match`, `cursor_selection`, `selectable_position`, `format_row` (`src/app.rs`,
 `781-797`, `976-1007`).
 
-The input seam is the `KeySource` trait (`src/app.rs:33-35`), whose doc comment states its purpose
+The input seam is the `KeySource` trait (`src/app.rs`), whose doc comment states its purpose
 outright: "Abstracting input behind a trait lets the event loops be driven by a scripted sequence in
-tests". The real implementation is `TermKeys` (`src/app.rs:39-51`); the test implementation is
+tests". The real implementation is `TermKeys` (`src/app.rs`); the test implementation is
 `ScriptedKeys`, which yields `Escape` once exhausted so an under-specified script bails rather than
-hanging (`src/app.rs:1336-1350`). Both pickers take `keys: impl KeySource` **by value** so raw mode
+hanging (`src/app.rs`). Both pickers take `keys: impl KeySource` **by value** so raw mode
 is released when the picker returns — otherwise a caller's later `\n` would staircase
-(`src/app.rs:799-808`, `src/app.rs:1256-1263`). This is the "let the pickers own the key source"
+(`src/app.rs`). This is the "let the pickers own the key source"
 commit (2f22eeb).
 
 Presentation strings live in `src/app/reporting.rs`, whose module doc says: "Nothing here runs a git
 process or writes to a stream — every function takes values and returns the lines its caller prints
 — so the wording is asserted against values rather than by running the binary"
-(`src/app/reporting.rs:11-13`). That's commit 2ea25d6.
+(`src/app/reporting.rs`). That's commit 2ea25d6.
 
 ### How it is tested
 
@@ -75,11 +82,11 @@ Three layers, all already in place:
 
 1. **Scripted-key unit tests** over the real event loops — filter-then-enter, arrow wrap-around,
    create-from-filter, heading skipping, escape semantics, multi-select toggling
-   (`src/app.rs:1393-1502`). These drive `pick`/`multi_select` end-to-end with no terminal.
-2. **Pure-value tests** of labels, alignment, markers, quoting (`src/app.rs:1526-1707`).
+   (`src/app.rs`). These drive `pick`/`multi_select` end-to-end with no terminal.
+2. **Pure-value tests** of labels, alignment, markers, quoting (`src/app.rs`).
 3. **One real-PTY integration test** for the property that only a terminal can show — that every
    newline written to a tty is a CRLF, so deletion outcomes don't staircase after the picker
-   (`tests/integration.rs:1878-1957`). It drives the picker over `portable-pty`, polling for the
+   (`tests/integration.rs`). It drives the picker over `portable-pty`, polling for the
    drawn rows before sending each key.
 
 `tests/integration.rs` is 1957 lines; `src/app.rs` is 1708.
@@ -88,7 +95,7 @@ Three layers, all already in place:
 
 `CLAUDE.md` says "Keep dependencies minimal". The release profile backs that up:
 `opt-level = "z"`, `lto = true`, `codegen-units = 1`, `panic = "abort"`, `strip = true`
-(`Cargo.toml:26-32`).
+(`Cargo.toml`).
 
 Measured on this checkout with `cargo tree -e normal --prefix none | sort -u`:
 
@@ -133,7 +140,7 @@ management. Those are exactly the pieces git-switch already has, working, and te
 
 **Version and MSRV.** 0.30.2, published 2026-06-19, `rust-version = 1.88.0`
 (<https://crates.io/api/v1/crates/ratatui>). Note git-switch is `edition = "2024"`
-(`Cargo.toml:5`), which already implies ≥1.85, so 1.88 is a small bump, not a blocker.
+(`Cargo.toml`), which already implies ≥1.85, so 1.88 is a small bump, not a blocker.
 
 **Backends.** Crossterm (default), Termion, Termina, Termwiz
 (<https://docs.rs/ratatui/latest/ratatui/>). Since 0.30.0 the crate is a modular workspace
@@ -156,7 +163,7 @@ height is clamped to the terminal height
 (<https://docs.rs/ratatui/latest/ratatui/enum.Viewport.html>). So the inline-picker shape *is*
 expressible. But note the fixed-height requirement: git-switch's pickers currently size themselves
 from the filtered row count and only clamp against the terminal
-(`src/app.rs:930-944`, `src/app.rs:1280-1287`), so an `Inline` viewport would mean choosing a height
+(`src/app.rs`), so an `Inline` viewport would mean choosing a height
 up front and living with it, or recreating the terminal on every filter keystroke.
 
 ## The Elm Architecture, as ratatui.rs describes it
@@ -226,16 +233,16 @@ rendered output.
 ### What each option would actually buy git-switch
 
 **ratatui.** The renderer. git-switch's hand-rolled renderer is genuinely the fiddliest code in the
-project: visual-row counting for wrapped lines (`src/app.rs:1241-1247`), a reserved trailing line so
+project: visual-row counting for wrapped lines (`src/app.rs`), a reserved trailing line so
 a full-height draw doesn't scroll the prompt out of `clear_last_lines`' reach
-(`src/app.rs:925-930`), sticky-heading arithmetic (`src/app.rs:934-964`), and the CRLF rule
-(`src/app.rs:1249-1254`). A double-buffered diffing renderer removes all of that. That is the real
+(`src/app.rs`), sticky-heading arithmetic (`src/app.rs`), and the CRLF rule
+(`src/app.rs`). A double-buffered diffing renderer removes all of that. That is the real
 argument in favour, and it is not nothing.
 
 Against it: the renderer is ~150 lines, already written, already debugged, and already has a
-regression test pinning its nastiest failure mode (`tests/integration.rs:1878-1957`). The cost is
+regression test pinning its nastiest failure mode (`tests/integration.rs`). The cost is
 ~30 extra crates in the runtime graph against a `CLAUDE.md` rule that says keep them minimal, a
-release profile explicitly tuned for size (`Cargo.toml:26-32`), and a rewrite of the exact rows
+release profile explicitly tuned for size (`Cargo.toml`), and a rewrite of the exact rows
 ADR 0001 makes authorisation-bearing. `Viewport::Inline` needs a height chosen at terminal-creation
 time (<https://docs.rs/ratatui/latest/ratatui/enum.Viewport.html>), which fights a filter-driven
 list whose height changes on every keystroke. And ratatui by its own admission hands back nothing
@@ -243,16 +250,16 @@ for input or the loop (<https://docs.rs/ratatui/latest/ratatui/>) — so the pie
 keep are the pieces it already likes.
 
 **TEA.** Testability is the usual argument, and here it is already banked. The `KeySource` seam
-(`src/app.rs:33-35`) plus `ScriptedKeys` (`src/app.rs:1346-1350`) let the unit tests drive the real
+(`src/app.rs`) plus `ScriptedKeys` (`src/app.rs`) let the unit tests drive the real
 event loops from a key script and assert on the returned `Selection` — see
-`type_to_filter_then_enter_selects_match` (`src/app.rs:1393-1400`) and the multi-select cases
-(`src/app.rs:1466-1502`). TEA's `update()` would give a slightly sharper seam (assert on `Model`
+`type_to_filter_then_enter_selects_match` (`src/app.rs`) and the multi-select cases
+(`src/app.rs`). TEA's `update()` would give a slightly sharper seam (assert on `Model`
 rather than on the loop's return value), but the thing TEA is normally adopted *for* — testing
 interaction without a terminal — is already true here.
 
 What TEA would genuinely tidy: the `pick` loop currently mixes navigation, filtering, and a
 `preserved`/`filter_changed` dance to keep the cursor on the same item across a filter change
-(`src/app.rs:824-895`). A `Message` enum and an `update` would make that a data transformation
+(`src/app.rs`). A `Message` enum and an `update` would make that a data transformation
 rather than a sequence of mutations. But it is one loop, in one file, ~70 lines. Adopting a whole
 architecture for it is exactly the ceremony `CLAUDE.md` warns against ("Keep things simple. Channel
 'yagni' energy").
@@ -278,7 +285,7 @@ feature, an MSRV of 1.88, a two-majors-a-year breaking cadence, and a bus factor
    dependency (<https://ratatui.rs/concepts/application-patterns/the-elm-architecture/>), and
    ratatui.rs itself presents it as one of three options rather than a recommendation
    (<https://ratatui.rs/concepts/application-patterns/>). If `pick`'s loop
-   (`src/app.rs:824-895`) ever gets harder to reason about, refactoring *that one loop* into a
+   (`src/app.rs`) ever gets harder to reason about, refactoring *that one loop* into a
    `Message` enum plus an `update` is a contained, dependency-free improvement. Doing it project-wide
    today buys nothing the `KeySource` seam does not already provide.
 
@@ -293,12 +300,12 @@ Any of these would make ratatui (and TEA alongside it) the right call:
   the inline-viewport friction disappears and the hand-rolled `clear_last_lines` redraw loses its
   reason to exist.
 - **Renderer bugs recurring.** The staircase bug already cost a PTY regression test
-  (`tests/integration.rs:1878-1957`). If wrapping, sticky headings, or scroll arithmetic keep
+  (`tests/integration.rs`). If wrapping, sticky headings, or scroll arithmetic keep
   producing defects, the ~30-crate cost starts looking cheap against the maintenance.
 - **Rich cell content.** Per-cell styling, unicode-width edge cases beyond what
-  `measure_text_width` handles (`src/app.rs:1241-1247`), mouse support, or scrollbars.
+  `measure_text_width` handles (`src/app.rs`), mouse support, or scrollbars.
 - **The dependency rule relaxing.** If `CLAUDE.md`'s "Keep dependencies minimal" and the
-  size-tuned release profile (`Cargo.toml:26-32`) stop being priorities, the main argument against
+  size-tuned release profile (`Cargo.toml`) stop being priorities, the main argument against
   ratatui goes with them.
 
 None of these is true today.

@@ -797,10 +797,157 @@ fn selectable_position(view: &View, name: &str) -> Option<usize> {
         .position(|&i| matches!(&view.rows[i].kind, RowKind::Item(p) if p.name == name))
 }
 
+/// What a keystroke means to the single-select picker. The event loop folds
+/// these into a [`PickModel`]; [`pick_msg`] is the only place that knows which
+/// key carries which intention, so a rebinding is one line there.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PickMsg {
+    Accepted,
+    /// Escape is one gesture with two meanings — clear the filter, or give up —
+    /// and which it is depends on model state the translation can't see. So the
+    /// gesture is carried through and [`PickModel::update`] decides.
+    Escaped,
+    FilterPopped,
+    FilterPushed(char),
+    MovedToEnd,
+    MovedToStart,
+    /// Carries the page size, since how far a page reaches is a fact about the
+    /// terminal at the moment the key was pressed, not about the model.
+    PagedDown(usize),
+    PagedUp(usize),
+    SteppedDown,
+    SteppedUp,
+}
+
+/// The keyboard contract, entire. `None` is an unbound key, which does nothing
+/// — including for control characters, which are never filter input.
+fn pick_msg(key: &Key, page: usize) -> Option<PickMsg> {
+    Some(match key {
+        Key::ArrowDown => PickMsg::SteppedDown,
+        Key::ArrowUp => PickMsg::SteppedUp,
+        Key::Backspace => PickMsg::FilterPopped,
+        Key::Char(c) if !c.is_control() => PickMsg::FilterPushed(*c),
+        Key::End => PickMsg::MovedToEnd,
+        Key::Enter => PickMsg::Accepted,
+        Key::Escape => PickMsg::Escaped,
+        Key::Home => PickMsg::MovedToStart,
+        Key::PageDown => PickMsg::PagedDown(page),
+        Key::PageUp => PickMsg::PagedUp(page),
+        _ => return None,
+    })
+}
+
+/// Whether a picker carries on, and what it settled on if not. Both pickers
+/// fold their own message type, but they end the same way, so this is the one
+/// piece of them worth sharing.
+enum Flow<T> {
+    Continue,
+    Stop(T),
+}
+
+/// Everything the single-select picker knows: what has been typed, where the
+/// cursor sits, and the view the two derive. Holding the sections and options
+/// alongside keeps [`Self::update`] able to re-derive the view on its own, so
+/// the whole picker can be driven — and tested — without a terminal.
+struct PickModel<'a> {
+    cursor: usize,
+    filter: String,
+    opts: PickerOptions,
+    sections: &'a [Section],
+    view: View,
+}
+
+impl<'a> PickModel<'a> {
+    /// Starts on `current` where the unfiltered view still offers it, so the
+    /// picker opens on the branch you're already on.
+    fn new(current: Option<&str>, sections: &'a [Section], opts: PickerOptions) -> Self {
+        let view = build_view(sections, "", opts);
+        let cursor = current
+            .and_then(|c| selectable_position(&view, c))
+            .unwrap_or(0);
+        Self {
+            cursor,
+            filter: String::new(),
+            opts,
+            sections,
+            view,
+        }
+    }
+
+    /// Re-derives the view and keeps the cursor on the branch it was on, rather
+    /// than the position it held — narrowing the list must not move the
+    /// selection under the user. Where that branch is filtered away there is
+    /// nothing to follow, so the cursor returns to the top.
+    fn refilter(&mut self) {
+        let preserved = match cursor_selection(&self.view, self.cursor) {
+            Some(Selection::Existing { name, .. }) => Some(name),
+            _ => None,
+        };
+        self.view = build_view(self.sections, &self.filter, self.opts);
+        self.cursor = preserved
+            .as_deref()
+            .and_then(|n| selectable_position(&self.view, n))
+            .unwrap_or(0);
+    }
+
+    fn update(&mut self, msg: PickMsg) -> Flow<Option<Selection>> {
+        let len = self.view.selectable.len();
+        match msg {
+            PickMsg::Accepted => {
+                return Flow::Stop(cursor_selection(&self.view, self.cursor));
+            }
+            // Nothing left to clear means the user is asking to leave.
+            PickMsg::Escaped => {
+                if self.filter.is_empty() {
+                    return Flow::Stop(None);
+                }
+                self.filter.clear();
+                self.refilter();
+            }
+            PickMsg::FilterPopped => {
+                if self.filter.pop().is_some() {
+                    self.refilter();
+                }
+            }
+            PickMsg::FilterPushed(c) => {
+                self.filter.push(c);
+                self.refilter();
+            }
+            PickMsg::MovedToEnd => self.cursor = len.saturating_sub(1),
+            PickMsg::MovedToStart => self.cursor = 0,
+            // Paging clamps where stepping wraps: a page is as far as you can
+            // see, and running out of list is no reason to reappear at the
+            // other end.
+            PickMsg::PagedDown(page) => {
+                self.cursor = (self.cursor + page).min(len.saturating_sub(1));
+            }
+            PickMsg::PagedUp(page) => self.cursor = self.cursor.saturating_sub(page),
+            PickMsg::SteppedDown => {
+                if len > 0 {
+                    self.cursor = (self.cursor + 1) % len;
+                }
+            }
+            PickMsg::SteppedUp => {
+                if len > 0 {
+                    self.cursor = if self.cursor == 0 {
+                        len - 1
+                    } else {
+                        self.cursor - 1
+                    };
+                }
+            }
+        }
+        Flow::Continue
+    }
+}
+
 /// The single-select picker. `keys` is taken by value so the raw mode it holds
 /// is released when this returns: under raw mode a newline moves down without
 /// returning to column 0, so anything a caller printed while still holding the
 /// key source would staircase across the terminal.
+///
+/// This is the shell around [`PickModel`]: read a key, translate it, fold it in,
+/// redraw. Everything that decides anything lives in the model.
 pub(crate) fn pick(
     current: Option<&str>,
     sections: &[Section],
@@ -810,89 +957,25 @@ pub(crate) fn pick(
     let term = Term::stderr();
     let _cursor_guard = CursorGuard::hide();
 
-    let mut filter = String::new();
-    let mut view = build_view(sections, &filter, opts);
-    if view.selectable.is_empty() && !opts.allow_create_from_filter {
+    let mut model = PickModel::new(current, sections, opts);
+    if model.view.selectable.is_empty() && !opts.allow_create_from_filter {
         return Ok(None);
     }
 
-    let mut cursor: usize = current
-        .and_then(|c| selectable_position(&view, c))
-        .unwrap_or(0);
-
-    let mut drawn = render(&term, &view, cursor, &filter, opts.prompt);
+    let mut drawn = render(&term, &model.view, model.cursor, &model.filter, opts.prompt);
 
     loop {
         let key = keys.read_key()?;
-        let preserved = match cursor_selection(&view, cursor) {
-            Some(Selection::Existing { name, .. }) => Some(name),
-            _ => None,
+        let Some(msg) = pick_msg(&key, page_size(&term)) else {
+            continue;
         };
-        let mut filter_changed = false;
-
-        match key {
-            Key::ArrowUp => {
-                if !view.selectable.is_empty() {
-                    cursor = if cursor == 0 {
-                        view.selectable.len() - 1
-                    } else {
-                        cursor - 1
-                    };
-                }
-            }
-            Key::ArrowDown => {
-                if !view.selectable.is_empty() {
-                    cursor = (cursor + 1) % view.selectable.len();
-                }
-            }
-            Key::PageUp => {
-                let page = page_size(&term);
-                cursor = cursor.saturating_sub(page);
-            }
-            Key::PageDown => {
-                let page = page_size(&term);
-                let last = view.selectable.len().saturating_sub(1);
-                cursor = (cursor + page).min(last);
-            }
-            Key::Home => cursor = 0,
-            Key::End => {
-                cursor = view.selectable.len().saturating_sub(1);
-            }
-            Key::Char(c) if !c.is_control() => {
-                filter.push(c);
-                filter_changed = true;
-            }
-            Key::Backspace => {
-                if filter.pop().is_some() {
-                    filter_changed = true;
-                }
-            }
-            Key::Enter => {
-                let selection = cursor_selection(&view, cursor);
-                let _ = term.clear_last_lines(drawn);
-                return Ok(selection);
-            }
-            Key::Escape => {
-                if filter.is_empty() {
-                    let _ = term.clear_last_lines(drawn);
-                    return Ok(None);
-                }
-                filter.clear();
-                filter_changed = true;
-            }
-            _ => continue,
-        }
-
-        if filter_changed {
-            view = build_view(sections, &filter, opts);
-            cursor = preserved
-                .as_deref()
-                .and_then(|n| selectable_position(&view, n))
-                .unwrap_or(0);
+        if let Flow::Stop(selection) = model.update(msg) {
+            let _ = term.clear_last_lines(drawn);
+            return Ok(selection);
         }
 
         let _ = term.clear_last_lines(drawn);
-        drawn = render(&term, &view, cursor, &filter, opts.prompt);
+        drawn = render(&term, &model.view, model.cursor, &model.filter, opts.prompt);
     }
 }
 
@@ -1147,7 +1230,7 @@ pub(crate) fn risk_legend(risks: &[Risk]) -> Option<String> {
 /// The *Ground* a row is offered on, as the word the glossary uses. Dim, and
 /// deliberately not a [`marker::Marker`]: a ground warns of no loss, and per ADR
 /// 0001 only a marker licenses forcing. See [ADR
-/// 0003](../../docs/adr/0003-a-ground-is-not-a-marker.md).
+/// 0003](../docs/adr/0003-a-ground-is-not-a-marker.md).
 fn ground_label(ground: git::Ground) -> String {
     let word = match ground {
         git::Ground::Gone => "gone",
@@ -1306,6 +1389,86 @@ fn render_line(line: &str) {
     eprint!("{line}\r\n");
 }
 
+/// What a keystroke means to the multi-select picker. Deliberately not shared
+/// with [`PickMsg`]: the two pickers have the same shape but not the same state
+/// space, and a union of the two would be half-dead in either.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum MultiMsg {
+    Accepted,
+    AllSelected,
+    /// Settles on no rows, which is indistinguishable from accepting an empty
+    /// tick list — as it has always been, since both mean "remove nothing".
+    Escaped,
+    NoneSelected,
+    SteppedDown,
+    SteppedUp,
+    Toggled,
+}
+
+/// The keyboard contract for the multi-select. `None` is an unbound key.
+fn multi_msg(key: &Key) -> Option<MultiMsg> {
+    Some(match key {
+        Key::ArrowDown => MultiMsg::SteppedDown,
+        Key::ArrowLeft => MultiMsg::NoneSelected,
+        Key::ArrowRight => MultiMsg::AllSelected,
+        Key::ArrowUp => MultiMsg::SteppedUp,
+        Key::Char(' ') => MultiMsg::Toggled,
+        Key::Enter => MultiMsg::Accepted,
+        Key::Escape => MultiMsg::Escaped,
+        _ => return None,
+    })
+}
+
+/// Everything the multi-select knows: which rows are ticked and where the
+/// cursor is. The rows themselves are fixed for the picker's life, so they stay
+/// with the caller.
+struct MultiModel {
+    cursor: usize,
+    selected: Vec<bool>,
+}
+
+impl MultiModel {
+    fn new(defaults: &[bool]) -> Self {
+        Self {
+            cursor: 0,
+            selected: defaults.to_vec(),
+        }
+    }
+
+    fn update(&mut self, msg: MultiMsg) -> Flow<Vec<usize>> {
+        match msg {
+            MultiMsg::Accepted => return Flow::Stop(self.ticked()),
+            MultiMsg::AllSelected => self.selected.fill(true),
+            MultiMsg::Escaped => return Flow::Stop(Vec::new()),
+            MultiMsg::NoneSelected => self.selected.fill(false),
+            // Unlike the single-select, this is a fixed list of things to act
+            // on rather than a ring: running off an end stays put, where
+            // wrapping would put a space over something nobody looked at.
+            MultiMsg::SteppedDown => {
+                if self.cursor + 1 < self.selected.len() {
+                    self.cursor += 1;
+                }
+            }
+            MultiMsg::SteppedUp => self.cursor = self.cursor.saturating_sub(1),
+            MultiMsg::Toggled => {
+                if let Some(row) = self.selected.get_mut(self.cursor) {
+                    *row = !*row;
+                }
+            }
+        }
+        Flow::Continue
+    }
+
+    fn ticked(&self) -> Vec<usize> {
+        self.selected
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| **s)
+            .map(|(i, _)| i)
+            .collect()
+    }
+}
+
 /// The multi-select picker. `legend` is an optional dim line under the prompt,
 /// for glossing anything in the rows that isn't self-explanatory; callers pass
 /// `None` where nothing needs it, so a plain list stays plain. `keys` is taken
@@ -1318,9 +1481,12 @@ pub(crate) fn multi_select(
     defaults: &[bool],
     mut keys: impl KeySource,
 ) -> AppResult<Vec<usize>> {
+    // The model is sized from `defaults` but the rows are drawn from `items`,
+    // so the cursor is only in bounds for both while the two agree.
+    debug_assert_eq!(items.len(), defaults.len());
+
     let term = Term::stderr();
-    let mut selected = defaults.to_vec();
-    let mut cursor = 0usize;
+    let mut model = MultiModel::new(defaults);
     let header = format!("{} {}", style("?").green().bold(), style(prompt).bold());
     let legend = legend.map(|l| format!("  {}", style(l).dim()));
 
@@ -1361,33 +1527,20 @@ pub(crate) fn multi_select(
         let _ = term.clear_last_lines(n);
     };
 
-    let mut drawn = draw(cursor, &selected);
+    let mut drawn = draw(model.cursor, &model.selected);
 
     loop {
-        match keys.read_key()? {
-            Key::ArrowUp if cursor > 0 => cursor -= 1,
-            Key::ArrowDown if cursor + 1 < items.len() => cursor += 1,
-            Key::Char(' ') => selected[cursor] = !selected[cursor],
-            Key::ArrowRight => selected.fill(true),
-            Key::ArrowLeft => selected.fill(false),
-            Key::Enter => break,
-            Key::Escape => {
-                clear(drawn);
-                return Ok(vec![]);
-            }
-            _ => continue,
+        let Some(msg) = multi_msg(&keys.read_key()?) else {
+            continue;
+        };
+        if let Flow::Stop(ticked) = model.update(msg) {
+            clear(drawn);
+            return Ok(ticked);
         }
 
         clear(drawn);
-        drawn = draw(cursor, &selected);
+        drawn = draw(model.cursor, &model.selected);
     }
-
-    Ok(selected
-        .iter()
-        .enumerate()
-        .filter(|(_, s)| **s)
-        .map(|(i, _)| i)
-        .collect())
 }
 
 #[cfg(test)]
@@ -1452,6 +1605,176 @@ mod tests {
         }
     }
 
+    /// How the picker came to a stop, as the tests care about it.
+    #[derive(Debug, Eq, PartialEq)]
+    enum Stopped {
+        Cancelled,
+        Picked(String),
+    }
+
+    /// Drives the model directly, with no terminal and no key source — the
+    /// point of splitting `update` out. Returns how the last message stopped
+    /// the picker, or `None` if it didn't stop.
+    fn step(model: &mut PickModel<'_>, msgs: &[PickMsg]) -> Option<Stopped> {
+        let mut out = None;
+        for &msg in msgs {
+            if let Flow::Stop(selection) = model.update(msg) {
+                out = Some(match picked_name(selection) {
+                    Some(name) => Stopped::Picked(name),
+                    None => Stopped::Cancelled,
+                });
+            }
+        }
+        out
+    }
+
+    /// The cursor is where the model says it is, not where the terminal drew it.
+    fn at_cursor(model: &PickModel<'_>) -> Option<String> {
+        picked_name(cursor_selection(&model.view, model.cursor))
+    }
+
+    /// Stepping wraps: the list is a ring, so falling off the bottom lands on
+    /// the top.
+    #[test]
+    fn stepping_past_the_last_row_wraps_to_the_first() {
+        let sections = vec![section("Local", &["a", "b", "c"])];
+        let mut model = PickModel::new(None, &sections, SELECT_OPTS);
+        step(&mut model, &[PickMsg::MovedToEnd, PickMsg::SteppedDown]);
+        assert_eq!(at_cursor(&model).as_deref(), Some("a"));
+    }
+
+    /// Paging clamps where stepping wraps — a page is "as far as you can see",
+    /// and running out of list is not a reason to reappear at the other end.
+    #[test]
+    fn paging_past_the_last_row_clamps_to_it() {
+        let sections = vec![section("Local", &["a", "b", "c"])];
+        let mut model = PickModel::new(None, &sections, SELECT_OPTS);
+        step(&mut model, &[PickMsg::PagedDown(10)]);
+        assert_eq!(at_cursor(&model).as_deref(), Some("c"));
+        step(&mut model, &[PickMsg::PagedUp(10)]);
+        assert_eq!(at_cursor(&model).as_deref(), Some("a"));
+    }
+
+    /// Typing re-derives the view, and the cursor follows the branch it was on
+    /// rather than the position it held — otherwise narrowing the list silently
+    /// moves the selection under the user.
+    #[test]
+    fn filtering_keeps_the_cursor_on_the_branch_it_was_on() {
+        let sections = vec![section("Local", &["alpha", "beta", "beta-two"])];
+        let mut model = PickModel::new(None, &sections, SELECT_OPTS);
+        step(&mut model, &[PickMsg::SteppedDown]);
+        assert_eq!(at_cursor(&model).as_deref(), Some("beta"));
+        step(&mut model, &[PickMsg::FilterPushed('b')]);
+        assert_eq!(at_cursor(&model).as_deref(), Some("beta"));
+    }
+
+    /// Where the branch it was on is filtered away, there is nothing to follow,
+    /// so the cursor goes to the top of what's left.
+    #[test]
+    fn filtering_away_the_cursors_branch_falls_back_to_the_first_row() {
+        let sections = vec![section("Local", &["alpha", "beta"])];
+        let mut model = PickModel::new(None, &sections, SELECT_OPTS);
+        step(&mut model, &[PickMsg::SteppedDown]);
+        assert_eq!(at_cursor(&model).as_deref(), Some("beta"));
+        // `l` is in "alpha" and not in "beta", so the cursor's branch goes.
+        step(&mut model, &[PickMsg::FilterPushed('l')]);
+        assert_eq!(at_cursor(&model).as_deref(), Some("alpha"));
+    }
+
+    /// Escape is one gesture with two meanings, and only the model knows which:
+    /// it clears a filter if there is one, and otherwise cancels.
+    #[test]
+    fn escape_clears_the_filter_before_it_cancels() {
+        let sections = vec![section("Local", &["alpha", "beta"])];
+        let mut model = PickModel::new(None, &sections, SELECT_OPTS);
+        step(&mut model, &[PickMsg::FilterPushed('a')]);
+        assert!(
+            step(&mut model, &[PickMsg::Escaped]).is_none(),
+            "the first escape has a filter to clear, so the picker stays open"
+        );
+        assert_eq!(model.filter, "");
+        assert_eq!(
+            step(&mut model, &[PickMsg::Escaped]),
+            Some(Stopped::Cancelled),
+            "with nothing left to clear, escape cancels"
+        );
+    }
+
+    #[test]
+    fn accepting_stops_with_the_row_under_the_cursor() {
+        let sections = vec![section("Local", &["a", "b"])];
+        let mut model = PickModel::new(None, &sections, SELECT_OPTS);
+        let stopped = step(&mut model, &[PickMsg::SteppedDown, PickMsg::Accepted]);
+        assert_eq!(stopped, Some(Stopped::Picked("b".to_string())));
+    }
+
+    /// The bindings live in one table, so this is the whole keyboard contract.
+    /// Control characters are not filter input, and an unbound key means
+    /// nothing rather than something harmless.
+    #[test]
+    fn each_key_maps_to_the_intention_it_names() {
+        let page = 7;
+        let cases = [
+            (Key::ArrowDown, Some(PickMsg::SteppedDown)),
+            (Key::ArrowUp, Some(PickMsg::SteppedUp)),
+            (Key::Backspace, Some(PickMsg::FilterPopped)),
+            (Key::Char('x'), Some(PickMsg::FilterPushed('x'))),
+            (Key::Char('\t'), None),
+            (Key::End, Some(PickMsg::MovedToEnd)),
+            (Key::Enter, Some(PickMsg::Accepted)),
+            (Key::Escape, Some(PickMsg::Escaped)),
+            (Key::Home, Some(PickMsg::MovedToStart)),
+            (Key::PageDown, Some(PickMsg::PagedDown(page))),
+            (Key::PageUp, Some(PickMsg::PagedUp(page))),
+            (Key::Unknown, None),
+        ];
+        for (key, want) in cases {
+            assert_eq!(pick_msg(&key, page), want, "for {key:?}");
+        }
+    }
+
+    /// As for [`pick_msg`], this is the multi-select's whole keyboard contract.
+    #[test]
+    fn each_multi_select_key_maps_to_the_intention_it_names() {
+        let cases = [
+            (Key::ArrowDown, Some(MultiMsg::SteppedDown)),
+            (Key::ArrowLeft, Some(MultiMsg::NoneSelected)),
+            (Key::ArrowRight, Some(MultiMsg::AllSelected)),
+            (Key::ArrowUp, Some(MultiMsg::SteppedUp)),
+            (Key::Char(' '), Some(MultiMsg::Toggled)),
+            (Key::Char('x'), None),
+            (Key::Enter, Some(MultiMsg::Accepted)),
+            (Key::Escape, Some(MultiMsg::Escaped)),
+            (Key::Home, None),
+        ];
+        for (key, want) in cases {
+            assert_eq!(multi_msg(&key), want, "for {key:?}");
+        }
+    }
+
+    /// Toggling is about the row under the cursor and nothing else — the bug
+    /// this guards is a select-all that also flips the current row back.
+    #[test]
+    fn toggling_flips_only_the_row_under_the_cursor() {
+        let mut model = MultiModel::new(&[false, false, false]);
+        model.update(MultiMsg::SteppedDown);
+        model.update(MultiMsg::Toggled);
+        assert_eq!(model.selected, vec![false, true, false]);
+    }
+
+    /// The multi-select is a fixed list of things to act on, not a ring: running
+    /// off either end stays put rather than jumping to the far side, where a
+    /// space would then tick something the user never looked at.
+    #[test]
+    fn multi_select_stepping_stops_at_both_ends() {
+        let mut model = MultiModel::new(&[false, false]);
+        model.update(MultiMsg::SteppedUp);
+        assert_eq!(model.cursor, 0);
+        model.update(MultiMsg::SteppedDown);
+        model.update(MultiMsg::SteppedDown);
+        assert_eq!(model.cursor, 1);
+    }
+
     #[test]
     fn type_to_filter_then_enter_selects_match() {
         let sections = vec![section("Local", &["main", "feature", "develop"])];
@@ -1459,25 +1782,6 @@ mod tests {
         keys.push(Key::Enter);
         let sel = run_pick(&sections, SELECT_OPTS, keys);
         assert_eq!(picked_name(sel).as_deref(), Some("feature"));
-    }
-
-    #[test]
-    fn arrow_up_from_first_wraps_to_last() {
-        let sections = vec![section("Local", &["a", "b", "c"])];
-        let sel = run_pick(&sections, SELECT_OPTS, vec![Key::ArrowUp, Key::Enter]);
-        assert_eq!(picked_name(sel).as_deref(), Some("c"));
-    }
-
-    #[test]
-    fn arrow_down_from_last_wraps_to_first() {
-        let sections = vec![section("Local", &["a", "b", "c"])];
-        // End lands on the last row; ArrowDown should wrap back to the first.
-        let sel = run_pick(
-            &sections,
-            SELECT_OPTS,
-            vec![Key::End, Key::ArrowDown, Key::Enter],
-        );
-        assert_eq!(picked_name(sel).as_deref(), Some("a"));
     }
 
     #[test]
@@ -1499,24 +1803,6 @@ mod tests {
         // heading row rather than onto it.
         let sel = run_pick(&sections, SELECT_OPTS, vec![Key::ArrowDown, Key::Enter]);
         assert_eq!(picked_name(sel).as_deref(), Some("l1"));
-    }
-
-    #[test]
-    fn escape_on_empty_filter_returns_none() {
-        let sections = vec![section("Local", &["a", "b"])];
-        let sel = run_pick(&sections, SELECT_OPTS, vec![Key::Escape]);
-        assert!(sel.is_none());
-    }
-
-    #[test]
-    fn escape_on_nonempty_filter_clears_it() {
-        let sections = vec![section("Local", &["alpha", "beta"])];
-        // Filter down to "beta" (hiding alpha), Escape to clear the filter, then
-        // Home + Enter selects alpha — proving it is back in the list.
-        let mut keys = typed("beta");
-        keys.extend([Key::Escape, Key::Home, Key::Enter]);
-        let sel = run_pick(&sections, SELECT_OPTS, keys);
-        assert_eq!(picked_name(sel).as_deref(), Some("alpha"));
     }
 
     fn run_multi_select(items: &[&str], defaults: &[bool], keys: Vec<Key>) -> Vec<usize> {
