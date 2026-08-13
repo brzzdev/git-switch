@@ -163,6 +163,8 @@ pub(crate) fn remove(
 
 #[cfg(test)]
 mod tests {
+    use std::mem::discriminant;
+
     use super::*;
 
     /// One recorded call, as the rules care about it: which step, and whether it
@@ -300,32 +302,43 @@ mod tests {
         );
     }
 
-    /// Each step reports itself, and a step that never ran is absent rather than
-    /// dressed up as a failure.
+    /// Every combination of step outcomes, plus the two targets that skip a step
+    /// entirely — an absent step means there was no such step, never a failure
+    /// dressed up as one. A removed worktree is paired with each branch outcome
+    /// in turn; a worktree that refused is
+    /// [`a_worktree_that_refuses_leaves_its_branch_alone`], which owns that case.
     #[test]
     fn the_report_carries_each_step_that_ran() {
-        let mut steps = FakeSteps::new();
-        steps.branch = git::BranchDeleteOutcome::NotMerged;
-        let report =
-            remove(held(), License::shown(Risk::default()), &mut steps).expect("no git to fail");
-        assert!(matches!(
-            report.worktree,
-            Some(git::WorktreeRemoveOutcome::Removed)
-        ));
-        assert!(matches!(
-            report.branch,
-            Some(git::BranchDeleteOutcome::NotMerged)
-        ));
+        for outcome in [
+            git::BranchDeleteOutcome::Deleted,
+            git::BranchDeleteOutcome::NotMerged,
+            git::BranchDeleteOutcome::Failed("in use".to_string()),
+        ] {
+            let mut steps = FakeSteps::new();
+            steps.branch = outcome.clone();
+            let report = remove(held(), License::shown(Risk::default()), &mut steps)
+                .expect("no git to fail");
+            assert!(
+                matches!(report.worktree, Some(git::WorktreeRemoveOutcome::Removed)),
+                "the worktree went, got: {:?}",
+                report.worktree
+            );
+            assert_eq!(
+                report.branch.as_ref().map(discriminant),
+                Some(discriminant(&outcome)),
+                "the branch step is reported as it happened, got: {:?}",
+                report.branch
+            );
+        }
 
         let mut steps = FakeSteps::new();
-        steps.branch = git::BranchDeleteOutcome::Failed("in use".to_string());
         let branch_only = Target::Branch { name: "feature" };
         let report = remove(branch_only, License::shown(Risk::default()), &mut steps)
             .expect("no git to fail");
         assert!(report.worktree.is_none(), "no worktree to remove");
         assert!(matches!(
             report.branch,
-            Some(git::BranchDeleteOutcome::Failed(_))
+            Some(git::BranchDeleteOutcome::Deleted)
         ));
 
         let mut steps = FakeSteps::new();
