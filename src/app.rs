@@ -1226,14 +1226,32 @@ fn stale_outcome(row: &StaleRow, outcome: &git::BranchDeleteOutcome) -> String {
         }
         git::BranchDeleteOutcome::NotMerged => format!(
             "{} {prefix}kept {branch} with unmerged commits \
-             (run `git branch -D {branch}` to force-delete)",
+             (run `git branch -D -- {}` to force-delete)",
             style("!").yellow().bold(),
+            shell_quote(branch),
         ),
         git::BranchDeleteOutcome::Failed(detail) => format!(
             "{} {prefix}could not delete {branch}: {detail}",
             style("!").yellow().bold(),
         ),
     }
+}
+
+/// Renders `word` so a shell reads it as the single literal it is. Git allows
+/// `$`, backticks, `;` and `&` in a ref name, so a branch called
+/// ``topic$(rm -rf ~)`` would otherwise run its own payload the moment someone
+/// pasted a command we printed. Names needing nothing are returned bare, which
+/// keeps the overwhelmingly common case readable; anything else is single-quoted,
+/// where the only character with meaning is `'` itself.
+///
+/// Quoting alone doesn't cover a name that looks like an option, so the commands
+/// built from this pass `--` before the ref as well.
+pub(crate) fn shell_quote(word: &str) -> String {
+    let safe = |c: char| c.is_ascii_alphanumeric() || "._/@+-".contains(c);
+    if !word.is_empty() && word.chars().all(safe) {
+        return word.to_string();
+    }
+    format!("'{}'", word.replace('\'', r"'\''"))
 }
 
 /// Pads (name, annotation) pairs so annotations line up in a column. Rows
@@ -1598,8 +1616,41 @@ mod tests {
         assert_eq!(
             plain(&stale_outcome(&row, &git::BranchDeleteOutcome::NotMerged)),
             "! kept spike/abandoned with unmerged commits \
-             (run `git branch -D spike/abandoned` to force-delete)"
+             (run `git branch -D -- spike/abandoned` to force-delete)"
         );
+    }
+
+    /// The hint is meant to be pasted into a shell, and git allows `$` and
+    /// backticks in a ref name — so the name has to survive the paste as a
+    /// literal rather than running.
+    #[test]
+    fn stale_outcome_quotes_a_branch_name_that_could_run_as_a_command() {
+        let row = stale_row("topic$(touch${IFS}/tmp/pwned)", None, Risk::default());
+        assert_eq!(
+            plain(&stale_outcome(&row, &git::BranchDeleteOutcome::NotMerged)),
+            "! kept topic$(touch${IFS}/tmp/pwned) with unmerged commits \
+             (run `git branch -D -- 'topic$(touch${IFS}/tmp/pwned)'` to force-delete)"
+        );
+    }
+
+    #[test]
+    fn shell_quote_leaves_an_ordinary_branch_name_bare() {
+        assert_eq!(shell_quote("feature/login-2"), "feature/login-2");
+    }
+
+    #[test]
+    fn shell_quote_wraps_anything_a_shell_would_interpret() {
+        assert_eq!(shell_quote("topic;ls"), "'topic;ls'");
+        assert_eq!(shell_quote("topic&&ls"), "'topic&&ls'");
+        assert_eq!(shell_quote("a b"), "'a b'");
+        assert_eq!(shell_quote(""), "''");
+    }
+
+    /// A single quote can't be escaped inside single quotes, so it has to close
+    /// the quoting, contribute an escaped `'`, and reopen.
+    #[test]
+    fn shell_quote_handles_a_quote_in_the_name() {
+        assert_eq!(shell_quote("it's"), r"'it'\''s'");
     }
 
     #[test]

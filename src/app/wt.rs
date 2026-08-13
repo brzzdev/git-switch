@@ -8,7 +8,7 @@ use indicatif::ProgressBar;
 use super::{
     Availability, CursorGuard, Pick, PickKind, PickerOptions, Risk, Section, Selection,
     build_sections, confirm, display_path, fetch_and_ff, handoff_cd, interactive_keys,
-    multi_select, pick, prompt_delete_stale_branches, report_update,
+    multi_select, pick, prompt_delete_stale_branches, report_update, shell_quote,
 };
 use crate::{AppResult, Error, git};
 
@@ -307,8 +307,9 @@ fn remove_one(dir: Option<&Path>, wt: &git::Worktree, risk: Risk, force: bool) -
                     }
                     git::BranchDeleteOutcome::NotMerged => eprintln!(
                         "{} {removed}, kept {branch} with unmerged commits \
-                         (run `git branch -D {branch}` to force-delete)",
+                         (run `git branch -D -- {}` to force-delete)",
                         style("!").yellow().bold(),
+                        shell_quote(branch),
                     ),
                     git::BranchDeleteOutcome::Failed(detail) => eprintln!(
                         "{} {removed}, could not delete {branch}: {detail}",
