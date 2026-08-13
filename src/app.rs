@@ -494,11 +494,19 @@ fn reconcile_diverged(branch: &str, remote: &str) -> AppResult<()> {
     eprintln!("Local branch has diverged from {remote_ref}.");
 
     if !confirm(&format!("Rebase onto {remote_ref}?"), false)? {
-        eprintln!("Run `git rebase {remote_ref}` or `git merge {remote_ref}` to reconcile.");
+        eprintln!("{}", reconcile_hint(&remote_ref));
         return Err(Error::Diverged);
     }
 
     rebase_onto(&remote_ref)
+}
+
+/// The hint left behind when the user declines the rebase and has to reconcile
+/// by hand. Kept apart from the printing so the wording can be tested without a
+/// repo on disk.
+fn reconcile_hint(remote_ref: &str) -> String {
+    let quoted = shell_quote(remote_ref);
+    format!("Run `git rebase -- {quoted}` or `git merge -- {quoted}` to reconcile.")
 }
 
 /// Rebase the current branch onto `remote_ref`, reporting an aborted rebase the
@@ -508,12 +516,20 @@ fn rebase_onto(remote_ref: &str) -> AppResult<()> {
     match git::rebase(remote_ref)? {
         git::RebaseOutcome::Clean => Ok(()),
         git::RebaseOutcome::Aborted => {
-            eprintln!(
-                "Rebase aborted due to conflicts. Run `git rebase {remote_ref}` manually to reconcile."
-            );
+            eprintln!("{}", aborted_rebase_hint(remote_ref));
             Err(Error::Diverged)
         }
     }
+}
+
+/// The hint left behind when a rebase conflicts and git puts the branch back
+/// where it was. Kept apart from the printing for the same reason as
+/// [`reconcile_hint`].
+fn aborted_rebase_hint(remote_ref: &str) -> String {
+    format!(
+        "Rebase aborted due to conflicts. Run `git rebase -- {}` manually to reconcile.",
+        shell_quote(remote_ref)
+    )
 }
 
 pub(crate) fn confirm(prompt: &str, default_yes: bool) -> AppResult<bool> {
@@ -1630,6 +1646,40 @@ mod tests {
             plain(&stale_outcome(&row, &git::BranchDeleteOutcome::NotMerged)),
             "! kept topic$(touch${IFS}/tmp/pwned) with unmerged commits \
              (run `git branch -D -- 'topic$(touch${IFS}/tmp/pwned)'` to force-delete)"
+        );
+    }
+
+    #[test]
+    fn reconcile_hint_names_both_ways_out() {
+        assert_eq!(
+            reconcile_hint("origin/main"),
+            "Run `git rebase -- origin/main` or `git merge -- origin/main` to reconcile."
+        );
+    }
+
+    #[test]
+    fn aborted_rebase_hint_points_back_at_the_upstream() {
+        assert_eq!(
+            aborted_rebase_hint("origin/main"),
+            "Rebase aborted due to conflicts. Run `git rebase -- origin/main` manually to reconcile."
+        );
+    }
+
+    /// Both hints are meant to be pasted into a shell, and git allows `$` and
+    /// backticks in a ref name — so the ref has to survive the paste as a
+    /// literal rather than running.
+    #[test]
+    fn the_reconcile_hints_quote_a_ref_that_could_run_as_a_command() {
+        let remote_ref = "origin/topic$(touch${IFS}/tmp/pwned)";
+        assert_eq!(
+            reconcile_hint(remote_ref),
+            "Run `git rebase -- 'origin/topic$(touch${IFS}/tmp/pwned)'` \
+             or `git merge -- 'origin/topic$(touch${IFS}/tmp/pwned)'` to reconcile."
+        );
+        assert_eq!(
+            aborted_rebase_hint(remote_ref),
+            "Rebase aborted due to conflicts. \
+             Run `git rebase -- 'origin/topic$(touch${IFS}/tmp/pwned)'` manually to reconcile."
         );
     }
 
