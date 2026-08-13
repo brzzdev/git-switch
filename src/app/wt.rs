@@ -8,7 +8,7 @@ use indicatif::ProgressBar;
 use super::{
     Availability, CursorGuard, Pick, PickKind, PickerOptions, Risk, Section, Selection,
     build_sections, confirm, display_path, fetch_and_ff, handoff_cd, interactive_keys,
-    multi_select, pick, prompt_delete_stale_branches, report_update, shell_quote,
+    multi_select, pick, prompt_delete_stale_branches, removal, report_update, shell_quote,
 };
 use crate::{AppResult, Error, git};
 
@@ -208,10 +208,11 @@ pub fn run_rm(target: Option<&str>, force: bool) -> AppResult<()> {
         env::set_current_dir(&main.path)?;
     }
 
+    // Delete from the same worktree the risk was judged in, so `-d`'s idea of
+    // merged matches the marker that licensed the removal.
+    let mut steps = removal::GitSteps::at_main(Some(&main.path));
     for &i in &selected_indices {
-        // Delete from the same worktree the risk was judged in, so `-d`'s idea
-        // of merged matches the marker that licensed the removal.
-        remove_one(Some(&main.path), &removable[i], risks[i], force)?;
+        remove_one(&mut steps, &removable[i], risks[i], force)?;
     }
 
     if cwd_will_vanish {
@@ -278,47 +279,35 @@ fn select_for_removal(
     })
 }
 
-/// Removes one worktree and, when it has a branch, deletes that too. Forcing is
-/// licensed only by the warning already given — a row marker in the picker, the
-/// confirmation for a named target, or an explicit `--force`. Anything that
-/// wasn't flagged keeps git's own guard, so a worktree that turns out to be
-/// dirty (or a branch that gained a commit) after the markers were built makes
-/// git refuse rather than destroying something unwarned.
-fn remove_one(dir: Option<&Path>, wt: &git::Worktree, risk: Risk, force: bool) -> AppResult<()> {
-    match git::worktree_remove(&wt.path, risk.dirty || force)? {
-        git::WorktreeRemoveOutcome::Removed => match wt.branch.as_deref() {
-            None => eprintln!(
-                "{} removed worktree at {}",
-                style("✓").green().bold(),
-                display_path(&wt.path)
-            ),
-            Some(branch) => {
-                let deleted = if risk.unmerged.is_some() || force {
-                    git::force_delete_branch(dir, branch)?
-                } else {
-                    git::delete_branch_if_merged(dir, branch)?
-                };
-                // Worded exactly as the stale-branch prompt words the same
-                // outcomes, so the answer doesn't depend on how you got here.
-                let removed = format!("removed worktree at {}", display_path(&wt.path));
-                match deleted {
-                    git::BranchDeleteOutcome::Deleted => {
-                        eprintln!("{} {removed}, deleted {branch}", style("✓").green().bold());
-                    }
-                    git::BranchDeleteOutcome::NotMerged => eprintln!(
-                        "{} {removed}, kept {branch} with unmerged commits \
-                         (run `git branch -D -- {}` to force-delete)",
-                        style("!").yellow().bold(),
-                        shell_quote(branch),
-                    ),
-                    git::BranchDeleteOutcome::Failed(detail) => eprintln!(
-                        "{} {removed}, could not delete {branch}: {detail}",
-                        style("!").yellow().bold(),
-                    ),
-                }
-            }
+/// Removes one worktree and, when it has a branch, deletes that too, then
+/// reports what happened. The ordering and the licensing rule belong to
+/// [`removal`]; the wording here matches the stale-branch prompt's for the same
+/// outcomes, so the answer doesn't depend on how you got here.
+fn remove_one(
+    steps: &mut impl removal::Steps,
+    wt: &git::Worktree,
+    risk: Risk,
+    force: bool,
+) -> AppResult<()> {
+    let target = match wt.branch.as_deref() {
+        Some(name) => removal::Target::Held {
+            name,
+            path: &wt.path,
         },
-        git::WorktreeRemoveOutcome::Failed(detail) => {
+        None => removal::Target::Worktree { path: &wt.path },
+    };
+    let license = if force {
+        removal::License::forced()
+    } else {
+        removal::License::shown(risk)
+    };
+    let report = removal::remove(target, license, steps)?;
+
+    // A worktree that refused took the branch step with it, so say why and stop.
+    // Matched exhaustively: a new outcome must be worded, not fall through to
+    // the removed line as though the worktree had gone.
+    match &report.worktree {
+        Some(git::WorktreeRemoveOutcome::Failed(detail)) => {
             match wt.branch.as_deref() {
                 Some(branch) => eprintln!(
                     "{} failed to remove the worktree at {}; leaving {branch} alone:",
@@ -334,7 +323,33 @@ fn remove_one(dir: Option<&Path>, wt: &git::Worktree, risk: Risk, force: bool) -
             for line in detail.lines() {
                 eprintln!("  {line}");
             }
+            return Ok(());
         }
+        // Every target here carries a worktree, so the step always ran.
+        Some(git::WorktreeRemoveOutcome::Removed) | None => {}
+    }
+
+    let removed = format!("removed worktree at {}", display_path(&wt.path));
+    // A detached worktree goes alone: there was no branch step to report.
+    let (Some(branch), Some(outcome)) = (wt.branch.as_deref(), &report.branch) else {
+        eprintln!("{} {removed}", style("✓").green().bold());
+        return Ok(());
+    };
+
+    match outcome {
+        git::BranchDeleteOutcome::Deleted => {
+            eprintln!("{} {removed}, deleted {branch}", style("✓").green().bold());
+        }
+        git::BranchDeleteOutcome::NotMerged => eprintln!(
+            "{} {removed}, kept {branch} with unmerged commits \
+             (run `git branch -D -- {}` to force-delete)",
+            style("!").yellow().bold(),
+            shell_quote(branch),
+        ),
+        git::BranchDeleteOutcome::Failed(detail) => eprintln!(
+            "{} {removed}, could not delete {branch}: {detail}",
+            style("!").yellow().bold(),
+        ),
     }
     Ok(())
 }

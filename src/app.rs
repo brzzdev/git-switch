@@ -6,6 +6,7 @@ use indicatif::ProgressBar;
 
 use crate::{AppResult, Error, git};
 
+pub(crate) mod removal;
 pub mod wt;
 
 pub(crate) struct CursorGuard(Term);
@@ -1119,8 +1120,10 @@ pub(crate) fn prompt_delete_stale_branches(
         )?
     };
 
+    // Delete from the main worktree, the same HEAD the risk was judged against.
+    let mut steps = removal::GitSteps::at_main(main_dir.as_deref());
     for &i in &selections {
-        delete_stale_row(main_dir.as_deref(), &rows[i])?;
+        delete_stale_row(&mut steps, &rows[i])?;
     }
 
     Ok(())
@@ -1183,40 +1186,45 @@ fn stale_label(row: &StaleRow) -> (String, String) {
     (row.branch.clone(), annotation)
 }
 
-/// Removes a ticked stale row: its worktree first (the branch can't be deleted
-/// while one holds it), then the branch. Every deletion reports itself, and a
-/// worktree that refuses to go — a locked one, say — leaves its branch alone.
-fn delete_stale_row(dir: Option<&Path>, row: &StaleRow) -> AppResult<()> {
-    if let Some(wt) = &row.worktree {
-        // Force only what the row actually warned about. An unmarked worktree
-        // that turns out to be dirty — it changed since the markers were built,
-        // or `worktree_dirty` couldn't read it and reported clean — must make
-        // git refuse rather than silently discard files nobody was warned of.
-        match git::worktree_remove(&wt.path, row.risk.dirty)? {
-            git::WorktreeRemoveOutcome::Removed => {}
-            git::WorktreeRemoveOutcome::Failed(detail) => {
+/// Removes a ticked stale row and reports what happened. The ordering, and the
+/// rule that only a shown marker licenses forcing, belong to [`removal`]; this
+/// is the wording.
+fn delete_stale_row(steps: &mut impl removal::Steps, row: &StaleRow) -> AppResult<()> {
+    let held_at = row.worktree.as_ref().map(|wt| wt.path.as_path());
+    let target = match held_at {
+        Some(path) => removal::Target::Held {
+            name: &row.branch,
+            path,
+        },
+        None => removal::Target::Branch { name: &row.branch },
+    };
+    let report = removal::remove(target, removal::License::shown(row.risk), steps)?;
+
+    // A worktree that refused took the branch step with it, so say why and stop.
+    // Matched exhaustively: a new outcome must be worded, not fall through to
+    // the branch line as though the worktree had gone.
+    match &report.worktree {
+        Some(git::WorktreeRemoveOutcome::Failed(detail)) => {
+            // Only a row with a worktree can have a worktree step at all.
+            if let Some(path) = held_at {
                 eprintln!(
                     "{} failed to remove the worktree at {}; leaving {} alone:",
                     style("!").yellow().bold(),
-                    display_path(&wt.path),
+                    display_path(path),
                     row.branch,
                 );
                 for line in detail.lines() {
                     eprintln!("  {line}");
                 }
-                return Ok(());
             }
+            return Ok(());
         }
+        Some(git::WorktreeRemoveOutcome::Removed) | None => {}
     }
 
-    // Likewise for the branch: `-D` only where an `↑` marker licensed it, so a
-    // branch that gained a commit since the markers were built fails safe.
-    let deleted = if row.risk.unmerged.is_some() {
-        git::force_delete_branch(dir, &row.branch)?
-    } else {
-        git::delete_branch_if_merged(dir, &row.branch)?
-    };
-    eprintln!("{}", stale_outcome(row, &deleted));
+    if let Some(outcome) = &report.branch {
+        eprintln!("{}", stale_outcome(row, outcome));
+    }
     Ok(())
 }
 

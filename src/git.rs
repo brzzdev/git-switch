@@ -723,6 +723,7 @@ fn is_stale_worktree_error(stderr: &str) -> bool {
     stderr.contains("already registered") || stderr.contains("used by worktree")
 }
 
+#[derive(Debug, Clone)]
 pub enum WorktreeRemoveOutcome {
     Removed,
     Failed(String),
@@ -785,6 +786,7 @@ pub fn force_delete_branch(dir: Option<&Path>, branch: &str) -> AppResult<Branch
     ))
 }
 
+#[derive(Debug, Clone)]
 pub enum BranchDeleteOutcome {
     Deleted,
     /// Kept because it has commits not merged into its upstream or HEAD.
