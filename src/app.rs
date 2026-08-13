@@ -29,15 +29,9 @@ impl Drop for CursorGuard {
 
 /// Source of key events for the interactive pickers. Abstracting input behind a
 /// trait lets the event loops be driven by a scripted sequence in tests; the
-/// real implementation just delegates to [`Term::read_key`].
+/// real implementation is [`TermKeys`].
 pub(crate) trait KeySource {
     fn read_key(&mut self) -> std::io::Result<Key>;
-}
-
-impl KeySource for Term {
-    fn read_key(&mut self) -> std::io::Result<Key> {
-        Term::read_key(self)
-    }
 }
 
 /// The real key source backing the interactive pickers. It holds the terminal in
