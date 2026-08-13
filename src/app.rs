@@ -1028,10 +1028,11 @@ impl Risk {
     }
 }
 
-/// A stale branch, together with the worktree holding it (if any) and what
-/// deleting it would destroy.
+/// A stale branch, together with the ground it is offered on, the worktree
+/// holding it (if any) and what deleting it would destroy.
 struct StaleRow {
     branch: String,
+    ground: git::Ground,
     worktree: Option<git::Worktree>,
     risk: Risk,
 }
@@ -1076,8 +1077,10 @@ pub(crate) fn prompt_delete_stale_branches(
     let Some(keys) = interactive_keys() else {
         return Ok(());
     };
+    let legend = risk_legend(&rows.iter().map(|r| r.risk).collect::<Vec<_>>());
     let selections = multi_select(
         "Delete stale branches (space to toggle, →/← all/none)",
+        legend.as_deref(),
         &items,
         &defaults,
         keys,
@@ -1096,7 +1099,7 @@ pub(crate) fn prompt_delete_stale_branches(
 /// it and what deleting it would destroy. `dirty` is injected so the rule can be
 /// tested without a repo on disk.
 fn stale_rows(
-    stale: Vec<String>,
+    stale: Vec<git::StaleBranch>,
     worktrees: &[git::Worktree],
     unmerged: &std::collections::HashMap<String, git::Unmerged>,
     destination: Option<&str>,
@@ -1104,17 +1107,18 @@ fn stale_rows(
 ) -> Vec<StaleRow> {
     stale
         .into_iter()
-        .filter(|branch| destination != Some(branch.as_str()))
-        .map(|branch| {
-            let worktree = git::worktree_for_branch(worktrees, &branch);
+        .filter(|b| destination != Some(b.name.as_str()))
+        .map(|b| {
+            let worktree = git::worktree_for_branch(worktrees, &b.name);
             let risk = Risk {
                 dirty: worktree
                     .as_ref()
                     .is_some_and(|w| !w.prunable && dirty(&w.path)),
-                unmerged: unmerged.get(&branch).copied(),
+                unmerged: unmerged.get(&b.name).copied(),
             };
             StaleRow {
-                branch,
+                branch: b.name,
+                ground: b.ground,
                 worktree,
                 risk,
             }
@@ -1122,10 +1126,42 @@ fn stale_rows(
         .collect()
 }
 
+/// Glosses the *Marker* glyphs these rows actually carry, or `None` where they
+/// carry none. Only what is on screen is explained: a legend for a glyph nobody
+/// can see is noise, and the common riskless list gets no legend at all. Grounds
+/// need no gloss — they are already words.
+pub(crate) fn risk_legend(risks: &[Risk]) -> Option<String> {
+    let mut parts = Vec::new();
+    if risks.iter().any(|r| r.dirty) {
+        parts.push(format!("{} uncommitted changes", marker::Marker::Dirty));
+    }
+    if risks.iter().any(|r| r.unmerged.is_some()) {
+        parts.push(format!(
+            "{} unmerged commits",
+            marker::Marker::Unmerged(None)
+        ));
+    }
+    (!parts.is_empty()).then(|| parts.join("   "))
+}
+
+/// The *Ground* a row is offered on, as the word the glossary uses. Dim, and
+/// deliberately not a [`marker::Marker`]: a ground warns of no loss, and per ADR
+/// 0001 only a marker licenses forcing. See [ADR
+/// 0003](../../docs/adr/0003-a-ground-is-not-a-marker.md).
+fn ground_label(ground: git::Ground) -> String {
+    let word = match ground {
+        git::Ground::Gone => "gone",
+        git::Ground::Landed => "landed",
+    };
+    style(word).dim().to_string()
+}
+
 /// The picker row for a stale branch, as a (name, annotation) pair for
-/// [`align_labels`]. Dirtiness belongs to the worktree so it sits inside the
-/// parentheses; unmerged commits belong to the branch so they sit outside. The
-/// worktree's path is deliberately absent — it appears in the outcome line.
+/// [`align_labels`]. The ground leads, answering why the row is here at all;
+/// the risks follow, answering what deleting it would cost. Dirtiness belongs to
+/// the worktree so it sits inside the parentheses; unmerged commits belong to
+/// the branch so they sit outside. The worktree's path is deliberately absent —
+/// it appears in the outcome line.
 fn stale_label(row: &StaleRow) -> (String, String) {
     let worktree = match &row.worktree {
         None => String::new(),
@@ -1140,7 +1176,7 @@ fn stale_label(row: &StaleRow) -> (String, String) {
         ..row.risk
     });
 
-    let annotation = [worktree, branch_risk]
+    let annotation = [ground_label(row.ground), worktree, branch_risk]
         .into_iter()
         .filter(|p| !p.is_empty())
         .collect::<Vec<_>>()
@@ -1270,10 +1306,14 @@ fn render_line(line: &str) {
     eprint!("{line}\r\n");
 }
 
-/// The multi-select picker. `keys` is taken by value for the same reason as
-/// [`pick`]: raw mode ends with the call, not with the caller's scope.
+/// The multi-select picker. `legend` is an optional dim line under the prompt,
+/// for glossing anything in the rows that isn't self-explanatory; callers pass
+/// `None` where nothing needs it, so a plain list stays plain. `keys` is taken
+/// by value for the same reason as [`pick`]: raw mode ends with the call, not
+/// with the caller's scope.
 pub(crate) fn multi_select(
     prompt: &str,
+    legend: Option<&str>,
     items: &[String],
     defaults: &[bool],
     mut keys: impl KeySource,
@@ -1282,6 +1322,7 @@ pub(crate) fn multi_select(
     let mut selected = defaults.to_vec();
     let mut cursor = 0usize;
     let header = format!("{} {}", style("?").green().bold(), style(prompt).bold());
+    let legend = legend.map(|l| format!("  {}", style(l).dim()));
 
     let _cursor_guard = CursorGuard::hide();
 
@@ -1290,6 +1331,10 @@ pub(crate) fn multi_select(
         let (height, width) = (rows_term as usize, cols_term as usize);
         let mut rows = visual_rows(&header, width);
         render_line(&header);
+        if let Some(legend) = &legend {
+            rows += visual_rows(legend, width);
+            render_line(legend);
+        }
 
         // Scroll a window of items around the cursor and reserve a trailing line
         // of headroom, so a long list never overflows the screen and scrolls the
@@ -1476,7 +1521,7 @@ mod tests {
 
     fn run_multi_select(items: &[&str], defaults: &[bool], keys: Vec<Key>) -> Vec<usize> {
         let items: Vec<String> = items.iter().map(|s| (*s).to_string()).collect();
-        multi_select("Test", &items, defaults, ScriptedKeys::new(keys))
+        multi_select("Test", None, &items, defaults, ScriptedKeys::new(keys))
             .expect("multi_select should not error")
     }
 
@@ -1518,12 +1563,27 @@ mod tests {
         assert!(got.is_empty());
     }
 
+    /// A row stale on the *Landed* ground, which the label tests take as given
+    /// so they can hold the risk half still — `ground_label_names_each_ground`
+    /// covers the other one.
     fn stale_row(branch: &str, worktree: Option<git::Worktree>, risk: Risk) -> StaleRow {
         StaleRow {
             branch: branch.to_string(),
+            ground: git::Ground::Landed,
             worktree,
             risk,
         }
+    }
+
+    /// Builds the input `stale_rows` now takes, all on one ground.
+    fn landed(names: &[&str]) -> Vec<git::StaleBranch> {
+        names
+            .iter()
+            .map(|n| git::StaleBranch {
+                ground: git::Ground::Landed,
+                name: (*n).to_string(),
+            })
+            .collect()
     }
 
     fn worktree(prunable: bool) -> git::Worktree {
@@ -1594,12 +1654,20 @@ mod tests {
         assert_eq!(shell_quote("it's"), r"'it'\''s'");
     }
 
+    /// The ground is on every row: a branch with nothing at stake still owes the
+    /// user an answer to "why is this being offered at all?".
     #[test]
-    fn stale_label_without_worktree_is_bare() {
+    fn stale_label_without_worktree_carries_only_its_ground() {
         let row = stale_row("fix/typo", None, Risk::default());
         let (name, annotation) = stale_label(&row);
         assert_eq!(name, "fix/typo");
-        assert!(annotation.is_empty(), "got: {annotation}");
+        assert_eq!(plain(&annotation), "landed");
+    }
+
+    #[test]
+    fn ground_label_names_each_ground() {
+        assert_eq!(plain(&ground_label(git::Ground::Gone)), "gone");
+        assert_eq!(plain(&ground_label(git::Ground::Landed)), "landed");
     }
 
     #[test]
@@ -1612,19 +1680,20 @@ mod tests {
                 unmerged: None,
             },
         );
-        assert_eq!(plain(&stale_label(&row).1), "(+ worktree ●)");
+        assert_eq!(plain(&stale_label(&row).1), "landed (+ worktree ●)");
     }
 
     #[test]
     fn stale_label_marks_a_missing_worktree() {
         let row = stale_row("old/thing", Some(worktree(true)), Risk::default());
-        assert_eq!(plain(&stale_label(&row).1), "(+ worktree, missing)");
+        assert_eq!(plain(&stale_label(&row).1), "landed (+ worktree, missing)");
     }
 
-    /// Dirtiness belongs to the worktree, unmerged commits to the branch — so
-    /// one sits inside the parentheses and the other outside.
+    /// The ground leads — why the row is here — and the risks follow: what it
+    /// would cost. Dirtiness belongs to the worktree, unmerged commits to the
+    /// branch, so one sits inside the parentheses and the other outside.
     #[test]
-    fn stale_label_puts_unmerged_outside_the_parens() {
+    fn stale_label_leads_with_the_ground_then_the_risks() {
         let row = stale_row(
             "spike/abandoned",
             Some(worktree(false)),
@@ -1633,7 +1702,39 @@ mod tests {
                 unmerged: Some(git::Unmerged::Ahead(2)),
             },
         );
-        assert_eq!(plain(&stale_label(&row).1), "(+ worktree ●) ↑2");
+        assert_eq!(plain(&stale_label(&row).1), "landed (+ worktree ●) ↑2");
+    }
+
+    /// Grounds are words already, so the legend glosses only glyphs — and only
+    /// the glyphs some row actually carries.
+    #[test]
+    fn risk_legend_glosses_only_the_glyphs_on_screen() {
+        let dirty = Risk {
+            dirty: true,
+            unmerged: None,
+        };
+        let unmerged = Risk {
+            dirty: false,
+            unmerged: Some(git::Unmerged::Ahead(2)),
+        };
+        assert_eq!(
+            risk_legend(&[dirty]).as_deref().map(plain).as_deref(),
+            Some("● uncommitted changes")
+        );
+        assert_eq!(
+            risk_legend(&[unmerged]).as_deref().map(plain).as_deref(),
+            Some("↑ unmerged commits")
+        );
+        assert_eq!(
+            risk_legend(&[dirty, unmerged]).as_deref().map(plain),
+            Some("● uncommitted changes   ↑ unmerged commits".to_string())
+        );
+    }
+
+    /// The common case is a list with nothing at stake, which earns no legend.
+    #[test]
+    fn risk_legend_is_absent_when_nothing_is_at_risk() {
+        assert!(risk_legend(&[Risk::default(), Risk::default()]).is_none());
     }
 
     /// Nothing to lose is what lets a removal skip the prompt entirely, so the
@@ -1662,7 +1763,7 @@ mod tests {
     #[test]
     fn stale_rows_never_offer_the_handoff_destination() {
         let worktrees = vec![named_worktree("feature", "/tmp/wt")];
-        let stale = vec!["feature".to_string(), "fix/typo".to_string()];
+        let stale = landed(&["feature", "fix/typo"]);
         let rows = stale_rows(
             stale,
             &worktrees,
@@ -1676,7 +1777,7 @@ mod tests {
     #[test]
     fn stale_rows_without_a_destination_offer_everything() {
         let worktrees = vec![named_worktree("feature", "/tmp/wt")];
-        let stale = vec!["feature".to_string(), "fix/typo".to_string()];
+        let stale = landed(&["feature", "fix/typo"]);
         let rows = stale_rows(
             stale,
             &worktrees,
@@ -1691,7 +1792,7 @@ mod tests {
     fn stale_rows_flag_a_dirty_held_worktree() {
         let worktrees = vec![named_worktree("feature", "/tmp/wt")];
         let rows = stale_rows(
-            vec!["feature".to_string()],
+            landed(&["feature"]),
             &worktrees,
             &std::collections::HashMap::new(),
             None,

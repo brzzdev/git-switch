@@ -11,8 +11,12 @@ The ref staleness is judged against: the local default branch, or its remote cou
 _Avoid_: Mainline, main line, HEAD, trunk
 
 **Stale**:
-A branch that has outlived its purpose — its work has landed on the anchor, or its upstream has been deleted. Topology cannot show landing, since a branch cut from the anchor looks exactly like one the anchor absorbed, so it is read from what the branch *tracks*: either it tracks the anchor's counterpart while *ahead* of it, or it tracks nothing and its tip is *behind* the anchor. Neither applies to a branch published under a name of its own, which waits for its upstream to be deleted. Both are proxies: a branch cut from an anchor that was already ahead or behind borrows that position and is offered though it holds nothing. Staleness is what qualifies a branch for the cleanup prompt; it says nothing about whether deleting it is safe.
+A branch that has outlived its purpose — its work has landed on the anchor, or its upstream has been deleted. Topology cannot show landing, since a branch cut from the anchor looks exactly like one the anchor absorbed, so it is read from what the branch *tracks*: either it tracks the anchor's counterpart while *ahead* of it, or it tracks nothing and its tip is *behind* the anchor. Neither applies to a branch published under a name of its own, which waits for its upstream to be deleted. Both are proxies: a branch cut from an anchor that was already ahead or behind borrows that position and is offered though it holds nothing. Staleness is what qualifies a branch for the cleanup prompt; which clause did it is the branch's *Ground*. It says nothing about whether deleting it is safe.
 _Avoid_: Dead, old, obsolete
+
+**Ground**:
+Which of *Stale*'s two clauses put a branch on the cleanup prompt: *Landed*, its work absorbed by the anchor, or *Gone*, its upstream deleted. The two never overlap — a deleted upstream is read first, and a branch whose upstream is gone is never asked whether it landed. A ground is not a *Risk*: it says why a branch is offered, never what deleting it would destroy, so it is written as a word and never drawn as a *Marker*. See [ADR 0003](./docs/adr/0003-a-ground-is-not-a-marker.md).
+_Avoid_: Reason, cause, merged (reserved for topology, which staleness deliberately does not read)
 
 **Unmerged**:
 Holding commits that `git branch -d` would refuse to discard. Git's rule is *"fully merged in its upstream branch, or in HEAD if no upstream was set"* — alternatives, not a pair: where an upstream exists it alone decides, so a branch merged into HEAD but ahead of its upstream is still unmerged. A branch can be both stale and unmerged: work merged into the anchor locally, before the anchor was pushed.
