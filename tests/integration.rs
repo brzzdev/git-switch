@@ -57,12 +57,30 @@ fn git(dir: &Path, args: &[&str]) -> Output {
     output
 }
 
+/// Hooks come from git config, which layers in the developer's global file, so
+/// suppress them everywhere: a machine with `git-switch.hook.created` set would
+/// otherwise run it throughout the suite. The hook tests use
+/// [`git_switch_hooked`].
 fn git_switch_args(dir: &Path, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_git-switch"))
-        .args(args)
-        .current_dir(dir)
+    git_switch_command(dir, args)
+        .env("GIT_SWITCH_NO_HOOKS", "1")
         .output()
         .expect("failed to run git-switch")
+}
+
+/// Like [`git_switch_args`], but with hooks left on — for the tests that
+/// configure one in the repo under test.
+fn git_switch_hooked(dir: &Path, args: &[&str]) -> Output {
+    git_switch_command(dir, args)
+        .env_remove("GIT_SWITCH_NO_HOOKS")
+        .output()
+        .expect("failed to run git-switch")
+}
+
+fn git_switch_command(dir: &Path, args: &[&str]) -> Command {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_git-switch"));
+    cmd.args(args).current_dir(dir);
+    cmd
 }
 
 fn git_switch(dir: &Path, branch: &str) -> Output {
@@ -1953,5 +1971,238 @@ fn stale_deletion_outcomes_are_not_printed_in_raw_mode() {
     assert_eq!(
         staircased, 0,
         "every newline written to a tty must be CRLF; got: {text}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Worktree hooks
+// ---------------------------------------------------------------------------
+
+/// The payload a hook is handed, from both creation arms and from a removal,
+/// each firing exactly once for the worktree it describes.
+#[test]
+fn wt_hooks_report_each_creation_and_removal_once() {
+    let (_bare, parent, work) = setup_with_parent();
+
+    let log = parent.path().join("hook.log");
+    let script = format!(
+        "printf '%s|%s|%s|%s|%s\\n' \"$GIT_SWITCH_EVENT\" \"$GIT_SWITCH_BRANCH\" \
+         \"$GIT_SWITCH_MAIN\" \"$GIT_SWITCH_WORKTREE\" \"$(pwd -P)\" >> '{}'",
+        log.display()
+    );
+    git(&work, &["config", "git-switch.hook.created", &script]);
+    git(&work, &["config", "git-switch.hook.removed", &script]);
+
+    // An existing branch and a new one take different creation arms; both are
+    // creations as far as a hook is concerned.
+    git(&work, &["branch", "feature"]);
+    for args in [
+        ["wt", "feature"].as_slice(),
+        ["wt", "brand-new"].as_slice(),
+        ["wt", "rm", "feature", "--force"].as_slice(),
+    ] {
+        let output = git_switch_hooked(&work, args);
+        assert!(
+            output.status.success(),
+            "`{}` failed: {}",
+            args.join(" "),
+            stderr_str(&output)
+        );
+    }
+
+    // Git reports resolved paths, so compare against resolved ones — on macOS
+    // a TempDir under /var is really /private/var.
+    let main = work.canonicalize().unwrap();
+    let worktrees = main.parent().unwrap().join("worktrees").join("repo");
+    let line = |event: &str, branch: &str| {
+        format!(
+            "{event}|{branch}|{}|{}|{}",
+            main.display(),
+            worktrees.join(branch).display(),
+            main.display()
+        )
+    };
+
+    let logged = fs::read_to_string(&log).unwrap();
+    assert_eq!(
+        logged.lines().collect::<Vec<_>>(),
+        vec![
+            line("created", "feature"),
+            line("created", "brand-new"),
+            line("removed", "feature"),
+        ],
+        "each event fires once, from the main worktree, with the full payload"
+    );
+}
+
+/// A hook is told, never asked: one that fails is warned about and otherwise
+/// ignored, and its stderr reaches the user untouched.
+#[test]
+fn a_failing_wt_hook_leaves_the_worktree_and_the_handoff_intact() {
+    let (_bare, parent, work) = setup_with_parent();
+
+    git(
+        &work,
+        &[
+            "config",
+            "git-switch.hook.created",
+            "echo 'hook says no' >&2; exit 3",
+        ],
+    );
+
+    let output = git_switch_hooked(&work, &["wt", "feature"]);
+    assert!(
+        output.status.success(),
+        "a failing hook must not fail the command; stderr: {}",
+        stderr_str(&output)
+    );
+
+    let expected = parent.path().join("worktrees").join("repo").join("feature");
+    assert!(
+        expected.exists(),
+        "worktree should exist at {}",
+        expected.display()
+    );
+    assert!(
+        stdout_str(&output).trim().ends_with("repo/feature"),
+        "stdout should still be the worktree path; got: {}",
+        stdout_str(&output)
+    );
+    assert!(
+        stderr_str(&output).contains("hook says no"),
+        "hook stderr should pass through; got: {}",
+        stderr_str(&output)
+    );
+    assert!(
+        stderr_str(&output).contains("created hook exited 3"),
+        "a non-zero exit should be warned about; got: {}",
+        stderr_str(&output)
+    );
+}
+
+/// The shell wrapper reads the destination path off stdout, so a hook that
+/// talks is diverted to stderr rather than being allowed to send the user
+/// somewhere absurd.
+#[test]
+fn a_chatty_wt_hook_cannot_corrupt_the_handoff() {
+    let (_bare, _parent, work) = setup_with_parent();
+
+    git(
+        &work,
+        &["config", "git-switch.hook.created", "echo /somewhere/else"],
+    );
+
+    let output = git_switch_hooked(&work, &["wt", "feature"]);
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+
+    let stdout = stdout_str(&output);
+    let printed: Vec<&str> = stdout.lines().collect();
+    assert_eq!(
+        printed.len(),
+        1,
+        "stdout should carry the handoff path alone; got: {stdout}"
+    );
+    assert!(
+        printed[0].ends_with("repo/feature"),
+        "stdout should be the worktree path; got: {}",
+        printed[0]
+    );
+    assert!(
+        stderr_str(&output).contains("/somewhere/else"),
+        "hook stdout should be re-emitted on stderr; got: {}",
+        stderr_str(&output)
+    );
+}
+
+/// A stale branch held by a worktree takes that worktree with it, which is as
+/// much a removal as `wt rm` is — so the hook fires there too. Without it,
+/// `git-switch wt <branch>` could announce a creation and then silently destroy
+/// a different worktree in the same breath. The prompt is interactive, so this
+/// drives it over a real pty.
+#[test]
+fn a_stale_branch_taking_its_worktree_fires_the_removal_hook() {
+    use portable_pty::{CommandBuilder, PtySize, native_pty_system};
+    use std::io::{Read, Write};
+    use std::sync::Arc;
+
+    let (_bare, work) = setup();
+
+    // Published, then its upstream deleted: stale, and holding a commit of its
+    // own so the row carries a marker that licenses deleting it.
+    git(work.path(), &["checkout", "-b", "wip"]);
+    fs::write(work.path().join("wip.txt"), "x\n").unwrap();
+    git(work.path(), &["add", "wip.txt"]);
+    git(work.path(), &["commit", "-m", "wip"]);
+    git(work.path(), &["push", "-u", "origin", "wip"]);
+    git(work.path(), &["push", "origin", "--delete", "wip"]);
+    git(work.path(), &["checkout", "main"]);
+    git(work.path(), &["fetch", "--prune", "origin"]);
+    git(work.path(), &["branch", "dest", "main"]);
+
+    let parent = TempDir::new().unwrap();
+    let worktree = parent.path().join("wt");
+    git(
+        work.path(),
+        &["worktree", "add", worktree.to_str().unwrap(), "wip"],
+    );
+
+    let log = parent.path().join("hook.log");
+    let script = format!(
+        "printf '%s|%s|%s\\n' \"$GIT_SWITCH_EVENT\" \"$GIT_SWITCH_BRANCH\" \
+         \"$GIT_SWITCH_WORKTREE\" >> '{}'",
+        log.display()
+    );
+    git(work.path(), &["config", "git-switch.hook.removed", &script]);
+
+    let pty = native_pty_system()
+        .openpty(PtySize::default())
+        .expect("failed to open pty");
+    let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_git-switch"));
+    cmd.arg("dest");
+    cmd.cwd(work.path());
+    let mut child = ChildGuard(pty.slave.spawn_command(cmd).expect("failed to spawn"));
+    drop(pty.slave);
+
+    let mut reader = pty.master.try_clone_reader().unwrap();
+    let mut writer = pty.master.take_writer().unwrap();
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let collected = Arc::clone(&seen);
+    let output = std::thread::spawn(move || {
+        let mut chunk = [0u8; 1024];
+        while let Ok(n) = reader.read(&mut chunk) {
+            if n == 0 {
+                break;
+            }
+            collected.lock().unwrap().extend_from_slice(&chunk[..n]);
+        }
+    });
+
+    // Tick the row and confirm, each key waiting for the redraw that proves the
+    // last one landed.
+    wait_for(&seen, "[ ] wip");
+    writer.write_all(b"\x1b[C").unwrap();
+    writer.flush().unwrap();
+    wait_for(&seen, "[x] wip");
+    writer.write_all(b"\r").unwrap();
+    writer.flush().unwrap();
+
+    child.wait_bounded();
+    drop(writer);
+    drop(pty.master);
+    output.join().unwrap();
+
+    assert!(
+        !worktree.exists(),
+        "the held worktree should be gone: {}",
+        worktree.display()
+    );
+    // Resolve through the parent: the worktree itself is gone by now, and git
+    // reports the path it resolved (on macOS, /private/var for a /var TempDir).
+    let resolved = parent.path().canonicalize().unwrap().join("wt");
+    let logged = fs::read_to_string(&log).unwrap_or_default();
+    assert_eq!(
+        logged.trim(),
+        format!("removed|wip|{}", resolved.display()),
+        "the stale prompt should report the worktree it removed; got: {logged}"
     );
 }

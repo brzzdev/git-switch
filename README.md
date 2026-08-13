@@ -173,6 +173,28 @@ git config --add git-switch.keep develop
 git config --add git-switch.keep staging
 ```
 
+### Worktree hooks
+
+Run a shell command when a worktree is created or removed — to open it in an editor, register it with a session manager, or forget it again when it goes:
+
+```sh
+git config git-switch.hook.created 'my-editor open "$GIT_SWITCH_WORKTREE"'
+git config git-switch.hook.removed 'my-editor forget "$GIT_SWITCH_WORKTREE"'
+```
+
+Each command runs via `sh -c` from the main checkout, with:
+
+| Variable | Value |
+| -------- | ----- |
+| `GIT_SWITCH_BRANCH` | The worktree's branch, empty for a detached one |
+| `GIT_SWITCH_EVENT` | `created` or `removed` |
+| `GIT_SWITCH_MAIN` | Absolute path of the main checkout |
+| `GIT_SWITCH_WORKTREE` | Absolute path of the worktree the event is about |
+
+`created` fires the moment the worktree exists, before the stale-branch prompt. `removed` fires once per worktree, only after one is actually gone — so the path it names no longer exists on disk. Both cover every route: `removed` fires for a worktree taken along by the stale-branch cleanup just as it does for `wt rm`, since a hook mirrors what happened to the repo rather than which command you typed.
+
+A hook is told what happened; it is never asked. It cannot refuse a removal or license a forcing, and a non-zero exit is warned about and otherwise ignored. Its stdout is re-emitted on stderr, since stdout carries the path the shell wrapper `cd`s into; its stderr passes through. Set `GIT_SWITCH_NO_HOOKS=1` — or any non-empty value — to turn hooks off for a run. See [ADR 0003](docs/adr/0003-hooks-are-told-never-asked.md) for the reasoning.
+
 ## License
 
 MIT — see [LICENSE](LICENSE).
