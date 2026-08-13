@@ -87,6 +87,15 @@ pub(crate) struct Report<'a> {
     pub(crate) branch: Option<git::BranchDeleteOutcome>,
 }
 
+impl Report<'_> {
+    /// Whether the worktree itself went. False covers both a target that never
+    /// had one and one git refused to remove — in either case there is no
+    /// directory to report gone.
+    pub(crate) fn worktree_removed(&self) -> bool {
+        matches!(self.worktree, Some(git::WorktreeRemoveOutcome::Removed))
+    }
+}
+
 /// The two git operations a removal performs. Putting them behind a trait lets
 /// the ordering and licensing rules be driven by scripted outcomes in tests,
 /// exactly as the key source drives the interactive pickers; [`GitSteps`] is the
@@ -157,7 +166,7 @@ pub(crate) fn remove<'a>(
 
     if let Some(path) = target.path() {
         report.worktree = Some(steps.remove_worktree(path, license.worktree)?);
-        if !matches!(report.worktree, Some(git::WorktreeRemoveOutcome::Removed)) {
+        if !report.worktree_removed() {
             return Ok(report);
         }
     }

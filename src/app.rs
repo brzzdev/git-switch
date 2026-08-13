@@ -6,6 +6,7 @@ use indicatif::ProgressBar;
 
 use crate::{AppResult, Error, git};
 
+pub(crate) mod hook;
 pub(crate) mod marker;
 pub(crate) mod removal;
 pub(crate) mod reporting;
@@ -1085,7 +1086,7 @@ pub(crate) fn prompt_delete_stale_branches(
     // Delete from the main worktree, the same HEAD the risk was judged against.
     let mut steps = removal::GitSteps::at_main(main_dir.as_deref());
     for &i in &selections {
-        delete_stale_row(&mut steps, &rows[i])?;
+        delete_stale_row(&mut steps, &rows[i], main_dir.as_deref())?;
     }
 
     Ok(())
@@ -1150,8 +1151,15 @@ fn stale_label(row: &StaleRow) -> (String, String) {
 /// Removes a ticked stale row and prints what happened. The ordering, and the
 /// rule that only a shown marker licenses forcing, belong to [`removal`]; the
 /// wording belongs to [`reporting`]. This is what's left: which target the row
-/// describes.
-fn delete_stale_row(steps: &mut impl removal::Steps, row: &StaleRow) -> AppResult<()> {
+/// describes, and telling the [`hook`] about a worktree that went with it — a
+/// held stale branch takes its worktree along, which is as much a removal as
+/// `wt rm` is. A hook mirrors what happened to the repo, not which command you
+/// happened to type.
+fn delete_stale_row(
+    steps: &mut impl removal::Steps,
+    row: &StaleRow,
+    main: Option<&Path>,
+) -> AppResult<()> {
     let target = match &row.worktree {
         Some(wt) => removal::Target::Held {
             name: &row.branch,
@@ -1163,6 +1171,15 @@ fn delete_stale_row(steps: &mut impl removal::Steps, row: &StaleRow) -> AppResul
 
     for line in reporting::removal_outcome(&report) {
         eprintln!("{line}");
+    }
+
+    // Only where a worktree was really there and really went. `main` is the
+    // worktree the deletes ran from, and the one a hook is run from.
+    if let Some(wt) = &row.worktree
+        && report.worktree_removed()
+        && let Some(main) = main
+    {
+        hook::fire(hook::Event::Removed, &wt.path, Some(&row.branch), main);
     }
     Ok(())
 }

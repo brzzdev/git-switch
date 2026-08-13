@@ -7,8 +7,8 @@ use indicatif::ProgressBar;
 
 use super::{
     Availability, CursorGuard, Pick, PickKind, PickerOptions, Risk, Section, Selection,
-    build_sections, confirm, display_path, fetch_and_ff, handoff_cd, interactive_keys, marker,
-    multi_select, pick, prompt_delete_stale_branches, removal, report_update, reporting,
+    build_sections, confirm, display_path, fetch_and_ff, handoff_cd, hook, interactive_keys,
+    marker, multi_select, pick, prompt_delete_stale_branches, removal, report_update, reporting,
 };
 use crate::{AppResult, Error, git};
 
@@ -75,6 +75,10 @@ pub fn run(target: Option<&str>) -> AppResult<()> {
         }
     };
 
+    // `create_worktree` has already fired the created hook, before the prompt
+    // below: that prompt is interactive and an interrupt propagates as an
+    // error, so a hook after it would never run on Ctrl-C — stranding a
+    // worktree nothing was told about.
     if let Err(e) = prompt_delete_stale_branches(None, Some(&target_branch), &remote) {
         if e.is_interrupt() {
             return Err(e);
@@ -196,7 +200,20 @@ pub fn run_rm(target: Option<&str>, force: bool) -> AppResult<()> {
     // merged matches the marker that licensed the removal.
     let mut steps = removal::GitSteps::at_main(Some(&main.path));
     for &i in &selected_indices {
-        remove_one(&mut steps, &removable[i], risks[i], force)?;
+        let wt = &removable[i];
+        // Once per worktree and only where it actually went: a hook told about
+        // a removal git refused would be describing something still on disk.
+        // It fires after the branch delete rather than between the two steps,
+        // so the repo a hook shells into is the one the removal leaves behind
+        // — `GIT_SWITCH_BRANCH` names a branch that has already gone with it.
+        if remove_one(&mut steps, wt, risks[i], force)? {
+            hook::fire(
+                hook::Event::Removed,
+                &wt.path,
+                wt.branch.as_deref(),
+                &main.path,
+            );
+        }
     }
 
     if cwd_will_vanish {
@@ -267,12 +284,15 @@ fn select_for_removal(
 /// what happened. The ordering and the licensing rule belong to [`removal`], the
 /// wording to [`reporting`] — which is what makes the answer here word for word
 /// the stale-branch prompt's, so it doesn't depend on how you got here.
+///
+/// Returns whether the worktree itself went. Git refusing is an outcome rather
+/// than an error, so the caller can't read that off the `Result`.
 fn remove_one(
     steps: &mut impl removal::Steps,
     wt: &git::Worktree,
     risk: Risk,
     force: bool,
-) -> AppResult<()> {
+) -> AppResult<bool> {
     let target = match wt.branch.as_deref() {
         Some(name) => removal::Target::Held {
             name,
@@ -290,7 +310,7 @@ fn remove_one(
     for line in reporting::removal_outcome(&report) {
         eprintln!("{line}");
     }
-    Ok(())
+    Ok(report.worktree_removed())
 }
 
 /// Fetch + fast-forward `branch` in the worktree at `path`. Unlike the in-place
@@ -313,6 +333,10 @@ pub(crate) fn update_in(path: &Path, branch: &str, remote: &str) -> AppResult<()
     Ok(())
 }
 
+/// Creates the worktree for `branch` and reports it — to the user, and to the
+/// created hook. Every worktree `git-switch` creates comes through here, which
+/// is what makes the hook a consequence of creation and of nothing else rather
+/// than a line each creation arm has to remember.
 fn create_worktree(
     main_path: &Path,
     branch: &str,
@@ -351,6 +375,7 @@ fn create_worktree(
             path.display()
         );
     }
+    hook::fire(hook::Event::Created, &path, Some(branch), main_path);
     Ok(path)
 }
 

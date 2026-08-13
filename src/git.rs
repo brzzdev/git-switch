@@ -490,6 +490,22 @@ pub fn pinned_branches(remote: &str) -> Vec<String> {
     out
 }
 
+/// The shell command configured as `git-switch.hook.<event>`, or `None` when
+/// it's unset or blank. Read straight from git config like `git-switch.keep`,
+/// so a global hook and a per-repo override layer the way git says they do —
+/// `--get` yields the last value, and last wins.
+#[must_use]
+pub fn hook_command(event: &str) -> Option<String> {
+    let key = format!("git-switch.hook.{event}");
+    let output = run(&["config", "--get", &key]).ok()?;
+    let command = output.trim();
+    if command.is_empty() {
+        None
+    } else {
+        Some(command.to_string())
+    }
+}
+
 #[must_use]
 pub(crate) fn default_branch(remote: &str) -> Option<String> {
     let head_ref = format!("refs/remotes/{remote}/HEAD");
