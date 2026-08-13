@@ -71,3 +71,9 @@ _Avoid_: Here, current, self
 **Handoff**:
 Printing a directory to stdout for the shell wrapper to `cd` into, since a process cannot change its parent's working directory.
 _Avoid_: Jump, teleport, redirect
+
+### Hooks
+
+**Hook**:
+A user command run after a worktree is created or removed. A hook is told what happened; it is never asked. It cannot refuse a *Removal*, grant a *License*, or change anything git-switch does — one that fails is reported and ignored. See [ADR 0003](./docs/adr/0003-hooks-are-told-never-asked.md).
+_Avoid_: Callback, plugin, trigger, integration
