@@ -5,10 +5,13 @@ use std::path::{Path, PathBuf};
 use console::{measure_text_width, style};
 use indicatif::ProgressBar;
 
+use super::picker::{
+    Availability, Pick, PickKind, PickerOptions, Section, Selection, align_labels,
+    interactive_keys, multi_select, pick,
+};
 use super::{
-    Availability, CursorGuard, Pick, PickKind, PickerOptions, Risk, Section, Selection,
-    build_sections, confirm, display_path, fetch_and_ff, handoff_cd, hook, interactive_keys,
-    marker, multi_select, pick, prompt_delete_stale_branches, removal, report_update, reporting,
+    CursorGuard, Risk, build_sections, confirm, display_path, fetch_and_ff, handoff_cd, hook,
+    marker, prompt_delete_stale_branches, removal, report_update, reporting,
 };
 use crate::{AppResult, Error, git};
 
@@ -237,7 +240,7 @@ fn select_for_removal(
         let Some(keys) = interactive_keys() else {
             return Ok(vec![]);
         };
-        let items = super::align_labels(
+        let items = align_labels(
             &removable
                 .iter()
                 .enumerate()

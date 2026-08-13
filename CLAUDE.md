@@ -25,3 +25,8 @@ The five canonical roles, each label string equal to its name. See `docs/agents/
 ### Domain docs
 
 Single-context: `CONTEXT.md` and `docs/adr/` at the repo root. See `docs/agents/domain.md`.
+
+### Research notes
+
+Findings from investigating a question go in `docs/research/`, one file per question, styled like
+the ADRs. Cite files, not line numbers — line numbers rot the moment the code moves.
