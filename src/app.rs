@@ -1180,10 +1180,10 @@ fn delete_stale_row(dir: Option<&Path>, row: &StaleRow) -> AppResult<()> {
             git::WorktreeRemoveOutcome::Removed => {}
             git::WorktreeRemoveOutcome::Failed(detail) => {
                 eprintln!(
-                    "{} kept {}: could not remove its worktree at {}",
+                    "{} failed to remove the worktree at {}; leaving {} alone:",
                     style("!").yellow().bold(),
+                    display_path(&wt.path),
                     row.branch,
-                    display_path(&wt.path)
                 );
                 for line in detail.lines() {
                     eprintln!("  {line}");
@@ -1200,27 +1200,58 @@ fn delete_stale_row(dir: Option<&Path>, row: &StaleRow) -> AppResult<()> {
     } else {
         git::delete_branch_if_merged(dir, &row.branch)?
     };
-    match (deleted, &row.worktree) {
-        (git::BranchDeleteOutcome::Deleted, None) => {
-            eprintln!("{} deleted {}", style("✓").green().bold(), row.branch);
-        }
-        (git::BranchDeleteOutcome::Deleted, Some(wt)) => {
-            eprintln!(
-                "{} removed worktree {}, deleted {}",
-                style("✓").green().bold(),
-                display_path(&wt.path),
-                row.branch
-            );
-        }
-        (git::BranchDeleteOutcome::NotMerged | git::BranchDeleteOutcome::Failed(_), _) => {
-            eprintln!(
-                "{} could not delete {}",
-                style("!").yellow().bold(),
-                row.branch
-            );
-        }
-    }
+    eprintln!("{}", stale_outcome(row, &deleted));
     Ok(())
+}
+
+/// What became of a ticked stale row's branch, as one line. A branch kept for
+/// unmerged commits reads differently from one whose delete failed, the failure
+/// carries git's own reason, and keeping one carries the `git branch -D` hint
+/// for forcing it by hand — matching, word for word, what `wt rm` reports for
+/// the same situations. Kept apart from the printing so the wording can be
+/// tested without a repo on disk.
+fn stale_outcome(row: &StaleRow, outcome: &git::BranchDeleteOutcome) -> String {
+    let branch = &row.branch;
+    // The worktree goes first, so a removal that happened is reported alongside
+    // whatever the branch did afterwards — success or not.
+    let prefix = row
+        .worktree
+        .as_ref()
+        .map(|wt| format!("removed worktree at {}, ", display_path(&wt.path)))
+        .unwrap_or_default();
+
+    match outcome {
+        git::BranchDeleteOutcome::Deleted => {
+            format!("{} {prefix}deleted {branch}", style("✓").green().bold())
+        }
+        git::BranchDeleteOutcome::NotMerged => format!(
+            "{} {prefix}kept {branch} with unmerged commits \
+             (run `git branch -D -- {}` to force-delete)",
+            style("!").yellow().bold(),
+            shell_quote(branch),
+        ),
+        git::BranchDeleteOutcome::Failed(detail) => format!(
+            "{} {prefix}could not delete {branch}: {detail}",
+            style("!").yellow().bold(),
+        ),
+    }
+}
+
+/// Renders `word` so a shell reads it as the single literal it is. Git allows
+/// `$`, backticks, `;` and `&` in a ref name, so a branch called
+/// ``topic$(rm -rf ~)`` would otherwise run its own payload the moment someone
+/// pasted a command we printed. Names needing nothing are returned bare, which
+/// keeps the overwhelmingly common case readable; anything else is single-quoted,
+/// where the only character with meaning is `'` itself.
+///
+/// Quoting alone doesn't cover a name that looks like an option, so the commands
+/// built from this pass `--` before the ref as well.
+pub(crate) fn shell_quote(word: &str) -> String {
+    let safe = |c: char| c.is_ascii_alphanumeric() || "._/@+-".contains(c);
+    if !word.is_empty() && word.chars().all(safe) {
+        return word.to_string();
+    }
+    format!("'{}'", word.replace('\'', r"'\''"))
 }
 
 /// Pads (name, annotation) pairs so annotations line up in a column. Rows
@@ -1559,6 +1590,77 @@ mod tests {
     /// Strips ANSI styling so assertions read as the user sees the row.
     fn plain(s: &str) -> String {
         console::strip_ansi_codes(s).into_owned()
+    }
+
+    #[test]
+    fn stale_outcome_reports_a_branch_that_went_alone() {
+        let row = stale_row("fix/typo", None, Risk::default());
+        assert_eq!(
+            plain(&stale_outcome(&row, &git::BranchDeleteOutcome::Deleted)),
+            "✓ deleted fix/typo"
+        );
+    }
+
+    #[test]
+    fn stale_outcome_names_the_worktree_that_went_with_the_branch() {
+        let row = stale_row("fix/typo", Some(worktree(false)), Risk::default());
+        assert_eq!(
+            plain(&stale_outcome(&row, &git::BranchDeleteOutcome::Deleted)),
+            "✓ removed worktree at /tmp/wt, deleted fix/typo"
+        );
+    }
+
+    #[test]
+    fn stale_outcome_hints_at_forcing_an_unmerged_branch() {
+        let row = stale_row("spike/abandoned", None, Risk::default());
+        assert_eq!(
+            plain(&stale_outcome(&row, &git::BranchDeleteOutcome::NotMerged)),
+            "! kept spike/abandoned with unmerged commits \
+             (run `git branch -D -- spike/abandoned` to force-delete)"
+        );
+    }
+
+    /// The hint is meant to be pasted into a shell, and git allows `$` and
+    /// backticks in a ref name — so the name has to survive the paste as a
+    /// literal rather than running.
+    #[test]
+    fn stale_outcome_quotes_a_branch_name_that_could_run_as_a_command() {
+        let row = stale_row("topic$(touch${IFS}/tmp/pwned)", None, Risk::default());
+        assert_eq!(
+            plain(&stale_outcome(&row, &git::BranchDeleteOutcome::NotMerged)),
+            "! kept topic$(touch${IFS}/tmp/pwned) with unmerged commits \
+             (run `git branch -D -- 'topic$(touch${IFS}/tmp/pwned)'` to force-delete)"
+        );
+    }
+
+    #[test]
+    fn shell_quote_leaves_an_ordinary_branch_name_bare() {
+        assert_eq!(shell_quote("feature/login-2"), "feature/login-2");
+    }
+
+    #[test]
+    fn shell_quote_wraps_anything_a_shell_would_interpret() {
+        assert_eq!(shell_quote("topic;ls"), "'topic;ls'");
+        assert_eq!(shell_quote("topic&&ls"), "'topic&&ls'");
+        assert_eq!(shell_quote("a b"), "'a b'");
+        assert_eq!(shell_quote(""), "''");
+    }
+
+    /// A single quote can't be escaped inside single quotes, so it has to close
+    /// the quoting, contribute an escaped `'`, and reopen.
+    #[test]
+    fn shell_quote_handles_a_quote_in_the_name() {
+        assert_eq!(shell_quote("it's"), r"'it'\''s'");
+    }
+
+    #[test]
+    fn stale_outcome_surfaces_gits_reason_for_a_failed_delete() {
+        let row = stale_row("old/thing", None, Risk::default());
+        let failed = git::BranchDeleteOutcome::Failed("error: cannot delete branch".into());
+        assert_eq!(
+            plain(&stale_outcome(&row, &failed)),
+            "! could not delete old/thing: error: cannot delete branch"
+        );
     }
 
     #[test]
