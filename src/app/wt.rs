@@ -360,6 +360,8 @@ fn select(
     remote: &str,
 ) -> AppResult<Option<Action>> {
     let sections = build_wt_sections(worktrees, current_branch, remote)?;
+    // Non-interactive (piped/CI): we can't prompt, so report nothing to open
+    // rather than blocking on key input.
     let Some(keys) = interactive_keys() else {
         return Ok(None);
     };

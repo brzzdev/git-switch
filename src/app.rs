@@ -614,6 +614,8 @@ pub(crate) struct PickerOptions {
 
 fn select_branch(current: Option<&str>, remote: &str) -> AppResult<Option<String>> {
     let sections = build_sections(current, remote, &HashSet::new())?;
+    // Non-interactive (piped/CI): we can't prompt, so report nothing to switch
+    // to rather than blocking on key input.
     let Some(keys) = interactive_keys() else {
         return Ok(None);
     };
