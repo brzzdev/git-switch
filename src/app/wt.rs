@@ -217,7 +217,7 @@ fn select_for_removal(
     let Some(name) = target else {
         // Non-interactive (piped/CI): we can't prompt, so remove nothing rather
         // than blocking on key input.
-        let Some(mut keys) = interactive_keys() else {
+        let Some(keys) = interactive_keys() else {
             return Ok(vec![]);
         };
         let items = super::align_labels(
@@ -232,7 +232,7 @@ fn select_for_removal(
             "Remove worktrees (space to toggle, →/← all/none)",
             &items,
             &defaults,
-            &mut keys,
+            keys,
         );
     };
 
@@ -360,7 +360,7 @@ fn select(
     remote: &str,
 ) -> AppResult<Option<Action>> {
     let sections = build_wt_sections(worktrees, current_branch, remote)?;
-    let Some(mut keys) = interactive_keys() else {
+    let Some(keys) = interactive_keys() else {
         return Ok(None);
     };
     let selection = pick(
@@ -370,7 +370,7 @@ fn select(
             prompt: "Worktree",
             allow_create_from_filter: true,
         },
-        &mut keys,
+        keys,
     )?;
     let action = match selection {
         None => return Ok(None),

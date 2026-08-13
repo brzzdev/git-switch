@@ -620,7 +620,7 @@ pub(crate) struct PickerOptions {
 
 fn select_branch(current: Option<&str>, remote: &str) -> AppResult<Option<String>> {
     let sections = build_sections(current, remote, &HashSet::new())?;
-    let Some(mut keys) = interactive_keys() else {
+    let Some(keys) = interactive_keys() else {
         return Ok(None);
     };
     let selection = pick(
@@ -630,7 +630,7 @@ fn select_branch(current: Option<&str>, remote: &str) -> AppResult<Option<String
             prompt: "Switch to",
             allow_create_from_filter: false,
         },
-        &mut keys,
+        keys,
     )?;
     Ok(selection.map(|s| match s {
         Selection::Existing { name, .. } => name,
@@ -800,11 +800,15 @@ fn selectable_position(view: &View, name: &str) -> Option<usize> {
         .position(|&i| matches!(&view.rows[i].kind, RowKind::Item(p) if p.name == name))
 }
 
+/// The single-select picker. `keys` is taken by value so the raw mode it holds
+/// is released when this returns: under raw mode a newline moves down without
+/// returning to column 0, so anything a caller printed while still holding the
+/// key source would staircase across the terminal.
 pub(crate) fn pick(
     current: Option<&str>,
     sections: &[Section],
     opts: PickerOptions,
-    keys: &mut impl KeySource,
+    mut keys: impl KeySource,
 ) -> AppResult<Option<Selection>> {
     let term = Term::stderr();
     let _cursor_guard = CursorGuard::hide();
@@ -1070,22 +1074,17 @@ pub(crate) fn prompt_delete_stale_branches(
         .collect();
     let items = align_labels(&rows.iter().map(stale_label).collect::<Vec<_>>());
 
-    // Scoped so the picker's raw mode is released before anything is printed:
-    // under raw mode a newline moves down without returning to column 0, and
-    // the outcome lines below would staircase across the terminal.
-    let selections = {
-        // Non-interactive (piped/CI): we can't prompt, so delete nothing rather
-        // than blocking on key input or silently acting on the defaults.
-        let Some(mut keys) = interactive_keys() else {
-            return Ok(());
-        };
-        multi_select(
-            "Delete stale branches (space to toggle, →/← all/none)",
-            &items,
-            &defaults,
-            &mut keys,
-        )?
+    // Non-interactive (piped/CI): we can't prompt, so delete nothing rather
+    // than blocking on key input or silently acting on the defaults.
+    let Some(keys) = interactive_keys() else {
+        return Ok(());
     };
+    let selections = multi_select(
+        "Delete stale branches (space to toggle, →/← all/none)",
+        &items,
+        &defaults,
+        keys,
+    )?;
 
     // Delete from the main worktree, the same HEAD the risk was judged against.
     let mut steps = removal::GitSteps::at_main(main_dir.as_deref());
@@ -1258,11 +1257,13 @@ fn render_line(line: &str) {
     eprint!("{line}\r\n");
 }
 
+/// The multi-select picker. `keys` is taken by value for the same reason as
+/// [`pick`]: raw mode ends with the call, not with the caller's scope.
 pub(crate) fn multi_select(
     prompt: &str,
     items: &[String],
     defaults: &[bool],
-    keys: &mut impl KeySource,
+    mut keys: impl KeySource,
 ) -> AppResult<Vec<usize>> {
     let term = Term::stderr();
     let mut selected = defaults.to_vec();
@@ -1383,8 +1384,7 @@ mod tests {
     };
 
     fn run_pick(sections: &[Section], opts: PickerOptions, keys: Vec<Key>) -> Option<Selection> {
-        let mut keys = ScriptedKeys::new(keys);
-        pick(None, sections, opts, &mut keys).expect("pick should not error")
+        pick(None, sections, opts, ScriptedKeys::new(keys)).expect("pick should not error")
     }
 
     fn picked_name(sel: Option<Selection>) -> Option<String> {
@@ -1463,8 +1463,8 @@ mod tests {
 
     fn run_multi_select(items: &[&str], defaults: &[bool], keys: Vec<Key>) -> Vec<usize> {
         let items: Vec<String> = items.iter().map(|s| (*s).to_string()).collect();
-        let mut keys = ScriptedKeys::new(keys);
-        multi_select("Test", &items, defaults, &mut keys).expect("multi_select should not error")
+        multi_select("Test", &items, defaults, ScriptedKeys::new(keys))
+            .expect("multi_select should not error")
     }
 
     #[test]
