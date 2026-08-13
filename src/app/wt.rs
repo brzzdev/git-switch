@@ -289,21 +289,19 @@ fn remove_one(
     risk: Risk,
     force: bool,
 ) -> AppResult<()> {
-    let target = match wt.branch.clone() {
+    let target = match wt.branch.as_deref() {
         Some(name) => removal::Target::Held {
             name,
-            worktree: wt.clone(),
+            path: &wt.path,
         },
-        None => removal::Target::Worktree {
-            worktree: wt.clone(),
-        },
+        None => removal::Target::Worktree { path: &wt.path },
     };
     let license = if force {
         removal::License::forced()
     } else {
         removal::License::shown(risk)
     };
-    let report = removal::remove(&target, license, steps)?;
+    let report = removal::remove(target, license, steps)?;
 
     // A worktree that refused took the branch step with it, so say why and stop.
     // Matched exhaustively: a new outcome must be worded, not fall through to
@@ -332,8 +330,8 @@ fn remove_one(
     }
 
     let removed = format!("removed worktree at {}", display_path(&wt.path));
-    // With the worktree gone, an absent branch step means there was no branch.
-    let (Some(outcome), Some(branch)) = (&report.branch, wt.branch.as_deref()) else {
+    // A detached worktree goes alone: there was no branch step to report.
+    let (Some(branch), Some(outcome)) = (wt.branch.as_deref(), &report.branch) else {
         eprintln!("{} {removed}", style("✓").green().bold());
         return Ok(());
     };

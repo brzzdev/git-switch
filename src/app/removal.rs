@@ -13,31 +13,30 @@ use super::Risk;
 use crate::{AppResult, git};
 
 /// What is being removed. Every case names something real, so "neither a branch
-/// nor a worktree" cannot be asked for.
-pub(crate) enum Target {
+/// nor a worktree" cannot be asked for. It borrows from the row or worktree the
+/// caller is already holding to render the outcome from.
+#[derive(Clone, Copy)]
+pub(crate) enum Target<'a> {
     /// A branch no worktree holds.
-    Branch { name: String },
+    Branch { name: &'a str },
     /// A branch and the worktree *holding* it, which go together.
-    Held {
-        name: String,
-        worktree: git::Worktree,
-    },
+    Held { name: &'a str, path: &'a Path },
     /// A worktree with no branch to delete alongside it (a detached one).
-    Worktree { worktree: git::Worktree },
+    Worktree { path: &'a Path },
 }
 
-impl Target {
-    fn branch(&self) -> Option<&str> {
+impl<'a> Target<'a> {
+    fn branch(self) -> Option<&'a str> {
         match self {
             Target::Branch { name } | Target::Held { name, .. } => Some(name),
             Target::Worktree { .. } => None,
         }
     }
 
-    fn worktree(&self) -> Option<&git::Worktree> {
+    fn path(self) -> Option<&'a Path> {
         match self {
             Target::Branch { .. } => None,
-            Target::Held { worktree, .. } | Target::Worktree { worktree } => Some(worktree),
+            Target::Held { path, .. } | Target::Worktree { path } => Some(path),
         }
     }
 }
@@ -53,10 +52,12 @@ pub(crate) struct License {
 }
 
 impl License {
-    /// The markers the user was shown: a *dirty* worktree licenses discarding
-    /// its files, an *unmerged* branch its commits, and nothing licenses
-    /// anything else. A risk that arose after the markers were drawn is absent
-    /// here, so git's own guard refuses instead.
+    /// The risk the user was warned about — as row markers in a picker, or as
+    /// the confirmation that stands in for them where a target was named on the
+    /// command line. A *dirty* worktree licenses discarding its files, an
+    /// *unmerged* branch its commits, and nothing licenses anything else: a risk
+    /// that arose after the warning was given is absent here, so git's own guard
+    /// refuses instead.
     pub(crate) fn shown(risk: Risk) -> Self {
         Self {
             worktree: risk.dirty,
@@ -140,17 +141,15 @@ impl Steps for GitSteps {
 /// [`Report`] shows as an absent branch step. Git refusing is a value either
 /// way; only a git process that cannot be spawned is an error.
 pub(crate) fn remove(
-    target: &Target,
+    target: Target<'_>,
     license: License,
     steps: &mut impl Steps,
 ) -> AppResult<Report> {
     let mut report = Report::default();
 
-    if let Some(worktree) = target.worktree() {
-        let outcome = steps.remove_worktree(&worktree.path, license.worktree)?;
-        let refused = !matches!(outcome, git::WorktreeRemoveOutcome::Removed);
-        report.worktree = Some(outcome);
-        if refused {
+    if let Some(path) = target.path() {
+        report.worktree = Some(steps.remove_worktree(path, license.worktree)?);
+        if !matches!(report.worktree, Some(git::WorktreeRemoveOutcome::Removed)) {
             return Ok(report);
         }
     }
@@ -213,15 +212,10 @@ mod tests {
         }
     }
 
-    fn held() -> Target {
+    fn held() -> Target<'static> {
         Target::Held {
-            name: "feature".to_string(),
-            worktree: git::Worktree {
-                path: PathBuf::from("/tmp/wt"),
-                branch: Some("feature".to_string()),
-                is_main: false,
-                prunable: false,
-            },
+            name: "feature",
+            path: Path::new("/tmp/wt"),
         }
     }
 
@@ -230,7 +224,7 @@ mod tests {
     #[test]
     fn the_worktree_goes_before_the_branch() {
         let mut steps = FakeSteps::new();
-        remove(&held(), License::shown(Risk::default()), &mut steps).expect("no git to fail");
+        remove(held(), License::shown(Risk::default()), &mut steps).expect("no git to fail");
         assert_eq!(
             steps.calls,
             vec![
@@ -246,7 +240,7 @@ mod tests {
     fn a_worktree_that_refuses_leaves_its_branch_alone() {
         let mut steps = FakeSteps::new();
         steps.worktree = git::WorktreeRemoveOutcome::Failed("locked".to_string());
-        let report = remove(&held(), License::forced(), &mut steps).expect("no git to fail");
+        let report = remove(held(), License::forced(), &mut steps).expect("no git to fail");
         assert_eq!(steps.calls, vec![Call::RemoveWorktree { force: true }]);
         assert!(matches!(
             report.worktree,
@@ -268,7 +262,7 @@ mod tests {
             dirty: true,
             unmerged: None,
         };
-        remove(&held(), License::shown(risk), &mut dirty_only).expect("no git to fail");
+        remove(held(), License::shown(risk), &mut dirty_only).expect("no git to fail");
         assert_eq!(
             dirty_only.calls,
             vec![
@@ -282,7 +276,7 @@ mod tests {
             dirty: false,
             unmerged: Some(git::Unmerged::Ahead(2)),
         };
-        remove(&held(), License::shown(risk), &mut unmerged_only).expect("no git to fail");
+        remove(held(), License::shown(risk), &mut unmerged_only).expect("no git to fail");
         assert_eq!(
             unmerged_only.calls,
             vec![
@@ -296,7 +290,7 @@ mod tests {
     #[test]
     fn an_explicit_force_covers_both_steps() {
         let mut steps = FakeSteps::new();
-        remove(&held(), License::forced(), &mut steps).expect("no git to fail");
+        remove(held(), License::forced(), &mut steps).expect("no git to fail");
         assert_eq!(
             steps.calls,
             vec![
@@ -313,7 +307,7 @@ mod tests {
         let mut steps = FakeSteps::new();
         steps.branch = git::BranchDeleteOutcome::NotMerged;
         let report =
-            remove(&held(), License::shown(Risk::default()), &mut steps).expect("no git to fail");
+            remove(held(), License::shown(Risk::default()), &mut steps).expect("no git to fail");
         assert!(matches!(
             report.worktree,
             Some(git::WorktreeRemoveOutcome::Removed)
@@ -325,10 +319,8 @@ mod tests {
 
         let mut steps = FakeSteps::new();
         steps.branch = git::BranchDeleteOutcome::Failed("in use".to_string());
-        let branch_only = Target::Branch {
-            name: "feature".to_string(),
-        };
-        let report = remove(&branch_only, License::shown(Risk::default()), &mut steps)
+        let branch_only = Target::Branch { name: "feature" };
+        let report = remove(branch_only, License::shown(Risk::default()), &mut steps)
             .expect("no git to fail");
         assert!(report.worktree.is_none(), "no worktree to remove");
         assert!(matches!(
@@ -338,14 +330,9 @@ mod tests {
 
         let mut steps = FakeSteps::new();
         let detached = Target::Worktree {
-            worktree: git::Worktree {
-                path: PathBuf::from("/tmp/wt"),
-                branch: None,
-                is_main: false,
-                prunable: false,
-            },
+            path: Path::new("/tmp/wt"),
         };
-        let report = remove(&detached, License::forced(), &mut steps).expect("no git to fail");
+        let report = remove(detached, License::forced(), &mut steps).expect("no git to fail");
         assert!(matches!(
             report.worktree,
             Some(git::WorktreeRemoveOutcome::Removed)

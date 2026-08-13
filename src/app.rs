@@ -1190,16 +1190,15 @@ fn stale_label(row: &StaleRow) -> (String, String) {
 /// rule that only a shown marker licenses forcing, belong to [`removal`]; this
 /// is the wording.
 fn delete_stale_row(steps: &mut impl removal::Steps, row: &StaleRow) -> AppResult<()> {
-    let target = match &row.worktree {
-        Some(wt) => removal::Target::Held {
-            name: row.branch.clone(),
-            worktree: wt.clone(),
+    let held_at = row.worktree.as_ref().map(|wt| wt.path.as_path());
+    let target = match held_at {
+        Some(path) => removal::Target::Held {
+            name: &row.branch,
+            path,
         },
-        None => removal::Target::Branch {
-            name: row.branch.clone(),
-        },
+        None => removal::Target::Branch { name: &row.branch },
     };
-    let report = removal::remove(&target, removal::License::shown(row.risk), steps)?;
+    let report = removal::remove(target, removal::License::shown(row.risk), steps)?;
 
     // A worktree that refused took the branch step with it, so say why and stop.
     // Matched exhaustively: a new outcome must be worded, not fall through to
@@ -1207,16 +1206,16 @@ fn delete_stale_row(steps: &mut impl removal::Steps, row: &StaleRow) -> AppResul
     match &report.worktree {
         Some(git::WorktreeRemoveOutcome::Failed(detail)) => {
             // Only a row with a worktree can have a worktree step at all.
-            if let Some(wt) = &row.worktree {
+            if let Some(path) = held_at {
                 eprintln!(
                     "{} failed to remove the worktree at {}; leaving {} alone:",
                     style("!").yellow().bold(),
-                    display_path(&wt.path),
+                    display_path(path),
                     row.branch,
                 );
-            }
-            for line in detail.lines() {
-                eprintln!("  {line}");
+                for line in detail.lines() {
+                    eprintln!("  {line}");
+                }
             }
             return Ok(());
         }
