@@ -5,7 +5,8 @@
 //! Both destruction flows — the stale-branch prompt that follows a switch, and
 //! `git-switch wt rm` — come through [`remove`]. It performs the steps in the
 //! only order that works, forces only what its [`License`] covers, and returns
-//! what happened. It prints nothing: the wording belongs to the call sites.
+//! what happened. It prints nothing: the wording belongs to
+//! [`reporting`](super::reporting), which the [`Report`] is handed to whole.
 
 use std::path::{Path, PathBuf};
 
@@ -14,8 +15,9 @@ use crate::{AppResult, git};
 
 /// What is being removed. Every case names something real, so "neither a branch
 /// nor a worktree" cannot be asked for. It borrows from the row or worktree the
-/// caller is already holding to render the outcome from.
-#[derive(Clone, Copy)]
+/// caller is already holding to render the outcome from, and travels on in the
+/// [`Report`] so the wording never has to be told twice which steps could run.
+#[derive(Clone, Copy, Debug)]
 pub(crate) enum Target<'a> {
     /// A branch no worktree holds.
     Branch { name: &'a str },
@@ -76,9 +78,11 @@ impl License {
 
 /// What happened, one field per step. `None` means the step never ran: because
 /// the target had nothing for it to act on, or — for the branch — because the
-/// worktree refused to go and left it alone.
-#[derive(Debug, Default)]
-pub(crate) struct Report {
+/// worktree refused to go and left it alone. It carries the [`Target`] so
+/// [`reporting`](super::reporting) can word the outcome from the report alone.
+#[derive(Debug)]
+pub(crate) struct Report<'a> {
+    pub(crate) target: Target<'a>,
     pub(crate) worktree: Option<git::WorktreeRemoveOutcome>,
     pub(crate) branch: Option<git::BranchDeleteOutcome>,
 }
@@ -140,12 +144,16 @@ impl Steps for GitSteps {
 /// — and one that refuses to go leaves its branch alone, which the returned
 /// [`Report`] shows as an absent branch step. Git refusing is a value either
 /// way; only a git process that cannot be spawned is an error.
-pub(crate) fn remove(
-    target: Target<'_>,
+pub(crate) fn remove<'a>(
+    target: Target<'a>,
     license: License,
     steps: &mut impl Steps,
-) -> AppResult<Report> {
-    let mut report = Report::default();
+) -> AppResult<Report<'a>> {
+    let mut report = Report {
+        target,
+        worktree: None,
+        branch: None,
+    };
 
     if let Some(path) = target.path() {
         report.worktree = Some(steps.remove_worktree(path, license.worktree)?);

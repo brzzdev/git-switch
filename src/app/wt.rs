@@ -7,8 +7,8 @@ use indicatif::ProgressBar;
 
 use super::{
     Availability, CursorGuard, Pick, PickKind, PickerOptions, Risk, Section, Selection,
-    build_sections, confirm, display_path, fetch_and_ff, handoff_cd, interactive_keys,
-    multi_select, pick, prompt_delete_stale_branches, removal, report_update, shell_quote,
+    build_sections, confirm, display_path, fetch_and_ff, handoff_cd, interactive_keys, marker,
+    multi_select, pick, prompt_delete_stale_branches, removal, report_update, reporting,
 };
 use crate::{AppResult, Error, git};
 
@@ -110,7 +110,7 @@ pub fn run_ls() -> AppResult<()> {
                 .as_deref()
                 .and_then(|b| track.get(b).copied())
                 .unwrap_or((0, 0));
-            status_segment(dirty, ahead, behind)
+            marker::worktree_status(dirty, ahead, behind)
         })
         .collect();
     let status_width = statuses
@@ -133,22 +133,6 @@ pub fn run_ls() -> AppResult<()> {
         }
     }
     Ok(())
-}
-
-/// A worktree's status flags for `wt ls`: a dirty marker plus ahead/behind
-/// upstream counts. Returns an empty string when the tree is clean and in sync.
-fn status_segment(dirty: bool, ahead: u32, behind: u32) -> String {
-    let mut parts: Vec<String> = Vec::new();
-    if dirty {
-        parts.push(style("●").yellow().to_string());
-    }
-    if ahead > 0 {
-        parts.push(style(format!("↑{ahead}")).green().to_string());
-    }
-    if behind > 0 {
-        parts.push(style(format!("↓{behind}")).red().to_string());
-    }
-    parts.join(" ")
 }
 
 pub fn run_rm(target: Option<&str>, force: bool) -> AppResult<()> {
@@ -240,7 +224,7 @@ fn select_for_removal(
             &removable
                 .iter()
                 .enumerate()
-                .map(|(i, w)| (rm_label(w, current == Some(i)), risks[i].markers()))
+                .map(|(i, w)| (rm_label(w, current == Some(i)), marker::markers(risks[i])))
                 .collect::<Vec<_>>(),
         );
         let defaults = vec![false; items.len()];
@@ -279,10 +263,10 @@ fn select_for_removal(
     })
 }
 
-/// Removes one worktree and, when it has a branch, deletes that too, then
-/// reports what happened. The ordering and the licensing rule belong to
-/// [`removal`]; the wording here matches the stale-branch prompt's for the same
-/// outcomes, so the answer doesn't depend on how you got here.
+/// Removes one worktree and, when it has a branch, deletes that too, then prints
+/// what happened. The ordering and the licensing rule belong to [`removal`], the
+/// wording to [`reporting`] — which is what makes the answer here word for word
+/// the stale-branch prompt's, so it doesn't depend on how you got here.
 fn remove_one(
     steps: &mut impl removal::Steps,
     wt: &git::Worktree,
@@ -303,53 +287,8 @@ fn remove_one(
     };
     let report = removal::remove(target, license, steps)?;
 
-    // A worktree that refused took the branch step with it, so say why and stop.
-    // Matched exhaustively: a new outcome must be worded, not fall through to
-    // the removed line as though the worktree had gone.
-    match &report.worktree {
-        Some(git::WorktreeRemoveOutcome::Failed(detail)) => {
-            match wt.branch.as_deref() {
-                Some(branch) => eprintln!(
-                    "{} failed to remove the worktree at {}; leaving {branch} alone:",
-                    style("!").yellow().bold(),
-                    display_path(&wt.path),
-                ),
-                None => eprintln!(
-                    "{} failed to remove the worktree at {}:",
-                    style("!").yellow().bold(),
-                    display_path(&wt.path)
-                ),
-            }
-            for line in detail.lines() {
-                eprintln!("  {line}");
-            }
-            return Ok(());
-        }
-        // Every target here carries a worktree, so the step always ran.
-        Some(git::WorktreeRemoveOutcome::Removed) | None => {}
-    }
-
-    let removed = format!("removed worktree at {}", display_path(&wt.path));
-    // A detached worktree goes alone: there was no branch step to report.
-    let (Some(branch), Some(outcome)) = (wt.branch.as_deref(), &report.branch) else {
-        eprintln!("{} {removed}", style("✓").green().bold());
-        return Ok(());
-    };
-
-    match outcome {
-        git::BranchDeleteOutcome::Deleted => {
-            eprintln!("{} {removed}, deleted {branch}", style("✓").green().bold());
-        }
-        git::BranchDeleteOutcome::NotMerged => eprintln!(
-            "{} {removed}, kept {branch} with unmerged commits \
-             (run `git branch -D -- {}` to force-delete)",
-            style("!").yellow().bold(),
-            shell_quote(branch),
-        ),
-        git::BranchDeleteOutcome::Failed(detail) => eprintln!(
-            "{} {removed}, could not delete {branch}: {detail}",
-            style("!").yellow().bold(),
-        ),
+    for line in reporting::removal_outcome(&report) {
+        eprintln!("{line}");
     }
     Ok(())
 }
@@ -507,17 +446,16 @@ fn confirm_removal(wt: &git::Worktree, risk: Risk, force: bool) -> AppResult<boo
     }
 
     let subject = wt.branch.as_deref().unwrap_or("this worktree");
-    let risks = risk.describe(subject, &wt.path);
 
     if !super::is_interactive() {
         return Err(Error::Unconfirmed(format!(
             "{}; not removing. Rerun in a terminal to confirm, or pass --force.",
-            risks.join(" and ")
+            reporting::describe(risk, subject, &wt.path).join(" and ")
         )));
     }
 
-    for line in &risks {
-        eprintln!("{} {line}", style("!").yellow().bold());
+    for line in reporting::warnings(risk, subject, &wt.path) {
+        eprintln!("{line}");
     }
     let question = match wt.branch.as_deref() {
         Some(branch) => format!("Remove the worktree and delete {branch} anyway?"),

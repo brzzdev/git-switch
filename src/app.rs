@@ -6,7 +6,9 @@ use indicatif::ProgressBar;
 
 use crate::{AppResult, Error, git};
 
+pub(crate) mod marker;
 pub(crate) mod removal;
+pub(crate) mod reporting;
 pub mod wt;
 
 pub(crate) struct CursorGuard(Term);
@@ -1023,41 +1025,6 @@ impl Risk {
     pub(crate) fn any(self) -> bool {
         self.dirty || self.unmerged.is_some()
     }
-
-    /// Row markers: `●` for uncommitted changes, `↑N` for unmerged commits
-    /// (bare `↑` when there is no upstream to count against). Empty when there
-    /// is nothing to lose, which is what keeps the markers meaningful.
-    pub(crate) fn markers(self) -> String {
-        let mut parts: Vec<String> = Vec::new();
-        if self.dirty {
-            parts.push(style("●").yellow().to_string());
-        }
-        match self.unmerged {
-            Some(git::Unmerged::Ahead(n)) => parts.push(style(format!("↑{n}")).green().to_string()),
-            Some(git::Unmerged::NoUpstream) => parts.push(style("↑").green().to_string()),
-            None => {}
-        }
-        parts.join(" ")
-    }
-
-    /// One line per risk, for the confirmation shown when there is no row to
-    /// mark. `subject` names what the risk is attached to.
-    pub(crate) fn describe(self, subject: &str, path: &Path) -> Vec<String> {
-        let mut lines = Vec::new();
-        if self.dirty {
-            lines.push(format!("{} has uncommitted changes", display_path(path)));
-        }
-        match self.unmerged {
-            Some(git::Unmerged::Ahead(n)) => {
-                lines.push(format!("{subject} has {n} unmerged commit(s)"));
-            }
-            Some(git::Unmerged::NoUpstream) => {
-                lines.push(format!("{subject} has unmerged commits and no upstream"));
-            }
-            None => {}
-        }
-        lines
-    }
 }
 
 /// A stale branch, together with the worktree holding it (if any) and what
@@ -1168,15 +1135,14 @@ fn stale_label(row: &StaleRow) -> (String, String) {
         None => String::new(),
         Some(w) if w.prunable => "(+ worktree, missing)".to_string(),
         Some(_) if row.risk.dirty => {
-            format!("(+ worktree {})", style("●").yellow())
+            format!("(+ worktree {})", marker::Marker::Dirty)
         }
         Some(_) => "(+ worktree)".to_string(),
     };
-    let branch_risk = Risk {
+    let branch_risk = marker::markers(Risk {
         dirty: false,
         ..row.risk
-    }
-    .markers();
+    });
 
     let annotation = [worktree, branch_risk]
         .into_iter()
@@ -1186,79 +1152,24 @@ fn stale_label(row: &StaleRow) -> (String, String) {
     (row.branch.clone(), annotation)
 }
 
-/// Removes a ticked stale row and reports what happened. The ordering, and the
-/// rule that only a shown marker licenses forcing, belong to [`removal`]; this
-/// is the wording.
+/// Removes a ticked stale row and prints what happened. The ordering, and the
+/// rule that only a shown marker licenses forcing, belong to [`removal`]; the
+/// wording belongs to [`reporting`]. This is what's left: which target the row
+/// describes.
 fn delete_stale_row(steps: &mut impl removal::Steps, row: &StaleRow) -> AppResult<()> {
-    let held_at = row.worktree.as_ref().map(|wt| wt.path.as_path());
-    let target = match held_at {
-        Some(path) => removal::Target::Held {
+    let target = match &row.worktree {
+        Some(wt) => removal::Target::Held {
             name: &row.branch,
-            path,
+            path: &wt.path,
         },
         None => removal::Target::Branch { name: &row.branch },
     };
     let report = removal::remove(target, removal::License::shown(row.risk), steps)?;
 
-    // A worktree that refused took the branch step with it, so say why and stop.
-    // Matched exhaustively: a new outcome must be worded, not fall through to
-    // the branch line as though the worktree had gone.
-    match &report.worktree {
-        Some(git::WorktreeRemoveOutcome::Failed(detail)) => {
-            // Only a row with a worktree can have a worktree step at all.
-            if let Some(path) = held_at {
-                eprintln!(
-                    "{} failed to remove the worktree at {}; leaving {} alone:",
-                    style("!").yellow().bold(),
-                    display_path(path),
-                    row.branch,
-                );
-                for line in detail.lines() {
-                    eprintln!("  {line}");
-                }
-            }
-            return Ok(());
-        }
-        Some(git::WorktreeRemoveOutcome::Removed) | None => {}
-    }
-
-    if let Some(outcome) = &report.branch {
-        eprintln!("{}", stale_outcome(row, outcome));
+    for line in reporting::removal_outcome(&report) {
+        eprintln!("{line}");
     }
     Ok(())
-}
-
-/// What became of a ticked stale row's branch, as one line. A branch kept for
-/// unmerged commits reads differently from one whose delete failed, the failure
-/// carries git's own reason, and keeping one carries the `git branch -D` hint
-/// for forcing it by hand — matching, word for word, what `wt rm` reports for
-/// the same situations. Kept apart from the printing so the wording can be
-/// tested without a repo on disk.
-fn stale_outcome(row: &StaleRow, outcome: &git::BranchDeleteOutcome) -> String {
-    let branch = &row.branch;
-    // The worktree goes first, so a removal that happened is reported alongside
-    // whatever the branch did afterwards — success or not.
-    let prefix = row
-        .worktree
-        .as_ref()
-        .map(|wt| format!("removed worktree at {}, ", display_path(&wt.path)))
-        .unwrap_or_default();
-
-    match outcome {
-        git::BranchDeleteOutcome::Deleted => {
-            format!("{} {prefix}deleted {branch}", style("✓").green().bold())
-        }
-        git::BranchDeleteOutcome::NotMerged => format!(
-            "{} {prefix}kept {branch} with unmerged commits \
-             (run `git branch -D -- {}` to force-delete)",
-            style("!").yellow().bold(),
-            shell_quote(branch),
-        ),
-        git::BranchDeleteOutcome::Failed(detail) => format!(
-            "{} {prefix}could not delete {branch}: {detail}",
-            style("!").yellow().bold(),
-        ),
-    }
 }
 
 /// Renders `word` so a shell reads it as the single literal it is. Git allows
@@ -1617,47 +1528,6 @@ mod tests {
     }
 
     #[test]
-    fn stale_outcome_reports_a_branch_that_went_alone() {
-        let row = stale_row("fix/typo", None, Risk::default());
-        assert_eq!(
-            plain(&stale_outcome(&row, &git::BranchDeleteOutcome::Deleted)),
-            "✓ deleted fix/typo"
-        );
-    }
-
-    #[test]
-    fn stale_outcome_names_the_worktree_that_went_with_the_branch() {
-        let row = stale_row("fix/typo", Some(worktree(false)), Risk::default());
-        assert_eq!(
-            plain(&stale_outcome(&row, &git::BranchDeleteOutcome::Deleted)),
-            "✓ removed worktree at /tmp/wt, deleted fix/typo"
-        );
-    }
-
-    #[test]
-    fn stale_outcome_hints_at_forcing_an_unmerged_branch() {
-        let row = stale_row("spike/abandoned", None, Risk::default());
-        assert_eq!(
-            plain(&stale_outcome(&row, &git::BranchDeleteOutcome::NotMerged)),
-            "! kept spike/abandoned with unmerged commits \
-             (run `git branch -D -- spike/abandoned` to force-delete)"
-        );
-    }
-
-    /// The hint is meant to be pasted into a shell, and git allows `$` and
-    /// backticks in a ref name — so the name has to survive the paste as a
-    /// literal rather than running.
-    #[test]
-    fn stale_outcome_quotes_a_branch_name_that_could_run_as_a_command() {
-        let row = stale_row("topic$(touch${IFS}/tmp/pwned)", None, Risk::default());
-        assert_eq!(
-            plain(&stale_outcome(&row, &git::BranchDeleteOutcome::NotMerged)),
-            "! kept topic$(touch${IFS}/tmp/pwned) with unmerged commits \
-             (run `git branch -D -- 'topic$(touch${IFS}/tmp/pwned)'` to force-delete)"
-        );
-    }
-
-    #[test]
     fn reconcile_hint_names_both_ways_out() {
         assert_eq!(
             reconcile_hint("origin/main"),
@@ -1712,16 +1582,6 @@ mod tests {
     }
 
     #[test]
-    fn stale_outcome_surfaces_gits_reason_for_a_failed_delete() {
-        let row = stale_row("old/thing", None, Risk::default());
-        let failed = git::BranchDeleteOutcome::Failed("error: cannot delete branch".into());
-        assert_eq!(
-            plain(&stale_outcome(&row, &failed)),
-            "! could not delete old/thing: error: cannot delete branch"
-        );
-    }
-
-    #[test]
     fn stale_label_without_worktree_is_bare() {
         let row = stale_row("fix/typo", None, Risk::default());
         let (name, annotation) = stale_label(&row);
@@ -1763,18 +1623,10 @@ mod tests {
         assert_eq!(plain(&stale_label(&row).1), "(+ worktree ●) ↑2");
     }
 
+    /// Nothing to lose is what lets a removal skip the prompt entirely, so the
+    /// default has to answer no.
     #[test]
-    fn unmerged_without_upstream_renders_a_bare_arrow() {
-        let risk = Risk {
-            dirty: false,
-            unmerged: Some(git::Unmerged::NoUpstream),
-        };
-        assert_eq!(plain(&risk.markers()), "↑");
-    }
-
-    #[test]
-    fn no_risk_renders_no_markers() {
-        assert!(Risk::default().markers().is_empty());
+    fn a_default_risk_has_nothing_to_lose() {
         assert!(!Risk::default().any());
     }
 
