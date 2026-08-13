@@ -688,7 +688,7 @@ pub(crate) fn risk_legend(risks: &[Risk]) -> Option<String> {
 /// The *Ground* a row is offered on, as the word the glossary uses. Dim, and
 /// deliberately not a [`marker::Marker`]: a ground warns of no loss, and per ADR
 /// 0001 only a marker licenses forcing. See [ADR
-/// 0003](../docs/adr/0003-a-ground-is-not-a-marker.md).
+/// 0004](../docs/adr/0004-a-ground-is-not-a-marker.md).
 fn ground_label(ground: git::Ground) -> String {
     let word = match ground {
         git::Ground::Gone => "gone",

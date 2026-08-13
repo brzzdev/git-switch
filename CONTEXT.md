@@ -15,7 +15,7 @@ A branch that has outlived its purpose — its work has landed on the anchor, or
 _Avoid_: Dead, old, obsolete
 
 **Ground**:
-Which of *Stale*'s two clauses put a branch on the cleanup prompt: *Landed*, its work absorbed by the anchor, or *Gone*, its upstream deleted. The two never overlap — a deleted upstream is read first, and a branch whose upstream is gone is never asked whether it landed. A ground is not a *Risk*: it says why a branch is offered, never what deleting it would destroy, so it is written as a word and never drawn as a *Marker*. See [ADR 0003](./docs/adr/0003-a-ground-is-not-a-marker.md).
+Which of *Stale*'s two clauses put a branch on the cleanup prompt: *Landed*, its work absorbed by the anchor, or *Gone*, its upstream deleted. The two never overlap — a deleted upstream is read first, and a branch whose upstream is gone is never asked whether it landed. A ground is not a *Risk*: it says why a branch is offered, never what deleting it would destroy, so it is written as a word and never drawn as a *Marker*. See [ADR 0004](./docs/adr/0004-a-ground-is-not-a-marker.md).
 _Avoid_: Reason, cause, merged (reserved for topology, which staleness deliberately does not read)
 
 **Unmerged**:

@@ -380,7 +380,7 @@ fn merged_anchor(remote: &str) -> Option<(String, String)> {
 ///
 /// A ground says why a branch is offered, never what deleting it would destroy,
 /// so it is rendered as a word and never as a `Marker` — see [ADR
-/// 0003](../docs/adr/0003-a-ground-is-not-a-marker.md).
+/// 0004](../docs/adr/0004-a-ground-is-not-a-marker.md).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Ground {
     /// The upstream it tracked was deleted from the remote.
