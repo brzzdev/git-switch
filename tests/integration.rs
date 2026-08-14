@@ -196,6 +196,16 @@ fn stderr_str(output: &Output) -> String {
     String::from_utf8_lossy(&output.stderr).to_string()
 }
 
+/// Just the names of the stale branches. Which ground each is stale on is
+/// covered by the unit tests in `git`, against fixed refs rather than a repo.
+fn stale_names(remote: &str) -> Vec<String> {
+    git_switch::git::stale_branches(remote)
+        .unwrap()
+        .into_iter()
+        .map(|b| b.name)
+        .collect()
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -505,7 +515,7 @@ fn local_only_branch_not_stale_right_after_merge() {
     git(work.path(), &["merge", "local-experiment"]);
 
     let _cwd = cwd_at(work.path());
-    let stale = git_switch::git::stale_branches("origin").unwrap();
+    let stale = stale_names("origin");
 
     assert!(
         !stale.contains(&"local-experiment".to_string()),
@@ -530,7 +540,7 @@ fn local_only_branch_stale_after_main_advances() {
     git(work.path(), &["pull", "origin", "main"]);
 
     let _cwd = cwd_at(work.path());
-    let stale = git_switch::git::stale_branches("origin").unwrap();
+    let stale = stale_names("origin");
 
     assert!(
         stale.contains(&"local-merged".to_string()),
@@ -557,7 +567,7 @@ fn merged_tracked_branch_waits_for_its_upstream_to_go() {
 
     {
         let _cwd = cwd_at(work.path());
-        let stale = git_switch::git::stale_branches("origin").unwrap();
+        let stale = stale_names("origin");
         assert!(
             !stale.contains(&"feature-done".to_string()),
             "a live upstream is indistinguishable from an unstarted branch, got: {stale:?}"
@@ -568,7 +578,7 @@ fn merged_tracked_branch_waits_for_its_upstream_to_go() {
     git(work.path(), &["fetch", "--prune", "origin"]);
 
     let _cwd = cwd_at(work.path());
-    let stale = git_switch::git::stale_branches("origin").unwrap();
+    let stale = stale_names("origin");
     assert!(
         stale.contains(&"feature-done".to_string()),
         "a deleted upstream settles it, got: {stale:?}"
@@ -593,7 +603,7 @@ fn empty_published_branch_is_not_stale_from_a_branch_past_main() {
     git(work.path(), &["commit", "-m", "other advances"]);
 
     let _cwd = cwd_at(work.path());
-    let stale = git_switch::git::stale_branches("origin").unwrap();
+    let stale = stale_names("origin");
 
     assert!(
         !stale.contains(&"feature".to_string()),
@@ -624,7 +634,7 @@ fn empty_published_branch_at_a_merged_tip_is_not_stale() {
     git(work.path(), &["checkout", "main"]);
 
     let _cwd = cwd_at(work.path());
-    let stale = git_switch::git::stale_branches("origin").unwrap();
+    let stale = stale_names("origin");
 
     assert!(
         !stale.contains(&"feature".to_string()),
@@ -650,7 +660,7 @@ fn tracked_branch_without_unique_commits_not_stale() {
     git(work.path(), &["pull", "origin", "main"]);
 
     let _cwd = cwd_at(work.path());
-    let stale = git_switch::git::stale_branches("origin").unwrap();
+    let stale = stale_names("origin");
 
     assert!(
         !stale.contains(&"new-feature".to_string()),
@@ -686,7 +696,7 @@ fn fresh_worktree_branch_is_not_stale_from_the_main_worktree() {
     add_worktree_branch(&work, parent.path(), "feature-a");
 
     let _cwd = cwd_at(&work);
-    let stale = git_switch::git::stale_branches("origin").unwrap();
+    let stale = stale_names("origin");
 
     assert!(
         !stale.contains(&"feature-a".to_string()),
@@ -708,7 +718,7 @@ fn fresh_worktree_branch_is_not_stale_from_a_sibling_worktree() {
     git(&b, &["commit", "-m", "sibling work"]);
 
     let _cwd = cwd_at(&b);
-    let stale = git_switch::git::stale_branches("origin").unwrap();
+    let stale = stale_names("origin");
 
     assert!(
         !stale.contains(&"feature-a".to_string()),
@@ -731,7 +741,7 @@ fn worktree_branch_fast_forwarded_into_main_is_stale() {
     git(&work, &["merge", "--ff-only", "feature-a"]);
 
     let _cwd = cwd_at(&work);
-    let stale = git_switch::git::stale_branches("origin").unwrap();
+    let stale = stale_names("origin");
 
     assert!(
         stale.contains(&"feature-a".to_string()),
@@ -758,7 +768,7 @@ fn no_ff_merged_branch_is_stale_until_main_is_pushed() {
 
     {
         let _cwd = cwd_at(&work);
-        let stale = git_switch::git::stale_branches("origin").unwrap();
+        let stale = stale_names("origin");
         assert!(
             stale.contains(&"feature-noff".to_string()),
             "work main holds and origin/main doesn't should be offered, got: {stale:?}"
@@ -768,7 +778,7 @@ fn no_ff_merged_branch_is_stale_until_main_is_pushed() {
     git(&work, &["push", "origin", "main"]);
 
     let _cwd = cwd_at(&work);
-    let stale = git_switch::git::stale_branches("origin").unwrap();
+    let stale = stale_names("origin");
     assert!(
         !stale.contains(&"feature-noff".to_string()),
         "once pushed it cannot be told from an untouched branch, got: {stale:?}"
@@ -800,7 +810,7 @@ fn empty_anchor_tracking_branch_at_a_merged_tip_is_not_stale() {
     );
 
     let _cwd = cwd_at(work.path());
-    let stale = git_switch::git::stale_branches("origin").unwrap();
+    let stale = stale_names("origin");
 
     assert!(
         !stale.contains(&"feature".to_string()),
@@ -840,7 +850,7 @@ fn without_a_default_branch_only_gone_upstreams_are_stale() {
     git(work.path(), &["remote", "set-head", "origin", "--delete"]);
 
     let _cwd = cwd_at(work.path());
-    let stale = git_switch::git::stale_branches("origin").unwrap();
+    let stale = stale_names("origin");
 
     assert!(
         !stale.contains(&"merged-work".to_string()),
@@ -1031,7 +1041,7 @@ fn non_origin_remote_detects_stale_branch() {
     git(work.path(), &["fetch", "--prune", "upstream"]);
 
     let _cwd = cwd_at(work.path());
-    let stale = git_switch::git::stale_branches("upstream").unwrap();
+    let stale = stale_names("upstream");
 
     assert!(
         stale.contains(&"feature-done".to_string()),

@@ -1,16 +1,22 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use console::{Key, Term, measure_text_width, style};
+use console::{Key, Term, style};
 use indicatif::ProgressBar;
 
 use crate::{AppResult, Error, git};
 
 pub(crate) mod hook;
 pub(crate) mod marker;
+pub(crate) mod picker;
 pub(crate) mod removal;
 pub(crate) mod reporting;
 pub mod wt;
+
+use picker::{
+    Availability, Pick, PickKind, PickerOptions, Section, Selection, align_labels,
+    interactive_keys, multi_select, pick,
+};
 
 pub(crate) struct CursorGuard(Term);
 
@@ -28,129 +34,12 @@ impl Drop for CursorGuard {
     }
 }
 
-/// Source of key events for the interactive pickers. Abstracting input behind a
-/// trait lets the event loops be driven by a scripted sequence in tests; the
-/// real implementation is [`TermKeys`].
-pub(crate) trait KeySource {
-    fn read_key(&mut self) -> std::io::Result<Key>;
-}
-
-/// The real key source backing the interactive pickers. It holds the terminal in
-/// raw mode for the picker's lifetime and lets `crossterm` parse key events.
-pub(crate) struct TermKeys {
-    term: Term,
-    raw: Option<raw::RawMode>,
-}
-
-impl KeySource for TermKeys {
-    fn read_key(&mut self) -> std::io::Result<Key> {
-        if let Some(raw) = &self.raw {
-            return raw.read_key();
-        }
-        self.term.read_key()
-    }
-}
-
 /// The stderr terminal, but only when it's interactive. Returns `None` in
 /// piped/CI runs where there's no TTY to drive a prompt — callers fall back to
 /// doing nothing rather than blocking on key input.
 fn interactive_term() -> Option<Term> {
     let term = Term::stderr();
     term.is_term().then_some(term)
-}
-
-/// A key source for an interactive prompt, or `None` in piped/CI runs. Mirrors
-/// [`interactive_term`] but acquires raw mode so arrow keys are read reliably.
-fn interactive_keys() -> Option<TermKeys> {
-    let term = interactive_term()?;
-    Some(TermKeys {
-        term,
-        // Acquiring raw mode can fail; fall back to `console`.
-        raw: raw::RawMode::acquire().ok(),
-    })
-}
-
-/// Raw-mode key reader. `console::read_key` re-arms raw mode on every keystroke
-/// and has been fragile around split escape sequences; `crossterm` keeps raw
-/// mode active and uses its battle-tested event parser instead.
-mod raw {
-    use std::io;
-
-    use console::Key;
-    use crossterm::{
-        event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, read},
-        terminal::{disable_raw_mode, enable_raw_mode},
-    };
-
-    /// Zero-sized guard: enabling raw mode is process-global, and [`Drop`]
-    /// disables it again.
-    pub(crate) struct RawMode;
-
-    impl RawMode {
-        pub(crate) fn acquire() -> io::Result<Self> {
-            enable_raw_mode()?;
-            Ok(Self)
-        }
-
-        // `&self` is a capability token: holding the guard proves raw mode is
-        // active, even though reading uses crossterm's global event source.
-        #[allow(clippy::unused_self)]
-        pub(crate) fn read_key(&self) -> io::Result<Key> {
-            loop {
-                let Event::Key(event) = read()? else {
-                    continue;
-                };
-                if event.kind == KeyEventKind::Release {
-                    continue;
-                }
-                return translate_key(event);
-            }
-        }
-    }
-
-    fn translate_key(event: KeyEvent) -> io::Result<Key> {
-        if event.modifiers.contains(KeyModifiers::CONTROL)
-            && matches!(event.code, KeyCode::Char('c' | 'C'))
-        {
-            return Err(io::Error::new(io::ErrorKind::Interrupted, "interrupted"));
-        }
-
-        Ok(match event.code {
-            KeyCode::Backspace => Key::Backspace,
-            KeyCode::Enter => Key::Enter,
-            KeyCode::Left => Key::ArrowLeft,
-            KeyCode::Right => Key::ArrowRight,
-            KeyCode::Up => Key::ArrowUp,
-            KeyCode::Down => Key::ArrowDown,
-            KeyCode::Home => Key::Home,
-            KeyCode::End => Key::End,
-            KeyCode::PageUp => Key::PageUp,
-            KeyCode::PageDown => Key::PageDown,
-            KeyCode::Tab => Key::Tab,
-            KeyCode::BackTab => Key::BackTab,
-            KeyCode::Delete => Key::Del,
-            KeyCode::Insert => Key::Insert,
-            KeyCode::Esc => Key::Escape,
-            KeyCode::Char('a' | 'A') if event.modifiers.contains(KeyModifiers::CONTROL) => {
-                Key::Home
-            }
-            KeyCode::Char('e' | 'E') if event.modifiers.contains(KeyModifiers::CONTROL) => Key::End,
-            KeyCode::Char(c)
-                if !event
-                    .modifiers
-                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
-            {
-                Key::Char(c)
-            }
-            _ => Key::Unknown,
-        })
-    }
-
-    impl Drop for RawMode {
-        fn drop(&mut self) {
-            let _ = disable_raw_mode();
-        }
-    }
 }
 
 pub fn run(target: Option<&str>) -> AppResult<()> {
@@ -554,65 +443,6 @@ pub(crate) fn confirm(prompt: &str, default_yes: bool) -> AppResult<bool> {
     }
 }
 
-#[derive(Clone, Copy)]
-pub(crate) enum Availability {
-    Local,
-    RemoteOnly,
-    Missing,
-}
-
-impl Availability {
-    fn is_missing(self) -> bool {
-        matches!(self, Availability::Missing)
-    }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum PickKind {
-    Branch,
-    Worktree,
-}
-
-#[derive(Clone)]
-pub(crate) struct Pick {
-    pub name: String,
-    pub is_current: bool,
-    pub availability: Availability,
-    pub kind: PickKind,
-}
-
-pub(crate) struct Section {
-    pub heading: &'static str,
-    pub items: Vec<Pick>,
-}
-
-enum RowKind {
-    Heading(String),
-    Item(Pick),
-    CreateNew(String),
-}
-
-struct RenderRow {
-    kind: RowKind,
-    section_idx: usize,
-}
-
-struct View {
-    rows: Vec<RenderRow>,
-    selectable: Vec<usize>,
-}
-
-pub(crate) enum Selection {
-    Existing { name: String, kind: PickKind },
-    Create(String),
-}
-
-#[derive(Clone, Copy)]
-pub(crate) struct PickerOptions {
-    pub prompt: &'static str,
-    pub allow_create_from_filter: bool,
-}
-
 fn select_branch(current: Option<&str>, remote: &str) -> AppResult<Option<String>> {
     let sections = build_sections(current, remote, &HashSet::new())?;
     // Non-interactive (piped/CI): we can't prompt, so report nothing to switch
@@ -718,295 +548,6 @@ pub(crate) fn build_sections(
     Ok(sections)
 }
 
-/// Subsequence match against a pre-lowered needle. Lowering happens at the
-/// call site so the needle is normalized once per filter, not once per item.
-fn fuzzy_match(needle_lower: &str, haystack: &str) -> bool {
-    if needle_lower.is_empty() {
-        return true;
-    }
-    let mut hi = haystack.chars().flat_map(char::to_lowercase);
-    'next: for nc in needle_lower.chars() {
-        for hc in hi.by_ref() {
-            if hc == nc {
-                continue 'next;
-            }
-        }
-        return false;
-    }
-    true
-}
-
-fn build_view(sections: &[Section], filter: &str, opts: PickerOptions) -> View {
-    let needle: String = filter.chars().flat_map(char::to_lowercase).collect();
-    let mut rows: Vec<RenderRow> = Vec::new();
-    let mut selectable: Vec<usize> = Vec::new();
-
-    for (sec_idx, sec) in sections.iter().enumerate() {
-        let matching: Vec<&Pick> = sec
-            .items
-            .iter()
-            .filter(|p| fuzzy_match(&needle, &p.name))
-            .collect();
-        if matching.is_empty() {
-            continue;
-        }
-        rows.push(RenderRow {
-            kind: RowKind::Heading(sec.heading.to_string()),
-            section_idx: sec_idx,
-        });
-        for pick in matching {
-            let idx = rows.len();
-            let is_selectable = !pick.availability.is_missing();
-            rows.push(RenderRow {
-                kind: RowKind::Item(pick.clone()),
-                section_idx: sec_idx,
-            });
-            if is_selectable {
-                selectable.push(idx);
-            }
-        }
-    }
-
-    if opts.allow_create_from_filter && selectable.is_empty() && !filter.is_empty() {
-        let idx = rows.len();
-        rows.push(RenderRow {
-            kind: RowKind::CreateNew(filter.to_string()),
-            section_idx: 0,
-        });
-        selectable.push(idx);
-    }
-
-    View { rows, selectable }
-}
-
-fn cursor_selection(view: &View, cursor: usize) -> Option<Selection> {
-    let &row_idx = view.selectable.get(cursor)?;
-    match &view.rows[row_idx].kind {
-        RowKind::Item(p) => Some(Selection::Existing {
-            name: p.name.clone(),
-            kind: p.kind,
-        }),
-        RowKind::CreateNew(name) => Some(Selection::Create(name.clone())),
-        RowKind::Heading(_) => None,
-    }
-}
-
-fn selectable_position(view: &View, name: &str) -> Option<usize> {
-    view.selectable
-        .iter()
-        .position(|&i| matches!(&view.rows[i].kind, RowKind::Item(p) if p.name == name))
-}
-
-/// The single-select picker. `keys` is taken by value so the raw mode it holds
-/// is released when this returns: under raw mode a newline moves down without
-/// returning to column 0, so anything a caller printed while still holding the
-/// key source would staircase across the terminal.
-pub(crate) fn pick(
-    current: Option<&str>,
-    sections: &[Section],
-    opts: PickerOptions,
-    mut keys: impl KeySource,
-) -> AppResult<Option<Selection>> {
-    let term = Term::stderr();
-    let _cursor_guard = CursorGuard::hide();
-
-    let mut filter = String::new();
-    let mut view = build_view(sections, &filter, opts);
-    if view.selectable.is_empty() && !opts.allow_create_from_filter {
-        return Ok(None);
-    }
-
-    let mut cursor: usize = current
-        .and_then(|c| selectable_position(&view, c))
-        .unwrap_or(0);
-
-    let mut drawn = render(&term, &view, cursor, &filter, opts.prompt);
-
-    loop {
-        let key = keys.read_key()?;
-        let preserved = match cursor_selection(&view, cursor) {
-            Some(Selection::Existing { name, .. }) => Some(name),
-            _ => None,
-        };
-        let mut filter_changed = false;
-
-        match key {
-            Key::ArrowUp => {
-                if !view.selectable.is_empty() {
-                    cursor = if cursor == 0 {
-                        view.selectable.len() - 1
-                    } else {
-                        cursor - 1
-                    };
-                }
-            }
-            Key::ArrowDown => {
-                if !view.selectable.is_empty() {
-                    cursor = (cursor + 1) % view.selectable.len();
-                }
-            }
-            Key::PageUp => {
-                let page = page_size(&term);
-                cursor = cursor.saturating_sub(page);
-            }
-            Key::PageDown => {
-                let page = page_size(&term);
-                let last = view.selectable.len().saturating_sub(1);
-                cursor = (cursor + page).min(last);
-            }
-            Key::Home => cursor = 0,
-            Key::End => {
-                cursor = view.selectable.len().saturating_sub(1);
-            }
-            Key::Char(c) if !c.is_control() => {
-                filter.push(c);
-                filter_changed = true;
-            }
-            Key::Backspace => {
-                if filter.pop().is_some() {
-                    filter_changed = true;
-                }
-            }
-            Key::Enter => {
-                let selection = cursor_selection(&view, cursor);
-                let _ = term.clear_last_lines(drawn);
-                return Ok(selection);
-            }
-            Key::Escape => {
-                if filter.is_empty() {
-                    let _ = term.clear_last_lines(drawn);
-                    return Ok(None);
-                }
-                filter.clear();
-                filter_changed = true;
-            }
-            _ => continue,
-        }
-
-        if filter_changed {
-            view = build_view(sections, &filter, opts);
-            cursor = preserved
-                .as_deref()
-                .and_then(|n| selectable_position(&view, n))
-                .unwrap_or(0);
-        }
-
-        let _ = term.clear_last_lines(drawn);
-        drawn = render(&term, &view, cursor, &filter, opts.prompt);
-    }
-}
-
-fn page_size(term: &Term) -> usize {
-    let h = term.size().0 as usize;
-    h.saturating_sub(2).max(1)
-}
-
-fn render(term: &Term, view: &View, cursor: usize, filter: &str, prompt_label: &str) -> usize {
-    let (rows_term, cols_term) = term.size();
-    let height = rows_term as usize;
-    let width = cols_term as usize;
-
-    let prompt = format!(
-        "{} {} {} {}",
-        style("?").green().bold(),
-        style(prompt_label).bold(),
-        style("(type to filter):").dim(),
-        filter,
-    );
-    render_line(&prompt);
-    let mut drawn = visual_rows(&prompt, width);
-
-    if view.selectable.is_empty() {
-        let line = style("  (no matches)").dim().to_string();
-        render_line(&line);
-        drawn += visual_rows(&line, width);
-        return drawn;
-    }
-
-    // Reserve one trailing line of headroom. If the render filled the full
-    // terminal height, the final newline would scroll the screen up by a line
-    // each redraw; `clear_last_lines` then can't reach the scrolled-off prompt
-    // (cursor-up clamps at the top row), so stale prompt lines pile up and the
-    // live prompt scrolls out of view.
-    let viewport_h = height.saturating_sub(drawn + 1).max(3);
-    let total_rows = view.rows.len();
-    let cursor_row = view.selectable.get(cursor).copied().unwrap_or(0);
-
-    let cursor_section = view.rows[cursor_row].section_idx;
-    let cursor_heading_row = view
-        .rows
-        .iter()
-        .position(|r| r.section_idx == cursor_section && matches!(r.kind, RowKind::Heading(_)));
-
-    let mut scroll = if total_rows <= viewport_h || cursor_row + 1 < viewport_h {
-        0
-    } else {
-        cursor_row + 1 - viewport_h
-    };
-
-    let sticky = cursor_heading_row.is_some_and(|h| h < scroll);
-    let content_h = if sticky {
-        viewport_h.saturating_sub(1).max(1)
-    } else {
-        viewport_h
-    };
-
-    if sticky && cursor_row >= scroll + content_h {
-        scroll = cursor_row + 1 - content_h;
-    }
-
-    if sticky
-        && let Some(h) = cursor_heading_row
-        && let RowKind::Heading(text) = &view.rows[h].kind
-    {
-        let line = style(text).bold().dim().to_string();
-        render_line(&line);
-        drawn += visual_rows(&line, width);
-    }
-
-    let end = (scroll + content_h).min(total_rows);
-    for r in scroll..end {
-        let line = format_row(&view.rows[r], r == cursor_row);
-        render_line(&line);
-        drawn += visual_rows(&line, width);
-    }
-
-    drawn
-}
-
-fn format_row(row: &RenderRow, is_cursor: bool) -> String {
-    match &row.kind {
-        RowKind::Heading(text) => style(text).bold().dim().to_string(),
-        RowKind::Item(pick) => {
-            let cursor = if is_cursor { ">" } else { " " };
-            let name_with_mark = if pick.is_current {
-                format!("* {}", pick.name)
-            } else {
-                pick.name.clone()
-            };
-            let suffix = match pick.availability {
-                Availability::Local => "",
-                Availability::RemoteOnly => " ☁",
-                Availability::Missing => " (missing)",
-            };
-            let line = format!("  {cursor} {name_with_mark}{suffix}");
-            if pick.availability.is_missing() {
-                style(line).dim().to_string()
-            } else {
-                line
-            }
-        }
-        RowKind::CreateNew(name) => {
-            let cursor = if is_cursor { ">" } else { " " };
-            format!(
-                "  {cursor} {} {}",
-                style("+").green().bold(),
-                style(format!("Create new: {name}")).italic()
-            )
-        }
-    }
-}
-
 /// What removing something would irreversibly destroy.
 ///
 /// The project rule is *warned means forceable*: a destructive step may skip
@@ -1028,10 +569,11 @@ impl Risk {
     }
 }
 
-/// A stale branch, together with the worktree holding it (if any) and what
-/// deleting it would destroy.
+/// A stale branch, together with the ground it is offered on, the worktree
+/// holding it (if any) and what deleting it would destroy.
 struct StaleRow {
     branch: String,
+    ground: git::Ground,
     worktree: Option<git::Worktree>,
     risk: Risk,
 }
@@ -1076,8 +618,10 @@ pub(crate) fn prompt_delete_stale_branches(
     let Some(keys) = interactive_keys() else {
         return Ok(());
     };
+    let legend = risk_legend(&rows.iter().map(|r| r.risk).collect::<Vec<_>>());
     let selections = multi_select(
         "Delete stale branches (space to toggle, →/← all/none)",
+        legend.as_deref(),
         &items,
         &defaults,
         keys,
@@ -1096,7 +640,7 @@ pub(crate) fn prompt_delete_stale_branches(
 /// it and what deleting it would destroy. `dirty` is injected so the rule can be
 /// tested without a repo on disk.
 fn stale_rows(
-    stale: Vec<String>,
+    stale: Vec<git::StaleBranch>,
     worktrees: &[git::Worktree],
     unmerged: &std::collections::HashMap<String, git::Unmerged>,
     destination: Option<&str>,
@@ -1104,17 +648,18 @@ fn stale_rows(
 ) -> Vec<StaleRow> {
     stale
         .into_iter()
-        .filter(|branch| destination != Some(branch.as_str()))
-        .map(|branch| {
-            let worktree = git::worktree_for_branch(worktrees, &branch);
+        .filter(|b| destination != Some(b.name.as_str()))
+        .map(|b| {
+            let worktree = git::worktree_for_branch(worktrees, &b.name);
             let risk = Risk {
                 dirty: worktree
                     .as_ref()
                     .is_some_and(|w| !w.prunable && dirty(&w.path)),
-                unmerged: unmerged.get(&branch).copied(),
+                unmerged: unmerged.get(&b.name).copied(),
             };
             StaleRow {
-                branch,
+                branch: b.name,
+                ground: b.ground,
                 worktree,
                 risk,
             }
@@ -1122,10 +667,50 @@ fn stale_rows(
         .collect()
 }
 
+/// Glosses the *Marker* glyphs these rows actually carry, or `None` where they
+/// carry none. Only what is on screen is explained: a legend for a glyph nobody
+/// can see is noise, and the common riskless list gets no legend at all. Grounds
+/// need no gloss — they are already words.
+pub(crate) fn risk_legend(risks: &[Risk]) -> Option<String> {
+    let mut parts = Vec::new();
+    if risks.iter().any(|r| r.dirty) {
+        parts.push(format!("{} uncommitted changes", marker::Marker::Dirty));
+    }
+    if risks.iter().any(|r| r.unmerged.is_some()) {
+        parts.push(format!(
+            "{} unmerged commits",
+            marker::Marker::Unmerged(None)
+        ));
+    }
+    (!parts.is_empty()).then(|| parts.join("   "))
+}
+
+/// The *Ground* a row is offered on, as the word the glossary uses. Dim, and
+/// deliberately not a [`marker::Marker`]: a ground warns of no loss, and per ADR
+/// 0001 only a marker licenses forcing. See [ADR
+/// 0004](../docs/adr/0004-a-ground-is-not-a-marker.md).
+///
+/// `padded` widens a shorter ground to the widest one, so annotations after it
+/// share a column down the list. Only ever true where something follows: the
+/// padding exists for that something, and a trailing run of spaces on a
+/// ground-only row is exactly what [`align_labels`] avoids.
+fn ground_label(ground: git::Ground, padded: bool) -> String {
+    let word = match ground {
+        git::Ground::Gone => "gone",
+        git::Ground::Landed => "landed",
+    };
+    // Named rather than a bare 6, so the widest ground stays visible as a fact
+    // about the words above and not a constant to remember to update.
+    let width = if padded { "landed".len() } else { 0 };
+    style(format!("{word:<width$}")).dim().to_string()
+}
+
 /// The picker row for a stale branch, as a (name, annotation) pair for
-/// [`align_labels`]. Dirtiness belongs to the worktree so it sits inside the
-/// parentheses; unmerged commits belong to the branch so they sit outside. The
-/// worktree's path is deliberately absent — it appears in the outcome line.
+/// [`align_labels`]. The ground leads, answering why the row is here at all;
+/// the risks follow, answering what deleting it would cost. Dirtiness belongs to
+/// the worktree so it sits inside the parentheses; unmerged commits belong to
+/// the branch so they sit outside. The worktree's path is deliberately absent —
+/// it appears in the outcome line.
 fn stale_label(row: &StaleRow) -> (String, String) {
     let worktree = match &row.worktree {
         None => String::new(),
@@ -1140,7 +725,8 @@ fn stale_label(row: &StaleRow) -> (String, String) {
         ..row.risk
     });
 
-    let annotation = [worktree, branch_risk]
+    let follows = !worktree.is_empty() || !branch_risk.is_empty();
+    let annotation = [ground_label(row.ground, follows), worktree, branch_risk]
         .into_iter()
         .filter(|p| !p.is_empty())
         .collect::<Vec<_>>()
@@ -1201,28 +787,6 @@ pub(crate) fn shell_quote(word: &str) -> String {
     format!("'{}'", word.replace('\'', r"'\''"))
 }
 
-/// Pads (name, annotation) pairs so annotations line up in a column. Rows
-/// without an annotation are left bare, so an unannotated list gains no
-/// trailing whitespace.
-pub(crate) fn align_labels(rows: &[(String, String)]) -> Vec<String> {
-    let width = rows
-        .iter()
-        .filter(|(_, a)| !a.is_empty())
-        .map(|(name, _)| measure_text_width(name))
-        .max()
-        .unwrap_or(0);
-
-    rows.iter()
-        .map(|(name, annotation)| {
-            if annotation.is_empty() {
-                return name.clone();
-            }
-            let pad = " ".repeat(width.saturating_sub(measure_text_width(name)));
-            format!("{name}{pad}  {annotation}")
-        })
-        .collect()
-}
-
 /// Contracts a leading home directory to `~` so paths stay readable in prompts.
 pub(crate) fn display_path(path: &Path) -> String {
     let home = std::env::var_os("HOME").map(PathBuf::from);
@@ -1255,275 +819,31 @@ pub(crate) fn handoff_cd(path: &std::path::Path) {
     }
 }
 
-fn visual_rows(text: &str, width: usize) -> usize {
-    if width == 0 {
-        return 1;
-    }
-    let w = measure_text_width(text);
-    if w == 0 { 1 } else { w.div_ceil(width) }
-}
-
-fn render_line(line: &str) {
-    // Emit `\r\n` explicitly: raw mode disables the terminal's `\n`→`\r\n`
-    // translation. Routing through `eprint!` (rather than a raw fd write) keeps
-    // libtest's output capture working, so passing picker tests stay quiet.
-    eprint!("{line}\r\n");
-}
-
-/// The multi-select picker. `keys` is taken by value for the same reason as
-/// [`pick`]: raw mode ends with the call, not with the caller's scope.
-pub(crate) fn multi_select(
-    prompt: &str,
-    items: &[String],
-    defaults: &[bool],
-    mut keys: impl KeySource,
-) -> AppResult<Vec<usize>> {
-    let term = Term::stderr();
-    let mut selected = defaults.to_vec();
-    let mut cursor = 0usize;
-    let header = format!("{} {}", style("?").green().bold(), style(prompt).bold());
-
-    let _cursor_guard = CursorGuard::hide();
-
-    let draw = |cursor: usize, selected: &[bool]| -> usize {
-        let (rows_term, cols_term) = term.size();
-        let (height, width) = (rows_term as usize, cols_term as usize);
-        let mut rows = visual_rows(&header, width);
-        render_line(&header);
-
-        // Scroll a window of items around the cursor and reserve a trailing line
-        // of headroom, so a long list never overflows the screen and scrolls the
-        // prompt out of `clear_last_lines`' reach (see `render`).
-        let viewport = height.saturating_sub(rows + 1).max(1);
-        let total = items.len();
-        let scroll = if total <= viewport || cursor + 1 < viewport {
-            0
-        } else {
-            (cursor + 1 - viewport).min(total - viewport)
-        };
-        let end = (scroll + viewport).min(total);
-        for i in scroll..end {
-            let arrow = if i == cursor { ">" } else { " " };
-            let check = if selected[i] { "[x]" } else { "[ ]" };
-            let line = format!("  {arrow} {check} {}", items[i]);
-            rows += visual_rows(&line, width);
-            render_line(&line);
-        }
-        rows
-    };
-
-    let clear = |n: usize| {
-        let _ = term.clear_last_lines(n);
-    };
-
-    let mut drawn = draw(cursor, &selected);
-
-    loop {
-        match keys.read_key()? {
-            Key::ArrowUp if cursor > 0 => cursor -= 1,
-            Key::ArrowDown if cursor + 1 < items.len() => cursor += 1,
-            Key::Char(' ') => selected[cursor] = !selected[cursor],
-            Key::ArrowRight => selected.fill(true),
-            Key::ArrowLeft => selected.fill(false),
-            Key::Enter => break,
-            Key::Escape => {
-                clear(drawn);
-                return Ok(vec![]);
-            }
-            _ => continue,
-        }
-
-        clear(drawn);
-        drawn = draw(cursor, &selected);
-    }
-
-    Ok(selected
-        .iter()
-        .enumerate()
-        .filter(|(_, s)| **s)
-        .map(|(i, _)| i)
-        .collect())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Drives an event loop from a fixed list of keys. Once exhausted it yields
-    /// `Escape` so a test that under-specifies its script bails out of the loop
-    /// rather than hanging.
-    struct ScriptedKeys(std::vec::IntoIter<Key>);
-
-    impl ScriptedKeys {
-        fn new(keys: Vec<Key>) -> Self {
-            Self(keys.into_iter())
-        }
-    }
-
-    impl KeySource for ScriptedKeys {
-        fn read_key(&mut self) -> std::io::Result<Key> {
-            Ok(self.0.next().unwrap_or(Key::Escape))
-        }
-    }
-
-    fn section(heading: &'static str, names: &[&str]) -> Section {
-        Section {
-            heading,
-            items: names
-                .iter()
-                .map(|n| Pick {
-                    name: (*n).to_string(),
-                    is_current: false,
-                    availability: Availability::Local,
-                    kind: PickKind::Branch,
-                })
-                .collect(),
-        }
-    }
-
-    /// Keys for typing a literal string into the filter.
-    fn typed(s: &str) -> Vec<Key> {
-        s.chars().map(Key::Char).collect()
-    }
-
-    const SELECT_OPTS: PickerOptions = PickerOptions {
-        prompt: "Test",
-        allow_create_from_filter: false,
-    };
-
-    const CREATE_OPTS: PickerOptions = PickerOptions {
-        prompt: "Test",
-        allow_create_from_filter: true,
-    };
-
-    fn run_pick(sections: &[Section], opts: PickerOptions, keys: Vec<Key>) -> Option<Selection> {
-        pick(None, sections, opts, ScriptedKeys::new(keys)).expect("pick should not error")
-    }
-
-    fn picked_name(sel: Option<Selection>) -> Option<String> {
-        match sel {
-            Some(Selection::Existing { name, .. }) => Some(name),
-            _ => None,
-        }
-    }
-
-    #[test]
-    fn type_to_filter_then_enter_selects_match() {
-        let sections = vec![section("Local", &["main", "feature", "develop"])];
-        let mut keys = typed("feat");
-        keys.push(Key::Enter);
-        let sel = run_pick(&sections, SELECT_OPTS, keys);
-        assert_eq!(picked_name(sel).as_deref(), Some("feature"));
-    }
-
-    #[test]
-    fn arrow_up_from_first_wraps_to_last() {
-        let sections = vec![section("Local", &["a", "b", "c"])];
-        let sel = run_pick(&sections, SELECT_OPTS, vec![Key::ArrowUp, Key::Enter]);
-        assert_eq!(picked_name(sel).as_deref(), Some("c"));
-    }
-
-    #[test]
-    fn arrow_down_from_last_wraps_to_first() {
-        let sections = vec![section("Local", &["a", "b", "c"])];
-        // End lands on the last row; ArrowDown should wrap back to the first.
-        let sel = run_pick(
-            &sections,
-            SELECT_OPTS,
-            vec![Key::End, Key::ArrowDown, Key::Enter],
-        );
-        assert_eq!(picked_name(sel).as_deref(), Some("a"));
-    }
-
-    #[test]
-    fn non_matching_filter_with_enter_creates() {
-        let sections = vec![section("Local", &["main"])];
-        let mut keys = typed("xyz");
-        keys.push(Key::Enter);
-        let sel = run_pick(&sections, CREATE_OPTS, keys);
-        match sel {
-            Some(Selection::Create(name)) => assert_eq!(name, "xyz"),
-            _ => panic!("expected Selection::Create"),
-        }
-    }
-
-    #[test]
-    fn cursor_navigation_skips_headings() {
-        let sections = vec![section("Pinned", &["p1"]), section("Local", &["l1", "l2"])];
-        // From p1, one ArrowDown should land on l1, stepping over the "Local"
-        // heading row rather than onto it.
-        let sel = run_pick(&sections, SELECT_OPTS, vec![Key::ArrowDown, Key::Enter]);
-        assert_eq!(picked_name(sel).as_deref(), Some("l1"));
-    }
-
-    #[test]
-    fn escape_on_empty_filter_returns_none() {
-        let sections = vec![section("Local", &["a", "b"])];
-        let sel = run_pick(&sections, SELECT_OPTS, vec![Key::Escape]);
-        assert!(sel.is_none());
-    }
-
-    #[test]
-    fn escape_on_nonempty_filter_clears_it() {
-        let sections = vec![section("Local", &["alpha", "beta"])];
-        // Filter down to "beta" (hiding alpha), Escape to clear the filter, then
-        // Home + Enter selects alpha — proving it is back in the list.
-        let mut keys = typed("beta");
-        keys.extend([Key::Escape, Key::Home, Key::Enter]);
-        let sel = run_pick(&sections, SELECT_OPTS, keys);
-        assert_eq!(picked_name(sel).as_deref(), Some("alpha"));
-    }
-
-    fn run_multi_select(items: &[&str], defaults: &[bool], keys: Vec<Key>) -> Vec<usize> {
-        let items: Vec<String> = items.iter().map(|s| (*s).to_string()).collect();
-        multi_select("Test", &items, defaults, ScriptedKeys::new(keys))
-            .expect("multi_select should not error")
-    }
-
-    #[test]
-    fn multi_select_space_toggles_returns_index_set() {
-        let got = run_multi_select(
-            &["a", "b", "c"],
-            &[false, false, false],
-            vec![
-                Key::Char(' '),
-                Key::ArrowDown,
-                Key::ArrowDown,
-                Key::Char(' '),
-                Key::Enter,
-            ],
-        );
-        assert_eq!(got, vec![0, 2]);
-    }
-
-    #[test]
-    fn multi_select_right_selects_all() {
-        let got = run_multi_select(
-            &["a", "b"],
-            &[false, false],
-            vec![Key::ArrowRight, Key::Enter],
-        );
-        assert_eq!(got, vec![0, 1]);
-    }
-
-    #[test]
-    fn multi_select_left_selects_none() {
-        let got = run_multi_select(&["a", "b"], &[true, true], vec![Key::ArrowLeft, Key::Enter]);
-        assert!(got.is_empty());
-    }
-
-    #[test]
-    fn multi_select_escape_returns_empty() {
-        let got = run_multi_select(&["a", "b"], &[true, true], vec![Key::Escape]);
-        assert!(got.is_empty());
-    }
-
+    /// A row stale on the *Landed* ground, which the label tests take as given
+    /// so they can hold the risk half still — `ground_label_names_each_ground`
+    /// covers the other one.
     fn stale_row(branch: &str, worktree: Option<git::Worktree>, risk: Risk) -> StaleRow {
         StaleRow {
             branch: branch.to_string(),
+            ground: git::Ground::Landed,
             worktree,
             risk,
         }
+    }
+
+    /// Builds the input `stale_rows` now takes, all on one ground.
+    fn landed(names: &[&str]) -> Vec<git::StaleBranch> {
+        names
+            .iter()
+            .map(|n| git::StaleBranch {
+                ground: git::Ground::Landed,
+                name: (*n).to_string(),
+            })
+            .collect()
     }
 
     fn worktree(prunable: bool) -> git::Worktree {
@@ -1594,12 +914,52 @@ mod tests {
         assert_eq!(shell_quote("it's"), r"'it'\''s'");
     }
 
+    /// The ground is on every row: a branch with nothing at stake still owes the
+    /// user an answer to "why is this being offered at all?".
     #[test]
-    fn stale_label_without_worktree_is_bare() {
+    fn stale_label_without_worktree_carries_only_its_ground() {
         let row = stale_row("fix/typo", None, Risk::default());
         let (name, annotation) = stale_label(&row);
         assert_eq!(name, "fix/typo");
-        assert!(annotation.is_empty(), "got: {annotation}");
+        assert_eq!(plain(&annotation), "landed");
+    }
+
+    #[test]
+    fn ground_label_names_each_ground() {
+        assert_eq!(plain(&ground_label(git::Ground::Gone, false)), "gone");
+        assert_eq!(plain(&ground_label(git::Ground::Landed, false)), "landed");
+    }
+
+    /// The grounds are different widths, so a shorter one is padded out to keep
+    /// what follows it in a column — `(+ worktree)` starting two characters
+    /// apart down a mixed list is the whole reason this pads at all.
+    #[test]
+    fn a_shorter_ground_is_padded_so_what_follows_lines_up() {
+        let gone = stale_label(&StaleRow {
+            ground: git::Ground::Gone,
+            ..stale_row("gone-held", Some(worktree(false)), Risk::default())
+        });
+        let landed = stale_label(&stale_row(
+            "landed-held",
+            Some(worktree(false)),
+            Risk::default(),
+        ));
+        assert_eq!(plain(&gone.1), "gone   (+ worktree)");
+        assert_eq!(plain(&landed.1), "landed (+ worktree)");
+        assert_eq!(
+            plain(&gone.1).find('('),
+            plain(&landed.1).find('('),
+            "both annotations should open the parenthesis at the same column"
+        );
+    }
+
+    /// Padding only ever buys alignment for something that follows. A row whose
+    /// whole annotation is its ground gets none, because `align_labels` works
+    /// hard to leave no trailing whitespace and this must not undo that.
+    #[test]
+    fn a_ground_with_nothing_after_it_is_not_padded() {
+        let (_, annotation) = stale_label(&stale_row("fix/typo", None, Risk::default()));
+        assert_eq!(plain(&annotation), "landed");
     }
 
     #[test]
@@ -1612,19 +972,20 @@ mod tests {
                 unmerged: None,
             },
         );
-        assert_eq!(plain(&stale_label(&row).1), "(+ worktree ●)");
+        assert_eq!(plain(&stale_label(&row).1), "landed (+ worktree ●)");
     }
 
     #[test]
     fn stale_label_marks_a_missing_worktree() {
         let row = stale_row("old/thing", Some(worktree(true)), Risk::default());
-        assert_eq!(plain(&stale_label(&row).1), "(+ worktree, missing)");
+        assert_eq!(plain(&stale_label(&row).1), "landed (+ worktree, missing)");
     }
 
-    /// Dirtiness belongs to the worktree, unmerged commits to the branch — so
-    /// one sits inside the parentheses and the other outside.
+    /// The ground leads — why the row is here — and the risks follow: what it
+    /// would cost. Dirtiness belongs to the worktree, unmerged commits to the
+    /// branch, so one sits inside the parentheses and the other outside.
     #[test]
-    fn stale_label_puts_unmerged_outside_the_parens() {
+    fn stale_label_leads_with_the_ground_then_the_risks() {
         let row = stale_row(
             "spike/abandoned",
             Some(worktree(false)),
@@ -1633,7 +994,39 @@ mod tests {
                 unmerged: Some(git::Unmerged::Ahead(2)),
             },
         );
-        assert_eq!(plain(&stale_label(&row).1), "(+ worktree ●) ↑2");
+        assert_eq!(plain(&stale_label(&row).1), "landed (+ worktree ●) ↑2");
+    }
+
+    /// Grounds are words already, so the legend glosses only glyphs — and only
+    /// the glyphs some row actually carries.
+    #[test]
+    fn risk_legend_glosses_only_the_glyphs_on_screen() {
+        let dirty = Risk {
+            dirty: true,
+            unmerged: None,
+        };
+        let unmerged = Risk {
+            dirty: false,
+            unmerged: Some(git::Unmerged::Ahead(2)),
+        };
+        assert_eq!(
+            risk_legend(&[dirty]).as_deref().map(plain).as_deref(),
+            Some("● uncommitted changes")
+        );
+        assert_eq!(
+            risk_legend(&[unmerged]).as_deref().map(plain).as_deref(),
+            Some("↑ unmerged commits")
+        );
+        assert_eq!(
+            risk_legend(&[dirty, unmerged]).as_deref().map(plain),
+            Some("● uncommitted changes   ↑ unmerged commits".to_string())
+        );
+    }
+
+    /// The common case is a list with nothing at stake, which earns no legend.
+    #[test]
+    fn risk_legend_is_absent_when_nothing_is_at_risk() {
+        assert!(risk_legend(&[Risk::default(), Risk::default()]).is_none());
     }
 
     /// Nothing to lose is what lets a removal skip the prompt entirely, so the
@@ -1662,7 +1055,7 @@ mod tests {
     #[test]
     fn stale_rows_never_offer_the_handoff_destination() {
         let worktrees = vec![named_worktree("feature", "/tmp/wt")];
-        let stale = vec!["feature".to_string(), "fix/typo".to_string()];
+        let stale = landed(&["feature", "fix/typo"]);
         let rows = stale_rows(
             stale,
             &worktrees,
@@ -1676,7 +1069,7 @@ mod tests {
     #[test]
     fn stale_rows_without_a_destination_offer_everything() {
         let worktrees = vec![named_worktree("feature", "/tmp/wt")];
-        let stale = vec!["feature".to_string(), "fix/typo".to_string()];
+        let stale = landed(&["feature", "fix/typo"]);
         let rows = stale_rows(
             stale,
             &worktrees,
@@ -1691,7 +1084,7 @@ mod tests {
     fn stale_rows_flag_a_dirty_held_worktree() {
         let worktrees = vec![named_worktree("feature", "/tmp/wt")];
         let rows = stale_rows(
-            vec!["feature".to_string()],
+            landed(&["feature"]),
             &worktrees,
             &std::collections::HashMap::new(),
             None,
@@ -1699,27 +1092,5 @@ mod tests {
         );
         assert!(rows[0].risk.dirty);
         assert!(rows[0].worktree.is_some());
-    }
-
-    #[test]
-    fn align_labels_pads_annotations_into_a_column() {
-        let rows = vec![
-            ("short".to_string(), "(+ worktree)".to_string()),
-            ("much-longer-name".to_string(), "↑1".to_string()),
-        ];
-        let got = align_labels(&rows);
-        assert_eq!(got[0], "short             (+ worktree)");
-        assert_eq!(got[1], "much-longer-name  ↑1");
-    }
-
-    #[test]
-    fn align_labels_leaves_unannotated_rows_bare() {
-        let rows = vec![
-            ("a".to_string(), String::new()),
-            ("bb".to_string(), "↑1".to_string()),
-        ];
-        let got = align_labels(&rows);
-        assert_eq!(got[0], "a", "no trailing padding on a bare row");
-        assert_eq!(got[1], "bb  ↑1");
     }
 }

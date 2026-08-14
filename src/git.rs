@@ -374,6 +374,28 @@ fn merged_anchor(remote: &str) -> Option<(String, String)> {
         .map(|_| (remote_ref, default))
 }
 
+/// Which of the two staleness clauses put a branch on the cleanup prompt. The
+/// clauses cannot both apply: a deleted upstream is read first, and a branch
+/// whose upstream is gone is never asked whether it landed.
+///
+/// A ground says why a branch is offered, never what deleting it would destroy,
+/// so it is rendered as a word and never as a `Marker` — see [ADR
+/// 0004](../docs/adr/0004-a-ground-is-not-a-marker.md).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Ground {
+    /// The upstream it tracked was deleted from the remote.
+    Gone,
+    /// Its work has been absorbed by the anchor.
+    Landed,
+}
+
+/// A stale branch and the ground it is stale on.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StaleBranch {
+    pub ground: Ground,
+    pub name: String,
+}
+
 /// The rule half of [`stale_branches`], split out so it can be tested against
 /// fixed git output. `merged` is the anchor's `--merged` list; `None` for the
 /// anchor stands the merged rule down, leaving only deleted upstreams.
@@ -381,11 +403,14 @@ fn stale_from(
     refs: &HashMap<&str, BranchRef<'_>>,
     merged: &str,
     anchor: Option<&Anchor<'_>>,
-) -> Vec<String> {
-    let mut stale: Vec<String> = refs
+) -> Vec<StaleBranch> {
+    let mut stale: Vec<StaleBranch> = refs
         .iter()
         .filter(|(_, r)| r.gone())
-        .map(|(name, _)| (*name).to_string())
+        .map(|(name, _)| StaleBranch {
+            ground: Ground::Gone,
+            name: (*name).to_string(),
+        })
         .collect();
 
     if let Some(anchor) = anchor {
@@ -396,7 +421,10 @@ fn stale_from(
                     refs.get(name)
                         .is_some_and(|r| !r.gone() && r.landed_on(anchor))
                 })
-                .map(String::from),
+                .map(|name| StaleBranch {
+                    ground: Ground::Landed,
+                    name: name.to_string(),
+                }),
         );
     }
 
@@ -436,7 +464,7 @@ fn stale_from(
 /// branches carry identical refs, so the proxy is the whole of the evidence.
 /// [ADR 0002](../docs/adr/0002-staleness-is-anchored-to-the-default-branch.md)
 /// records why that is accepted rather than guessed at.
-pub fn stale_branches(remote: &str) -> AppResult<Vec<String>> {
+pub fn stale_branches(remote: &str) -> AppResult<Vec<StaleBranch>> {
     let current = current_branch()?;
     let keep = kept_branches(remote);
 
@@ -463,9 +491,9 @@ pub fn stale_branches(remote: &str) -> AppResult<Vec<String>> {
 
     let mut branches = stale_from(&refs, &merged, anchor.as_ref());
 
-    branches.retain(|b| current.as_deref() != Some(b) && !keep.contains(b));
-    branches.sort();
-    branches.dedup();
+    branches.retain(|b| current.as_deref() != Some(&b.name) && !keep.contains(&b.name));
+    branches.sort_by(|a, b| a.name.cmp(&b.name));
+    branches.dedup_by(|a, b| a.name == b.name);
     Ok(branches)
 }
 
@@ -863,7 +891,9 @@ fn run_in(dir: Option<&Path>, args: &[&str]) -> AppResult<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Anchor, Unmerged, branch_refs, parse_track, stale_from, unmerged_from};
+    use super::{
+        Anchor, Ground, StaleBranch, Unmerged, branch_refs, parse_track, stale_from, unmerged_from,
+    };
     use std::collections::HashMap;
 
     /// One `for-each-ref` line per row: name, tip, upstream branch, track.
@@ -885,18 +915,74 @@ mod tests {
         unmerged_from(merged, &branch_refs(&refs_output))
     }
 
-    /// Run the rule against an anchor named `main`. Its own branch is left out
-    /// of `merged` throughout: [`stale_branches`] filters it as kept, so it
-    /// isn't this half's concern.
+    /// Run the rule against an anchor named `main`, keeping only the names —
+    /// which clause fired is [`grounds`]' concern. Its own branch is left out of
+    /// `merged` throughout: [`stale_branches`] filters it as kept, so it isn't
+    /// this half's concern.
     fn stale(refs_output: &str, merged: &str, anchor_tip: &str) -> Vec<String> {
+        let mut got: Vec<String> = grounds(refs_output, merged, anchor_tip)
+            .into_iter()
+            .map(|b| b.name)
+            .collect();
+        got.sort();
+        got
+    }
+
+    /// As [`stale`], but keeping the ground each branch is stale on.
+    fn grounds(refs_output: &str, merged: &str, anchor_tip: &str) -> Vec<StaleBranch> {
         let refs = branch_refs(refs_output);
         let anchor = Anchor {
             branch: "main",
             tip: anchor_tip,
         };
         let mut got = stale_from(&refs, merged, Some(&anchor));
-        got.sort();
+        got.sort_by(|a, b| a.name.cmp(&b.name));
         got
+    }
+
+    /// The two clauses are alternatives, and the row that reports them says
+    /// which fired — so a branch stale on a deleted upstream must not be
+    /// reported as having landed, or vice versa.
+    #[test]
+    fn each_clause_reports_its_own_ground() {
+        let refs_output = head_refs(&[
+            ("main", "aaa", "refs/heads/main", ""),
+            ("abandoned", "bbb", "refs/heads/abandoned", "gone"),
+            ("shipped", "ccc", "", ""),
+        ]);
+        let got = grounds(&refs_output, "shipped", "aaa");
+        assert_eq!(
+            got,
+            vec![
+                StaleBranch {
+                    ground: Ground::Gone,
+                    name: "abandoned".to_string(),
+                },
+                StaleBranch {
+                    ground: Ground::Landed,
+                    name: "shipped".to_string(),
+                },
+            ]
+        );
+    }
+
+    /// A branch whose upstream is gone is never asked whether it landed, so it
+    /// cannot appear twice or under the wrong ground — even when the anchor's
+    /// `--merged` list names it.
+    #[test]
+    fn a_gone_branch_listed_as_merged_is_reported_once_as_gone() {
+        let refs_output = head_refs(&[
+            ("main", "aaa", "refs/heads/main", ""),
+            ("abandoned", "bbb", "refs/heads/abandoned", "gone"),
+        ]);
+        let got = grounds(&refs_output, "abandoned", "aaa");
+        assert_eq!(
+            got,
+            vec![StaleBranch {
+                ground: Ground::Gone,
+                name: "abandoned".to_string(),
+            }]
+        );
     }
 
     /// The reported bug: a branch cut from the anchor and never committed to
