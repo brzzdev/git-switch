@@ -576,6 +576,11 @@ struct StaleRow {
     ground: git::Ground,
     worktree: Option<git::Worktree>,
     risk: Risk,
+    /// The tip this branch was proven *Equivalent* at, where it was. It rides
+    /// here rather than on the `Risk` because it is not a risk: it is what
+    /// licenses the delete in the absence of one, and it is pinned to a commit
+    /// so the delete can check the branch hasn't moved since.
+    proven: Option<String>,
 }
 
 /// Offers to delete stale branches, and the worktrees holding them.
@@ -589,6 +594,13 @@ pub(crate) fn prompt_delete_stale_branches(
     destination: Option<&str>,
     remote: &str,
 ) -> AppResult<()> {
+    // Non-interactive (piped/CI): nothing here can be asked, so ask git nothing
+    // either. The equivalence probe below writes an object per candidate, and a
+    // run that will never prompt has no use for the answer.
+    if !is_interactive() {
+        return Ok(());
+    }
+
     let stale = git::stale_branches(remote)?;
     let worktrees = git::worktree_list().unwrap_or_default();
     // Judge risk — and later delete — from the main worktree, where HEAD is
@@ -597,10 +609,27 @@ pub(crate) fn prompt_delete_stale_branches(
     // whenever that worktree sits on something unrelated, and per ADR 0001 the
     // marker would then license a force-delete it never warned about.
     let main_dir = worktrees.iter().find(|w| w.is_main).map(|w| w.path.clone());
-    let unmerged = git::unmerged_branches(main_dir.as_deref()).unwrap_or_default();
-    let rows = stale_rows(stale, &worktrees, &unmerged, destination, &|path| {
-        git::worktree_dirty(path)
-    });
+    let mut unmerged = git::unmerged_branches(main_dir.as_deref()).unwrap_or_default();
+    // A branch whose work landed by squash merge is unmerged by every test git
+    // offers, and warning about it warns of nothing. Ask only where a warning
+    // would otherwise be drawn, then drop what the proof defeats *before* any
+    // `Risk` is built: an equivalent branch is simply not unmerged from here on,
+    // and no row, legend or license need know why.
+    let candidates: Vec<String> = stale
+        .iter()
+        .map(|b| b.name.clone())
+        .filter(|name| unmerged.contains_key(name))
+        .collect();
+    let equivalent = git::equivalent_branches(main_dir.as_deref(), remote, &candidates);
+    unmerged.retain(|name, _| !equivalent.contains_key(name));
+    let rows = stale_rows(
+        stale,
+        &worktrees,
+        &unmerged,
+        &equivalent,
+        destination,
+        &|path| git::worktree_dirty(path),
+    );
     if rows.is_empty() {
         return Ok(());
     }
@@ -637,12 +666,15 @@ pub(crate) fn prompt_delete_stale_branches(
 }
 
 /// Builds the picker rows, pairing each stale branch with the worktree holding
-/// it and what deleting it would destroy. `dirty` is injected so the rule can be
-/// tested without a repo on disk.
+/// it and what deleting it would destroy. `equivalent` maps a branch proven
+/// equivalent to the tip it was proven at; the caller has already taken those
+/// names out of `unmerged`, so all that is left to do here is carry the proof.
+/// `dirty` is injected so the rule can be tested without a repo on disk.
 fn stale_rows(
     stale: Vec<git::StaleBranch>,
     worktrees: &[git::Worktree],
     unmerged: &std::collections::HashMap<String, git::Unmerged>,
+    equivalent: &std::collections::HashMap<String, String>,
     destination: Option<&str>,
     dirty: &dyn Fn(&Path) -> bool,
 ) -> Vec<StaleRow> {
@@ -657,11 +689,13 @@ fn stale_rows(
                     .is_some_and(|w| !w.prunable && dirty(&w.path)),
                 unmerged: unmerged.get(&b.name).copied(),
             };
+            let proven = equivalent.get(&b.name).cloned();
             StaleRow {
                 branch: b.name,
                 ground: b.ground,
                 worktree,
                 risk,
+                proven,
             }
         })
         .collect()
@@ -753,7 +787,14 @@ fn delete_stale_row(
         },
         None => removal::Target::Branch { name: &row.branch },
     };
-    let report = removal::remove(target, removal::License::shown(row.risk), steps)?;
+    // A proven branch draws no marker, so the proof is the only thing that could
+    // license discarding its commits — and it licenses them only at the tip it
+    // was established on.
+    let license = match &row.proven {
+        Some(tip) => removal::License::proven(row.risk, tip),
+        None => removal::License::shown(row.risk),
+    };
+    let report = removal::remove(target, license, steps)?;
 
     for line in reporting::removal_outcome(&report) {
         eprintln!("{line}");
@@ -832,6 +873,7 @@ mod tests {
             ground: git::Ground::Landed,
             worktree,
             risk,
+            proven: None,
         }
     }
 
@@ -1060,6 +1102,7 @@ mod tests {
             stale,
             &worktrees,
             &std::collections::HashMap::new(),
+            &std::collections::HashMap::new(),
             Some("feature"),
             &|_| false,
         );
@@ -1074,6 +1117,7 @@ mod tests {
             stale,
             &worktrees,
             &std::collections::HashMap::new(),
+            &std::collections::HashMap::new(),
             None,
             &|_| false,
         );
@@ -1087,10 +1131,36 @@ mod tests {
             landed(&["feature"]),
             &worktrees,
             &std::collections::HashMap::new(),
+            &std::collections::HashMap::new(),
             None,
             &|path| path == Path::new("/tmp/wt"),
         );
         assert!(rows[0].risk.dirty);
         assert!(rows[0].worktree.is_some());
+    }
+
+    /// A proof is not a risk: it says what may be destroyed *without* asking,
+    /// so it rides on the row beside the risk rather than inside it. The name
+    /// has already left the unmerged map by the time rows are built, which is
+    /// what leaves the row unmarked.
+    #[test]
+    fn a_proven_branch_carries_its_tip_and_no_unmerged_risk() {
+        let equivalent =
+            std::collections::HashMap::from([("shipped".to_string(), "abc".to_string())]);
+        let rows = stale_rows(
+            landed(&["shipped"]),
+            &[],
+            &std::collections::HashMap::new(),
+            &equivalent,
+            None,
+            &|_| false,
+        );
+        assert_eq!(rows[0].proven.as_deref(), Some("abc"));
+        assert!(rows[0].risk.unmerged.is_none());
+        assert!(
+            !rows[0].risk.any(),
+            "nothing to warn about, so nothing to ask"
+        );
+        assert_eq!(plain(&stale_label(&rows[0]).1), "landed");
     }
 }

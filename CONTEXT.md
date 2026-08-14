@@ -59,7 +59,7 @@ The rendering of a risk in a picker row: `●` for dirty, `↑N` for unmerged. A
 _Avoid_: Flag, badge, indicator
 
 **Forcing**:
-Destroying something git would otherwise protect — `worktree remove --force`, `branch -D`. Only ever licensed by a warning the user has already seen.
+Destroying something git would otherwise protect — `worktree remove --force`, `branch -D`. Only ever licensed: by a warning the user has already seen, or — for a branch alone — by proof that it is *Equivalent*.
 _Avoid_: Overriding, ignoring
 
 **License**:

@@ -706,6 +706,85 @@ fn unmerged_from(
         .collect()
 }
 
+/// Branches whose whole diff against the anchor is already in the anchor under
+/// some other commit — squash-merged, rebase-merged or cherry-picked. Each is
+/// mapped to the tip the proof was established at, since a *License* covers what
+/// was proven and nothing more: see [ADR
+/// 0005](../docs/adr/0005-proof-of-equivalence-is-a-license.md).
+///
+/// Equivalence is positive evidence and only ever subtracts, so ask it only of
+/// branches a warning would otherwise be drawn over — ones both stale and
+/// unmerged. A branch cut from the anchor and never committed to has no diff to
+/// find already there, and is never proven by this; anything that cannot be
+/// established at all leaves the branch treated as holding unique work.
+///
+/// `dir` must be the worktree the delete will run from, so the tip proven here
+/// and the tip re-checked there are read through the same root. Refs are shared,
+/// so the two agree anyway; asking from one place is what keeps that a fact
+/// rather than a coincidence.
+#[must_use]
+pub fn equivalent_branches(
+    dir: Option<&Path>,
+    remote: &str,
+    candidates: &[String],
+) -> HashMap<String, String> {
+    let Some((anchor_ref, _)) = merged_anchor(remote) else {
+        return HashMap::new();
+    };
+    candidates
+        .iter()
+        .filter_map(|name| {
+            let tip = branch_tip(dir, name)?;
+            equivalent_to(dir, &anchor_ref, &tip).then(|| (name.clone(), tip))
+        })
+        .collect()
+}
+
+/// Whether everything `tip` adds over its merge-base with the anchor is already
+/// in the anchor as some other commit.
+///
+/// Git compares content by patch id, but only between commits — so the branch's
+/// whole diff is synthesised as one commit with `commit-tree`, parented on that
+/// merge-base, and handed to `git cherry`, which prints `-` for a commit whose
+/// patch is already upstream and `+` for one that isn't. The synthesised commit
+/// is dangling and unreachable; gc reaps it. An empty diff has no patch id to
+/// match, so a branch holding no work of its own comes back `+` — exactly the
+/// answer equivalence owes it.
+///
+/// Every step is a question, so a git that refuses one answers "not equivalent"
+/// and says nothing about it.
+fn equivalent_to(dir: Option<&Path>, anchor_ref: &str, tip: &str) -> bool {
+    let Ok(base) = run_in(dir, &["merge-base", anchor_ref, tip]) else {
+        return false;
+    };
+    let Ok(tree) = run_in(dir, &["rev-parse", &format!("{tip}^{{tree}}")]) else {
+        return false;
+    };
+    let Ok(probe) = run_in(
+        dir,
+        &[
+            "commit-tree",
+            tree.trim(),
+            "-p",
+            base.trim(),
+            "-m",
+            "git-switch: equivalence probe",
+        ],
+    ) else {
+        return false;
+    };
+    let Ok(cherry) = run_in(dir, &["cherry", anchor_ref, probe.trim()]) else {
+        return false;
+    };
+    cherry.lines().next().is_some_and(|l| l.starts_with('-'))
+}
+
+/// Where `branch` points, or `None` where the ref doesn't resolve.
+#[must_use]
+pub(crate) fn branch_tip(dir: Option<&Path>, branch: &str) -> Option<String> {
+    rev_parse(dir, &format!("refs/heads/{branch}")).ok()
+}
+
 #[must_use]
 pub fn worktree_for_branch(worktrees: &[Worktree], branch: &str) -> Option<Worktree> {
     worktrees

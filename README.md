@@ -164,6 +164,8 @@ After a switch, git-switch offers to delete branches that have outlived their pu
 
 The markers mean the same thing as in `wt rm`: `●` for a worktree with uncommitted changes, `↑` for commits that aren't merged anywhere — the case where a branch's remote was deleted while it still held unpushed work. `(+ worktree, missing)` marks a leftover registration whose directory is already gone. Every deletion reports itself, naming the path of any worktree that was removed.
 
+A squash-merged branch draws no `↑`, and is deleted without being asked about. Git considers it unmerged — its commits are nowhere in your default branch under those hashes — but its whole diff is there under another one, so the warning would name commits nothing can lose. git-switch proves that for itself, locally, and only ever to *remove* a warning: a branch it can't prove keeps its marker, and one whose proof it can't establish at all is treated as holding unique work. See [ADR 0005](docs/adr/0005-proof-of-equivalence-is-a-license.md).
+
 ## Configuration
 
 Protect branches from the "delete merged branches" prompt by adding them to your Git config:
