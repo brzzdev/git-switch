@@ -41,9 +41,11 @@ Two routes, and either proves it, because work lands in two shapes and neither t
   rename reported as its destination alone would hide the deletion of its source. Blind to how the
   work arrived, so a rebase-merge or a scattered cherry-pick answers it; broken by any later edit to
   those files, which is why it cannot stand alone. A branch that touched nothing has no paths to
-  compare and is proven by neither route. Both diffs are asked for in terms configuration cannot
-  narrow — submodules unignored, no textconv, no external driver — since a proof read from a diff
-  the repository chose to shrink is a branch deleted for work the anchor never took.
+  compare and is proven by neither route. *Every* diff either route reads — the exact comparison
+  included — is asked for in terms configuration cannot narrow: submodules unignored, no textconv,
+  no external driver. A proof read from a diff the repository chose to shrink is a branch deleted
+  for work the anchor never took, and an "exact" comparison of what a driver renders is not exact
+  at all.
 
 ## Consequences
 
@@ -66,8 +68,11 @@ Two routes, and either proves it, because work lands in two shapes and neither t
   of which `branch -D` does. So the holder is looked for either side of the delete — the ref is put
   back where a worktree won the race, since the branch a worktree checked out must still be there —
   and the config is cleared key by key, because the section-wide removal git offers cannot parse
-  every name git allows. A key that will not go is reported rather than swallowed: the branch has
-  gone, and clearing what outlived it is now the user's to do.
+  every name git allows. What outlived the branch is read back rather than inferred from exit codes,
+  and reported rather than swallowed: the branch has gone, and clearing the rest is now the user's
+  to do. Past the delete nothing may fail silently either — a restore that cannot be performed is an
+  outcome of its own, since a worktree left on a missing ref is the one state a message cannot
+  repair.
 - **An inconclusive proof means unmerged.** Equivalence is positive evidence that defeats a warning;
   where it cannot be established — no anchor, a failing `merge-base` — the warning stands, silently
   and indistinguishably from a branch that genuinely holds unique work.

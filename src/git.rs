@@ -842,22 +842,30 @@ fn patch_landed(dir: Option<&Path>, anchor: &str, tip: &str, base: &str) -> bool
         // Asked this way round, `-` marks the anchor-side commits whose patch the
         // probe already carries: the landing commits themselves.
         let matches = run_in(dir, &["cherry", probe, anchor]).ok()?;
-        let wanted = verbatim_patch_id(dir, &["diff", base, tip])?;
+        let wanted = verbatim_patch_id(dir, "diff", &[base, tip])?;
         let exact = matches
             .lines()
             .filter_map(|l| l.strip_prefix("- "))
-            .any(|sha| verbatim_patch_id(dir, &["show", sha]).is_some_and(|id| id == wanted));
+            .any(|sha| verbatim_patch_id(dir, "show", &[sha]).is_some_and(|id| id == wanted));
         exact.then_some(true)
     };
     landed().unwrap_or(false)
 }
 
-/// The patch id of whatever diff `args` produces, computed *verbatim* — the
-/// whitespace-sensitive reading, unlike the normalised ids `git cherry` compares.
-/// `git patch-id` reads a diff on stdin and answers `<patch-id> <commit-id>`; only
-/// the first field is a fact about the content.
-fn verbatim_patch_id(dir: Option<&Path>, args: &[&str]) -> Option<String> {
-    let diff = run_in(dir, args).ok()?;
+/// The patch id of the diff `command` produces over `rest`, computed *verbatim*
+/// — the whitespace-sensitive reading, unlike the normalised ids `git cherry`
+/// compares. `git patch-id` reads a diff on stdin and answers `<patch-id>
+/// <commit-id>`; only the first field is a fact about the content.
+///
+/// The diff is asked for in [`UNSHRINKABLE`] terms like every other the proof
+/// reads: a textconv driver that renders two files alike would otherwise make an
+/// exact comparison agree about content that differs, which is the whole thing
+/// this comparison exists to catch.
+fn verbatim_patch_id(dir: Option<&Path>, command: &str, rest: &[&str]) -> Option<String> {
+    let mut args = vec![command];
+    args.extend(UNSHRINKABLE);
+    args.extend(rest);
+    let diff = run_in(dir, &args).ok()?;
     let output = run_with_stdin(dir, &["patch-id", "--verbatim"], diff.as_bytes()).ok()?;
     let id = output.split_whitespace().next()?.to_string();
     (!id.is_empty()).then_some(id)
@@ -1068,13 +1076,32 @@ pub fn delete_branch_at(
             _ => None,
         });
     }
-    if held_by_worktree(dir, branch)? {
-        // The empty old-value pins "and only if it does not exist yet", so a
-        // ref recreated in the gap is not clobbered by putting this one back.
-        run_in(dir, &["update-ref", &refname, expected, ""])?;
-        return Ok(Some(refused_as_held(branch)));
+    // Past the delete, nothing may leave by `?`: the branch is already gone, and
+    // an error that travels takes with it the fact that it went. A holder found
+    // *or* a holder that couldn't be looked for both mean the same thing here —
+    // put it back — and only the restore itself failing is worth an outcome of
+    // its own, since that is the one state nobody can repair from the message
+    // alone.
+    let held = held_by_worktree(dir, branch);
+    if matches!(held, Ok(false)) {
+        return Ok(Some(clear_branch_config(dir, branch)));
     }
-    Ok(Some(clear_branch_config(dir, branch)))
+    // The empty old-value pins "and only if it does not exist yet", so a ref
+    // recreated in the gap is not clobbered by putting this one back.
+    Ok(Some(
+        match run_in(dir, &["update-ref", &refname, expected, ""]) {
+            Ok(_) => match held {
+                Ok(_) => refused_as_held(branch),
+                Err(e) => BranchDeleteOutcome::Failed(format!(
+                    "kept '{branch}': couldn't tell whether a worktree holds it: {e}"
+                )),
+            },
+            Err(e) => BranchDeleteOutcome::Failed(format!(
+                "deleted '{branch}' at {expected}, then failed to restore it \
+                 for the worktree holding it: {e}"
+            )),
+        },
+    ))
 }
 
 /// Whether any worktree has `branch` checked out, asked from the same `dir` the
@@ -1101,23 +1128,43 @@ fn refused_as_held(branch: &str) -> BranchDeleteOutcome {
 /// Each key is unset by its exact name rather than the section dropped whole:
 /// `--remove-section branch.<name>` cannot parse every name git allows — it
 /// fails outright on `topic]x` — and would leave the keys it choked on behind.
-/// Nothing to remove is the ordinary case and not a failure; anything that
-/// refuses to go is reported, since the branch has already gone and the
-/// leftovers are now the user's to clear.
+/// Nothing to remove is the ordinary case and not a failure.
+///
+/// What survives is read back rather than inferred from exit codes: `--list`
+/// repeats a multi-valued key, and the `--unset-all` that clears the first
+/// mention then fails on the second having nothing left to do — an accurate
+/// report can only come from looking again. Whatever is still there is named,
+/// since the branch has gone and the leftovers are now the user's to clear.
 fn clear_branch_config(dir: Option<&Path>, branch: &str) -> BranchDeleteOutcome {
-    let Ok(listing) = run_in(dir, &["config", "--local", "--list", "--name-only", "-z"]) else {
-        return BranchDeleteOutcome::Deleted;
+    let keys = |listing: String| -> Vec<String> {
+        listing
+            .split('\0')
+            .filter(|key| config_branch(key) == Some(branch))
+            .map(String::from)
+            .collect()
     };
-    let left: Vec<String> = listing
-        .split('\0')
-        .filter(|key| config_branch(key) == Some(branch))
-        .filter(|key| run_in(dir, &["config", "--local", "--unset-all", key]).is_err())
-        .map(String::from)
-        .collect();
+    let mut to_clear = match local_config_keys(dir) {
+        Ok(listing) => keys(listing),
+        // Config that can't even be read can't be cleared, and saying the branch
+        // went cleanly would be a claim about something never looked at.
+        Err(e) => return BranchDeleteOutcome::DeletedLeavingConfig(e.to_string()),
+    };
+    to_clear.dedup();
+    for key in &to_clear {
+        let _ = run_in(dir, &["config", "--local", "--unset-all", key]);
+    }
+    let left = match local_config_keys(dir) {
+        Ok(listing) => keys(listing),
+        Err(e) => return BranchDeleteOutcome::DeletedLeavingConfig(e.to_string()),
+    };
     if left.is_empty() {
         return BranchDeleteOutcome::Deleted;
     }
     BranchDeleteOutcome::DeletedLeavingConfig(left.join(", "))
+}
+
+fn local_config_keys(dir: Option<&Path>) -> AppResult<String> {
+    run_in(dir, &["config", "--local", "--list", "--name-only", "-z"])
 }
 
 /// Which branch a `branch.<name>.<key>` config entry belongs to, or `None` for

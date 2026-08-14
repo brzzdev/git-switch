@@ -2363,6 +2363,82 @@ fn a_proven_delete_clears_config_for_an_awkward_branch_name() {
     );
 }
 
+/// The exact comparison is only exact if it reads the file rather than what a
+/// driver makes of it: a textconv that strips spaces renders `foo bar` and
+/// `foobar` alike, which would agree with the normalised patch ids that let the
+/// whitespace case through in the first place.
+#[test]
+fn a_textconv_driver_cannot_make_the_exact_comparison_agree() {
+    let (_bare, work) = setup();
+
+    fs::write(work.path().join("a.txt"), "foo\n").unwrap();
+    fs::write(work.path().join(".gitattributes"), "*.txt diff=nospace\n").unwrap();
+    git(work.path(), &["add", "."]);
+    git(
+        work.path(),
+        &["commit", "-m", "the line before either edit"],
+    );
+    // A driver that renders every version with its spaces removed.
+    git(
+        work.path(),
+        &["config", "diff.nospace.textconv", "tr -d ' ' <"],
+    );
+    git(work.path(), &["push", "origin", "main"]);
+
+    git(work.path(), &["checkout", "-b", "feature"]);
+    fs::write(work.path().join("a.txt"), "foo bar\n").unwrap();
+    git(work.path(), &["commit", "-am", "spaced"]);
+    git(work.path(), &["push", "-u", "origin", "feature"]);
+
+    git(work.path(), &["checkout", "main"]);
+    fs::write(work.path().join("a.txt"), "foobar\n").unwrap();
+    git(work.path(), &["commit", "-am", "unspaced"]);
+    git(work.path(), &["push", "origin", "main"]);
+    git(work.path(), &["push", "origin", "--delete", "feature"]);
+    git(work.path(), &["fetch", "--prune", "origin"]);
+    git(work.path(), &["branch", "dest", "main"]);
+
+    let text = cleanup_prompt(work.path(), "dest", "feature");
+
+    assert!(
+        text.contains('↑'),
+        "the spaces are the branch's own, whatever the driver renders: {text}"
+    );
+}
+
+/// `git config --list` repeats a multi-valued key, and the `--unset-all` that
+/// clears the first mention leaves the second with nothing to do. Reading exit
+/// codes would call that a leftover and warn about config that is long gone.
+#[test]
+fn a_multi_valued_config_key_is_not_reported_as_left_behind() {
+    let (_bare, work) = setup();
+
+    push_topic_branch(work.path(), "feature");
+    squash_merge_upstream(work.path(), "feature");
+    git(
+        work.path(),
+        &[
+            "config",
+            "--add",
+            "branch.feature.merge",
+            "refs/heads/other",
+        ],
+    );
+    git(work.path(), &["branch", "dest", "main"]);
+
+    let text = cleanup_prompt(work.path(), "dest", "feature");
+
+    assert!(
+        !text.contains("config"),
+        "both values went, so there is nothing to warn about: {text}"
+    );
+    let config = stdout_str(&git(work.path(), &["config", "--list", "--name-only"]));
+    assert!(
+        !config.contains("branch.feature."),
+        "and both really did go; got: {config}"
+    );
+}
+
 /// A branch name may contain dots, and git reads a config name by its first and
 /// last dot alone — so `branch.topic.extra.remote` belongs to `topic.extra`.
 /// Deleting `topic` must not clear it.
