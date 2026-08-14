@@ -146,6 +146,22 @@ fn branch_line(prefix: &str, branch: &str, outcome: &git::BranchDeleteOutcome) -
             "{} {prefix}deleted {branch}, but left config behind: {keys}",
             warn(),
         ),
+        // Nothing is known to have survived here, only that nobody could look —
+        // so the line says that, and not that something was left behind.
+        git::BranchDeleteOutcome::DeletedConfigUnverified(detail) => format!(
+            "{} {prefix}deleted {branch}, but couldn't check whether its config \
+             went with it: {detail}",
+            warn(),
+        ),
+        // The one outcome describing a repository that needs repair, so it leads
+        // with what happened to the ref and hands over the command to undo it.
+        git::BranchDeleteOutcome::DeletedNotRestored { tip, detail } => format!(
+            "{} {prefix}deleted {branch}, then couldn't put it back for the \
+             worktree now holding it: {detail} (restore it with \
+             `git branch -- {} {tip}`)",
+            warn(),
+            shell_quote(branch),
+        ),
         git::BranchDeleteOutcome::NotMerged => format!(
             "{} {prefix}kept {branch} with unmerged commits \
              (run `git branch -D -- {}` to force-delete)",
@@ -288,6 +304,37 @@ mod tests {
             plain_all(&removal_outcome(&report)),
             ["! deleted feature, but left config behind: \
               branch.feature.remote, branch.feature.merge"]
+        );
+    }
+
+    /// Deleted-and-something-else is not the same answer as could-not-delete,
+    /// and a headline claiming the branch is still there would send the user
+    /// looking for a ref that has gone. Each of these leads with the deletion.
+    #[test]
+    fn every_deleted_outcome_leads_with_the_deletion() {
+        let line = |outcome| {
+            let report = report(
+                removal::Target::Branch { name: "feature" },
+                None,
+                Some(outcome),
+            );
+            plain_all(&removal_outcome(&report)).join("")
+        };
+
+        assert_eq!(
+            line(git::BranchDeleteOutcome::DeletedConfigUnverified(
+                "fatal: bad config line 3".into()
+            )),
+            "! deleted feature, but couldn't check whether its config went with it: \
+             fatal: bad config line 3"
+        );
+        assert_eq!(
+            line(git::BranchDeleteOutcome::DeletedNotRestored {
+                tip: "abc123".into(),
+                detail: "cannot lock ref".into(),
+            }),
+            "! deleted feature, then couldn't put it back for the worktree now holding it: \
+             cannot lock ref (restore it with `git branch -- feature abc123`)"
         );
     }
 

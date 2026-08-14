@@ -72,7 +72,9 @@ Two routes, and either proves it, because work lands in two shapes and neither t
   and reported rather than swallowed: the branch has gone, and clearing the rest is now the user's
   to do. Past the delete nothing may fail silently either — a restore that cannot be performed is an
   outcome of its own, since a worktree left on a missing ref is the one state a message cannot
-  repair.
+  repair, and so is a config that could not be inspected, which is not the same claim as a config
+  left behind. Each of them leads with the deletion when it is worded: the branch has gone, and a
+  line saying otherwise sends the user looking for a ref that isn't there.
 - **An inconclusive proof means unmerged.** Equivalence is positive evidence that defeats a warning;
   where it cannot be established — no anchor, a failing `merge-base` — the warning stands, silently
   and indistinguishably from a branch that genuinely holds unique work.

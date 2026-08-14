@@ -1093,13 +1093,13 @@ pub fn delete_branch_at(
             Ok(_) => match held {
                 Ok(_) => refused_as_held(branch),
                 Err(e) => BranchDeleteOutcome::Failed(format!(
-                    "kept '{branch}': couldn't tell whether a worktree holds it: {e}"
+                    "couldn't tell whether a worktree holds it: {e}"
                 )),
             },
-            Err(e) => BranchDeleteOutcome::Failed(format!(
-                "deleted '{branch}' at {expected}, then failed to restore it \
-                 for the worktree holding it: {e}"
-            )),
+            Err(e) => BranchDeleteOutcome::DeletedNotRestored {
+                tip: expected.to_string(),
+                detail: e.to_string(),
+            },
         },
     ))
 }
@@ -1146,8 +1146,9 @@ fn clear_branch_config(dir: Option<&Path>, branch: &str) -> BranchDeleteOutcome 
     let mut to_clear = match local_config_keys(dir) {
         Ok(listing) => keys(listing),
         // Config that can't even be read can't be cleared, and saying the branch
-        // went cleanly would be a claim about something never looked at.
-        Err(e) => return BranchDeleteOutcome::DeletedLeavingConfig(e.to_string()),
+        // went cleanly would be a claim about something never looked at — but
+        // nor is any key known to have survived, so this is neither.
+        Err(e) => return BranchDeleteOutcome::DeletedConfigUnverified(e.to_string()),
     };
     to_clear.dedup();
     for key in &to_clear {
@@ -1155,7 +1156,7 @@ fn clear_branch_config(dir: Option<&Path>, branch: &str) -> BranchDeleteOutcome 
     }
     let left = match local_config_keys(dir) {
         Ok(listing) => keys(listing),
-        Err(e) => return BranchDeleteOutcome::DeletedLeavingConfig(e.to_string()),
+        Err(e) => return BranchDeleteOutcome::DeletedConfigUnverified(e.to_string()),
     };
     if left.is_empty() {
         return BranchDeleteOutcome::Deleted;
@@ -1196,12 +1197,26 @@ pub fn force_delete_branch(dir: Option<&Path>, branch: &str) -> AppResult<Branch
     ))
 }
 
+/// What became of a branch. The three `Deleted*` cases all mean the branch went
+/// — they differ in what happened *after* that, and are kept apart because a
+/// line reading "could not delete" over a branch that was in fact deleted tells
+/// the user the opposite of the repository's state.
 #[derive(Debug, Clone)]
 pub enum BranchDeleteOutcome {
     Deleted,
+    /// Deleted, but whether its config went with it could not be established —
+    /// git's reason, since no key was ever read to name.
+    DeletedConfigUnverified(String),
     /// Deleted, but config of its own outlived it — the keys, so the user can
     /// clear what git-switch couldn't.
     DeletedLeavingConfig(String),
+    /// Deleted at `tip`, and then not put back for a worktree that took the
+    /// branch in the meantime: the ref is gone and that worktree points at
+    /// nothing. The one outcome that describes a repository needing repair.
+    DeletedNotRestored {
+        tip: String,
+        detail: String,
+    },
     /// Kept because it has commits not merged into its upstream or HEAD.
     NotMerged,
     Failed(String),
