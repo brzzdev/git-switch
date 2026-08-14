@@ -143,6 +143,14 @@ pub(crate) trait Steps {
 
     fn delete_branch(&mut self, branch: &str, force: bool) -> AppResult<git::BranchDeleteOutcome>;
 
+    /// Delete `branch` only while it still stands at `expected`, in one
+    /// operation. `None` means it had moved and nothing was deleted.
+    fn delete_branch_at(
+        &mut self,
+        branch: &str,
+        expected: &str,
+    ) -> AppResult<Option<git::BranchDeleteOutcome>>;
+
     fn remove_worktree(
         &mut self,
         path: &Path,
@@ -180,6 +188,14 @@ impl Steps for GitSteps {
         } else {
             git::delete_branch_if_merged(dir, branch)
         }
+    }
+
+    fn delete_branch_at(
+        &mut self,
+        branch: &str,
+        expected: &str,
+    ) -> AppResult<Option<git::BranchDeleteOutcome>> {
+        git::delete_branch_at(self.main.as_deref(), branch, expected)
     }
 
     fn remove_worktree(
@@ -221,17 +237,26 @@ pub(crate) fn remove<'a>(
         // license covers both or neither: a branch that moved has work nobody
         // proved, and an anchor rewound out from under it (by a removal hook on
         // an earlier row, say) no longer holds the content that made the branch
-        // safe to discard. Either way it falls to `-d` and meets git's own
-        // guard, exactly as an unmarked worktree does.
-        let force = match &license.branch {
-            BranchLicense::None => false,
-            BranchLicense::Outright => true,
-            BranchLicense::Proven(proof) => {
-                steps.resolve(&format!("refs/heads/{branch}")).as_ref() == Some(&proof.tip)
-                    && steps.resolve(&proof.anchor_ref).as_ref() == Some(&proof.anchor_tip)
+        // safe to discard. Either lapse drops to `-d`, to meet git's own guard
+        // exactly as an unmarked worktree does.
+        //
+        // The branch half is checked *by* the delete rather than before it:
+        // `delete_branch_at` compares and deletes in one operation, so a branch
+        // that grows a commit in between is not discarded unwarned. The anchor
+        // is checked here, since no single git command can speak for two refs.
+        let outcome = match &license.branch {
+            BranchLicense::Outright => steps.delete_branch(branch, true)?,
+            BranchLicense::Proven(proof)
+                if steps.resolve(&proof.anchor_ref).as_ref() == Some(&proof.anchor_tip) =>
+            {
+                match steps.delete_branch_at(branch, &proof.tip)? {
+                    Some(outcome) => outcome,
+                    None => steps.delete_branch(branch, false)?,
+                }
             }
+            BranchLicense::None | BranchLicense::Proven(_) => steps.delete_branch(branch, false)?,
         };
-        report.branch = Some(steps.delete_branch(branch, force)?);
+        report.branch = Some(outcome);
     }
 
     Ok(report)
@@ -248,8 +273,16 @@ mod tests {
     /// was forced.
     #[derive(Debug, PartialEq, Eq)]
     enum Call {
-        RemoveWorktree { force: bool },
-        DeleteBranch { force: bool },
+        RemoveWorktree {
+            force: bool,
+        },
+        DeleteBranch {
+            force: bool,
+        },
+        /// The pinned delete, and whether the branch was still there to take it.
+        DeleteBranchAt {
+            hit: bool,
+        },
     }
 
     /// Runs the steps from scripted outcomes and records what it was asked to
@@ -310,6 +343,18 @@ mod tests {
         ) -> AppResult<git::BranchDeleteOutcome> {
             self.calls.push(Call::DeleteBranch { force });
             Ok(self.branch.clone())
+        }
+
+        /// Answers as git's pinned delete does: it goes through only while the
+        /// branch still stands where the caller expects.
+        fn delete_branch_at(
+            &mut self,
+            branch: &str,
+            expected: &str,
+        ) -> AppResult<Option<git::BranchDeleteOutcome>> {
+            let hit = self.resolve(&format!("refs/heads/{branch}")).as_deref() == Some(expected);
+            self.calls.push(Call::DeleteBranchAt { hit });
+            Ok(hit.then(|| self.branch.clone()))
         }
 
         fn remove_worktree(
@@ -480,9 +525,10 @@ mod tests {
 
     /// Proof is the third source of license (ADR 0005): an equivalent branch
     /// draws no marker, so nothing else in its license would force anything, and
-    /// the proof alone is what discards the commits git would refuse.
+    /// the proof alone is what discards the commits git would refuse. It never
+    /// reaches `branch -D`, since what it licenses is pinned to a commit.
     #[test]
-    fn a_proof_forces_the_delete_while_what_it_was_established_on_still_holds() {
+    fn a_proof_takes_the_pinned_delete_and_not_a_blanket_force() {
         let mut steps = FakeSteps::new();
         remove(
             held(),
@@ -494,7 +540,7 @@ mod tests {
             steps.calls,
             vec![
                 Call::RemoveWorktree { force: false },
-                Call::DeleteBranch { force: true },
+                Call::DeleteBranchAt { hit: true },
             ]
         );
     }
@@ -502,26 +548,46 @@ mod tests {
     /// A license covers what was established and nothing more, and equivalence
     /// was established on two things at once. Move either — the branch grows a
     /// commit nobody proved, or the anchor is rewound and no longer holds the
-    /// content that made the branch safe to discard — and the delete falls to
-    /// `-d` to meet git's own guard.
+    /// content that made the branch safe to discard — and the delete meets
+    /// git's own guard instead.
+    ///
+    /// The two lapse differently, and deliberately: a branch that moved is
+    /// caught *by* the pinned delete, which is what closes the window between
+    /// checking and deleting, while an anchor that moved is caught before it,
+    /// because no one git command can speak for two refs.
     #[test]
     fn a_proof_lapses_when_either_the_branch_or_the_anchor_moves() {
-        for moved in ["refs/heads/feature", ANCHOR_REF] {
-            let mut steps = FakeSteps::new().moved(moved);
-            remove(
-                held(),
-                &License::proven(Risk::default(), &proof()),
-                &mut steps,
-            )
-            .expect("no git to fail");
-            assert_eq!(
-                steps.calls,
-                vec![
-                    Call::RemoveWorktree { force: false },
-                    Call::DeleteBranch { force: false },
-                ],
-                "{moved} moved, so the proof no longer covers the delete"
-            );
-        }
+        let mut branch_moved = FakeSteps::new().moved("refs/heads/feature");
+        remove(
+            held(),
+            &License::proven(Risk::default(), &proof()),
+            &mut branch_moved,
+        )
+        .expect("no git to fail");
+        assert_eq!(
+            branch_moved.calls,
+            vec![
+                Call::RemoveWorktree { force: false },
+                Call::DeleteBranchAt { hit: false },
+                Call::DeleteBranch { force: false },
+            ],
+            "the pinned delete declines, and git's own guard decides instead"
+        );
+
+        let mut anchor_moved = FakeSteps::new().moved(ANCHOR_REF);
+        remove(
+            held(),
+            &License::proven(Risk::default(), &proof()),
+            &mut anchor_moved,
+        )
+        .expect("no git to fail");
+        assert_eq!(
+            anchor_moved.calls,
+            vec![
+                Call::RemoveWorktree { force: false },
+                Call::DeleteBranch { force: false },
+            ],
+            "the content is no longer on the anchor, so nothing is pinned at all"
+        );
     }
 }

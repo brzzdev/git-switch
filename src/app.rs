@@ -672,7 +672,7 @@ pub(crate) fn prompt_delete_stale_branches(
 
 /// Builds the picker rows, pairing each stale branch with the worktree holding
 /// it and what deleting it would destroy. `equivalent` maps a branch proven
-/// equivalent to the tip it was proven at, and a proof is subtracted here —
+/// equivalent to the [`git::Proof`] made of it, and a proof is subtracted here —
 /// before the `Risk` is built, so a proven branch is simply not unmerged and no
 /// row can carry both a proof and the marker it defeats. `dirty` is injected so
 /// the rule can be tested without a repo on disk.
@@ -777,9 +777,9 @@ fn stale_label(row: &StaleRow) -> (String, String) {
     (row.branch.clone(), annotation)
 }
 
-/// Removes a ticked stale row and prints what happened. The ordering, and the
-/// rule that only a shown marker licenses forcing, belong to [`removal`]; the
-/// wording belongs to [`reporting`]. This is what's left: which target the row
+/// Removes a ticked stale row and prints what happened. The ordering, and what
+/// licenses forcing — a shown marker, or proof that the branch is *Equivalent* —
+/// belong to [`removal`]; the wording belongs to [`reporting`]. This is what's left: which target the row
 /// describes, and telling the [`hook`] about a worktree that went with it — a
 /// held stale branch takes its worktree along, which is as much a removal as
 /// `wt rm` is. A hook mirrors what happened to the repo, not which command you

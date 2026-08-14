@@ -28,10 +28,14 @@ Two routes, and either proves it, because work lands in two shapes and neither t
   commit and handed to `git cherry`, which answers by patch id. This survives the anchor moving on
   over the same files, and it is the only route that answers a squash merge — but it reads the diff
   as a single patch, so a rebase-merge that replayed several commits individually defeats it.
-  Patch ids are git's own notion of "already applied", the one `git rebase` uses to drop redundant
-  commits, and git-switch deliberately borrows it rather than inventing a stricter one: a branch
-  called landed here is one git would itself discard when replaying it. The cost is that patch ids
-  ignore whitespace, so a branch differing from what landed by whitespace alone is proven too.
+  `cherry` is not the whole answer, because the patch ids it compares are normalised: they ignore
+  whitespace, and a branch differing from what landed by whitespace alone would pass. That is the
+  right trade for `git rebase`, which drops such a commit but leaves the branch behind to recover
+  it from; it is the wrong one for a force-delete. So `cherry` — asked the other way round — is used
+  to *name* the commit carrying the patch, and the two are then compared with `patch-id --verbatim`,
+  which weighs whitespace but still ignores line numbers, so an anchor that has drifted does not
+  cost the proof. `--verbatim` arrived in git 2.39; an older git fails that step, which is a failed
+  step like any other and leaves this route proving nothing at all.
 - **The content is present.** Every path the branch touched since the merge-base reads
   byte-identically on the anchor — every path as git records them, renames left undetected, since a
   rename reported as its destination alone would hide the deletion of its source. Blind to how the
@@ -50,7 +54,11 @@ Two routes, and either proves it, because work lands in two shapes and neither t
   anchor held. Both are re-checked before the force-delete. A branch that grew a commit holds work
   nobody proved; an anchor rewound in the meantime — by a *Hook* fired for an earlier row, say — no
   longer holds the content that made the branch safe to discard. Either lapse drops the delete to
-  `-d`, to meet git's own guard exactly as an unmarked worktree does.
+  `-d`, to meet git's own guard exactly as an unmarked worktree does. The branch half is checked
+  *by* the delete rather than before it — `update-ref -d <ref> <oid>` compares and deletes as one
+  operation, so a commit made in the gap between the two cannot be discarded unwarned. The anchor
+  half has no such gap to close, since no single git command speaks for two refs; that window stays
+  open and is accepted, being a rewind of the anchor within the seconds a prompt is on screen.
 - **An inconclusive proof means unmerged.** Equivalence is positive evidence that defeats a warning;
   where it cannot be established — no anchor, a failing `merge-base` — the warning stands, silently
   and indistinguishably from a branch that genuinely holds unique work.

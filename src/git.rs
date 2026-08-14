@@ -750,7 +750,11 @@ pub fn equivalent_branches(
         .iter()
         .filter_map(|name| {
             let tip = resolve(dir, &format!("refs/heads/{name}"))?;
-            equivalent_to(dir, &anchor_ref, &tip).then(|| {
+            // Every question below is asked of the *resolved* anchor, never the
+            // ref name: a ref that moved mid-probe and moved back would
+            // otherwise be proven against one commit and re-checked against
+            // another. The name is kept only for that later re-check.
+            equivalent_to(dir, &anchor_tip, &tip).then(|| {
                 let proof = Proof {
                     anchor_ref: anchor_ref.clone(),
                     anchor_tip: anchor_tip.clone(),
@@ -775,19 +779,20 @@ pub fn equivalent_branches(
 ///   rebase-merge or a scattered cherry-pick answers it, but any later edit to
 ///   the same files does too and it falls back to the first route.
 ///
-/// Every step is a question, so a git that refuses one answers "not equivalent"
-/// and says nothing about it.
-fn equivalent_to(dir: Option<&Path>, anchor_ref: &str, tip: &str) -> bool {
-    let Some(base) = run_in(dir, &["merge-base", anchor_ref, tip])
+/// `anchor` is a resolved commit, not a ref name, so every question is asked of
+/// the same anchor the [`Proof`] will record. Every step is a question, so a git
+/// that refuses one answers "not equivalent" and says nothing about it.
+fn equivalent_to(dir: Option<&Path>, anchor: &str, tip: &str) -> bool {
+    let Some(base) = run_in(dir, &["merge-base", anchor, tip])
         .ok()
         .map(|b| b.trim().to_string())
     else {
         return false;
     };
-    patch_landed(dir, anchor_ref, tip, &base) || content_present(dir, anchor_ref, tip, &base)
+    patch_landed(dir, anchor, tip, &base) || content_present(dir, anchor, tip, &base)
 }
 
-/// Whether the anchor already carries the branch's patch, by git's own reckoning.
+/// Whether the anchor already carries the branch's patch.
 ///
 /// Git compares content by patch id, but only between commits — so the branch's
 /// whole diff is synthesised as one commit with `commit-tree`, parented on the
@@ -797,11 +802,15 @@ fn equivalent_to(dir: Option<&Path>, anchor_ref: &str, tip: &str) -> bool {
 /// match, so a branch holding no work of its own comes back `+` — exactly the
 /// answer equivalence owes it.
 ///
-/// This is `git rebase`'s notion of "already applied", patch ids and all, which
-/// is deliberate: a commit git-switch calls landed is one git would itself drop
-/// as redundant when replaying it.
-fn patch_landed(dir: Option<&Path>, anchor_ref: &str, tip: &str, base: &str) -> bool {
-    let probe = || {
+/// `cherry` is not the whole answer, because the patch ids it compares are
+/// normalised: they ignore whitespace, so a branch differing from what landed by
+/// whitespace alone would pass. That is fine for `git rebase`, which drops such a
+/// commit but leaves the branch to be recovered from; it is not fine for a
+/// force-delete. So `cherry` is used to *find* the commit that carries the patch
+/// — asking it the other way round names it — and the two are then compared
+/// verbatim, whitespace and all.
+fn patch_landed(dir: Option<&Path>, anchor: &str, tip: &str, base: &str) -> bool {
+    let landed = || {
         let probe = run_in(
             dir,
             &[
@@ -814,11 +823,37 @@ fn patch_landed(dir: Option<&Path>, anchor_ref: &str, tip: &str, base: &str) -> 
             ],
         )
         .ok()?;
-        run_in(dir, &["cherry", anchor_ref, probe.trim()]).ok()
+        let probe = probe.trim();
+        if !run_in(dir, &["cherry", anchor, probe])
+            .ok()?
+            .lines()
+            .next()?
+            .starts_with('-')
+        {
+            return None;
+        }
+        // Asked this way round, `-` marks the anchor-side commits whose patch the
+        // probe already carries: the landing commits themselves.
+        let matches = run_in(dir, &["cherry", probe, anchor]).ok()?;
+        let wanted = verbatim_patch_id(dir, &["diff", base, tip])?;
+        let exact = matches
+            .lines()
+            .filter_map(|l| l.strip_prefix("- "))
+            .any(|sha| verbatim_patch_id(dir, &["show", sha]).is_some_and(|id| id == wanted));
+        exact.then_some(true)
     };
-    probe()
-        .and_then(|cherry| cherry.lines().next().map(|l| l.starts_with('-')))
-        .unwrap_or(false)
+    landed().unwrap_or(false)
+}
+
+/// The patch id of whatever diff `args` produces, computed *verbatim* — the
+/// whitespace-sensitive reading, unlike the normalised ids `git cherry` compares.
+/// `git patch-id` reads a diff on stdin and answers `<patch-id> <commit-id>`; only
+/// the first field is a fact about the content.
+fn verbatim_patch_id(dir: Option<&Path>, args: &[&str]) -> Option<String> {
+    let diff = run_in(dir, args).ok()?;
+    let output = run_with_stdin(dir, &["patch-id", "--verbatim"], diff.as_bytes()).ok()?;
+    let id = output.split_whitespace().next()?.to_string();
+    (!id.is_empty()).then_some(id)
 }
 
 /// Whether every path the branch touched since the merge-base now reads
@@ -826,7 +861,7 @@ fn patch_landed(dir: Option<&Path>, anchor_ref: &str, tip: &str, base: &str) -> 
 /// — the whole-tree comparison a missing pathspec would run is exactly the
 /// "trivially equivalent" answer ADR 0005 refuses, so an empty list is a `false`
 /// and never a `git diff` without paths.
-fn content_present(dir: Option<&Path>, anchor_ref: &str, tip: &str, base: &str) -> bool {
+fn content_present(dir: Option<&Path>, anchor: &str, tip: &str, base: &str) -> bool {
     // `-z` because git otherwise quotes paths that need it, and a quoted path is
     // not the path. `--no-renames` because a rename is reported as its
     // destination alone, which would drop the source — a deletion the branch
@@ -849,7 +884,11 @@ fn content_present(dir: Option<&Path>, anchor_ref: &str, tip: &str, base: &str) 
     if touched.is_empty() {
         return false;
     }
-    let mut args = vec!["diff", "--quiet", tip, anchor_ref, "--"];
+    // `--literal-pathspecs` because these are filenames, not patterns, and `--`
+    // does not disable pathspec magic: a file literally named `:(exclude)x`
+    // would otherwise cancel the comparison of `x` and prove the branch on what
+    // was left.
+    let mut args = vec!["--literal-pathspecs", "diff", "--quiet", tip, anchor, "--"];
     args.extend(touched);
     // A difference exits 1, which `run_in` reports as an error — and a branch
     // whose files read differently is exactly the branch this cannot prove.
@@ -969,8 +1008,62 @@ fn path_to_str(path: &Path) -> AppResult<&str> {
     })
 }
 
+/// Delete `branch` only while it still points at `expected`, discarding the
+/// commits it holds. `None` means it had moved, and nothing was deleted.
+///
+/// This is the delete a *Proof* licenses, and it is one command because the
+/// proof covers one commit: checking the tip and then running `branch -D` would
+/// leave a window in which the branch could grow a commit nobody proved and lose
+/// it unwarned. `update-ref` compares and deletes in a single operation, closing
+/// it. It leaves the branch's config behind where `branch -D` wouldn't, so that
+/// is cleared afterwards — a branch that is gone must not leave an upstream
+/// setting for a later branch of the same name to inherit.
+pub fn delete_branch_at(
+    dir: Option<&Path>,
+    branch: &str,
+    expected: &str,
+) -> AppResult<Option<BranchDeleteOutcome>> {
+    let refname = format!("refs/heads/{branch}");
+    // `update-ref` is plumbing and will happily delete a branch some worktree
+    // still has checked out, which `branch -D` refuses — leaving that worktree
+    // pointing at a ref that no longer exists. A held branch normally reaches
+    // this only after its worktree has gone, but one that appeared since the row
+    // was drawn is exactly the "became risky after the warning" case ADR 0001
+    // hands to git's own guard, so the guard is kept here by hand.
+    if worktree_branches().is_ok_and(|held| held.contains(branch)) {
+        return Ok(Some(BranchDeleteOutcome::Failed(format!(
+            "cannot delete branch '{branch}': it is checked out in a worktree"
+        ))));
+    }
+    let output = git_cmd(dir)
+        .args(["update-ref", "-d", &refname, expected])
+        .output()?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        // Git words the mismatch several ways across versions, so the tip is
+        // re-read rather than the message parsed: still there and unmoved means
+        // a real failure, anything else means the proof no longer covers it.
+        return Ok(match resolve(dir, &refname) {
+            Some(tip) if tip == expected => {
+                Some(BranchDeleteOutcome::Failed(stderr.trim().to_string()))
+            }
+            _ => None,
+        });
+    }
+    // A missing section is the ordinary case for a branch that never tracked
+    // anything, so its failure says nothing worth reporting.
+    let _ = git_cmd(dir)
+        .args(["config", "--remove-section", &format!("branch.{branch}")])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+    Ok(Some(BranchDeleteOutcome::Deleted))
+}
+
 /// Delete a branch with `git branch -D`, discarding unmerged commits. Only for
-/// branches whose risk was shown to the user first — see [`unmerged_branches`].
+/// branches whose risk was shown to the user first — see [`unmerged_branches`] —
+/// or for an explicit `--force`. A branch licensed by *proof* instead goes
+/// through [`delete_branch_at`], which is pinned to what was proven.
 ///
 /// `dir` must be the worktree whose HEAD the risk was judged from, so that the
 /// markers shown and the deletion performed agree about what is merged.
@@ -1031,6 +1124,33 @@ fn git_cmd(dir: Option<&Path>) -> Command {
 
 fn run(args: &[&str]) -> AppResult<String> {
     run_in(None, args)
+}
+
+/// Runs a git command that reads its input on stdin, which is how the plumbing
+/// that takes a diff — `patch-id` — is driven. The input is written from memory
+/// rather than piped from another process, so a git that exits early can't wedge
+/// this on a full pipe.
+fn run_with_stdin(dir: Option<&Path>, args: &[&str], input: &[u8]) -> AppResult<String> {
+    use std::io::Write;
+
+    let mut child = git_cmd(dir)
+        .args(args)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()?;
+    // Dropping the handle closes stdin, which is what tells git the diff ended.
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(input)?;
+    }
+    let output = child.wait_with_output()?;
+    if !output.status.success() {
+        return Err(Error::Git {
+            command: args.first().copied().unwrap_or("<unknown>").to_string(),
+            message: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+        });
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
 fn run_in(dir: Option<&Path>, args: &[&str]) -> AppResult<String> {

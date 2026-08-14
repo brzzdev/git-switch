@@ -2148,6 +2148,79 @@ fn a_rebase_merged_branch_is_deleted_without_a_warning() {
     );
 }
 
+/// `git cherry` compares patch ids, which are normalised: they ignore
+/// whitespace, so a branch differing from what landed by whitespace alone would
+/// pass. That is fine for `git rebase`, which leaves the branch behind; it is
+/// not fine for a force-delete, so the match is confirmed verbatim.
+#[test]
+fn a_branch_differing_only_in_whitespace_is_not_proven() {
+    let (_bare, work) = setup();
+
+    fs::write(work.path().join("a.txt"), "foo\n").unwrap();
+    git(work.path(), &["add", "."]);
+    git(
+        work.path(),
+        &["commit", "-m", "the line before either edit"],
+    );
+    git(work.path(), &["push", "origin", "main"]);
+
+    git(work.path(), &["checkout", "-b", "feature"]);
+    fs::write(work.path().join("a.txt"), "foo bar\n").unwrap();
+    git(work.path(), &["commit", "-am", "spaced"]);
+    git(work.path(), &["push", "-u", "origin", "feature"]);
+
+    // What landed says `foobar`, not `foo bar` — the same patch to git's
+    // normalised reckoning, a different file to anyone reading it.
+    git(work.path(), &["checkout", "main"]);
+    fs::write(work.path().join("a.txt"), "foobar\n").unwrap();
+    git(work.path(), &["commit", "-am", "unspaced"]);
+    git(work.path(), &["push", "origin", "main"]);
+    git(work.path(), &["push", "origin", "--delete", "feature"]);
+    git(work.path(), &["fetch", "--prune", "origin"]);
+    git(work.path(), &["branch", "dest", "main"]);
+
+    let text = cleanup_prompt(work.path(), "dest", "feature");
+
+    assert!(
+        text.contains('↑'),
+        "the whitespace is the branch's own unique work: {text}"
+    );
+}
+
+/// The point of keeping the patch route at all: it answers a branch whose work
+/// landed even after the anchor has moved on over the same file. Confirming the
+/// match verbatim must not cost that — patch ids ignore line numbers, so a later
+/// edit shifting every hunk header leaves the proof standing.
+#[test]
+fn a_squash_merged_branch_is_still_proven_once_the_anchor_moves_on() {
+    let (_bare, work) = setup();
+
+    push_topic_branch(work.path(), "feature");
+    squash_merge_upstream(work.path(), "feature");
+    // An unrelated edit to the same file, above the branch's own change.
+    let landed = fs::read_to_string(work.path().join("feature.txt")).unwrap();
+    fs::write(
+        work.path().join("feature.txt"),
+        format!("a line added later\n{landed}"),
+    )
+    .unwrap();
+    git(work.path(), &["commit", "-am", "later work above it"]);
+    git(work.path(), &["push", "origin", "main"]);
+    git(work.path(), &["branch", "dest", "main"]);
+
+    let text = cleanup_prompt(work.path(), "dest", "feature");
+
+    assert!(
+        !text.contains('↑'),
+        "the branch's patch is still on the anchor, wherever it now sits: {text}"
+    );
+    assert!(
+        !branch_listing(work.path()).contains("feature"),
+        "the branch should be gone: {}",
+        branch_listing(work.path())
+    );
+}
+
 /// The content route compares the paths a branch touched, and git reports a
 /// rename as its destination alone — which would leave the deletion of its
 /// source uncompared, and prove a branch whose deletion never landed.
@@ -2209,6 +2282,34 @@ fn a_branch_that_moves_after_the_proof_is_no_longer_covered_by_it() {
     assert!(
         branch_listing(work.path()).contains("feature"),
         "the proof no longer covers where the branch points, so git refuses: {text}"
+    );
+}
+
+/// The pinned delete is plumbing, and `git update-ref -d` will happily remove a
+/// branch some worktree has checked out — which `git branch -D` refuses, leaving
+/// that worktree pointing at nothing. A worktree that appears while the picker is
+/// open is the "became risky after the warning" case, and it must still meet a
+/// guard.
+#[test]
+fn a_worktree_taken_on_the_proven_branch_mid_prompt_saves_it() {
+    let (_bare, parent, work) = setup_with_parent();
+
+    push_topic_branch(&work, "feature");
+    squash_merge_upstream(&work, "feature");
+    git(&work, &["branch", "dest", "main"]);
+    let held = parent.path().join("held");
+
+    let raw = drive_cleanup_prompt(&work, "dest", "feature", false, || {
+        git(
+            &work,
+            &["worktree", "add", held.to_str().unwrap(), "feature"],
+        );
+    });
+    let text = String::from_utf8_lossy(&raw);
+
+    assert!(
+        branch_listing(&work).contains("feature"),
+        "a branch a worktree now holds must survive: {text}"
     );
 }
 
