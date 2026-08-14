@@ -19,8 +19,12 @@ Which of *Stale*'s two clauses put a branch on the cleanup prompt: *Landed*, its
 _Avoid_: Reason, cause, merged (reserved for topology, which staleness deliberately does not read)
 
 **Unmerged**:
-Holding commits that `git branch -d` would refuse to discard. Git's rule is *"fully merged in its upstream branch, or in HEAD if no upstream was set"* — alternatives, not a pair: where an upstream exists it alone decides, so a branch merged into HEAD but ahead of its upstream is still unmerged. A branch can be both stale and unmerged: work merged into the anchor locally, before the anchor was pushed.
+Holding commits that `git branch -d` would refuse to discard. Git's rule is *"fully merged in its upstream branch, or in HEAD if no upstream was set"* — alternatives, not a pair: where an upstream exists it alone decides, so a branch merged into HEAD but ahead of its upstream is still unmerged. A branch can be both stale and unmerged: work merged into the anchor locally, before the anchor was pushed. Being *Equivalent* does not make a branch merged — git would still refuse it — it only means refusing costs nothing.
 _Avoid_: Unpushed, ahead, dirty
+
+**Equivalent**:
+A branch whose whole diff against the anchor is already in the anchor, under some other commit — squash-merged, rebase-merged, or cherry-picked. It is the one judgement read from *content* rather than from what a branch tracks or where its commits sit, and it is positive evidence: where it cannot be established, the branch is treated as holding unique work. Equivalence only ever subtracts a *Risk* from a branch already on the cleanup prompt, never adds a branch to it. See [ADR 0005](./docs/adr/0005-proof-of-equivalence-is-a-license.md).
+_Avoid_: Squashed, duplicate, redundant
 
 **Kept**:
 Pinned out of the cleanup prompt, via `git-switch.keep` config or by being the remote's default branch.
@@ -47,7 +51,7 @@ _Avoid_: Root, primary, parent
 ### Destruction
 
 **Risk**:
-What removing something would irreversibly destroy — a dirty worktree's files, an unmerged branch's commits, or both. Something with no risk can be removed without asking.
+What removing something would irreversibly destroy — a dirty worktree's files, an unmerged branch's commits, or both. Something with no risk can be removed without asking. An unmerged branch that is *Equivalent* destroys nothing, so it carries no risk and draws no *Marker*.
 _Avoid_: Danger, safety, hazard
 
 **Marker**:
@@ -59,7 +63,7 @@ Destroying something git would otherwise protect — `worktree remove --force`, 
 _Avoid_: Overriding, ignoring
 
 **License**:
-What permits forcing: the markers already shown to the user, or an explicit `--force`. It covers what was warned about and nothing else, so anything that became risky after its row was drawn meets git's own guard instead. See [ADR 0001](./docs/adr/0001-warned-means-forceable.md).
+What permits forcing: the markers already shown to the user, an explicit `--force`, or proof that a branch is *Equivalent*. It covers what was warned about or proven and nothing else, so anything that became risky — or moved off the commit proven equivalent — after its row was drawn meets git's own guard instead. See [ADR 0001](./docs/adr/0001-warned-means-forceable.md) and [ADR 0005](./docs/adr/0005-proof-of-equivalence-is-a-license.md).
 _Avoid_: Permission, approval, consent
 
 **Removal**:
