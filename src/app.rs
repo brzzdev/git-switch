@@ -689,12 +689,20 @@ pub(crate) fn risk_legend(risks: &[Risk]) -> Option<String> {
 /// deliberately not a [`marker::Marker`]: a ground warns of no loss, and per ADR
 /// 0001 only a marker licenses forcing. See [ADR
 /// 0004](../docs/adr/0004-a-ground-is-not-a-marker.md).
-fn ground_label(ground: git::Ground) -> String {
+///
+/// `padded` widens a shorter ground to the widest one, so annotations after it
+/// share a column down the list. Only ever true where something follows: the
+/// padding exists for that something, and a trailing run of spaces on a
+/// ground-only row is exactly what [`align_labels`] avoids.
+fn ground_label(ground: git::Ground, padded: bool) -> String {
     let word = match ground {
         git::Ground::Gone => "gone",
         git::Ground::Landed => "landed",
     };
-    style(word).dim().to_string()
+    // Named rather than a bare 6, so the widest ground stays visible as a fact
+    // about the words above and not a constant to remember to update.
+    let width = if padded { "landed".len() } else { 0 };
+    style(format!("{word:<width$}")).dim().to_string()
 }
 
 /// The picker row for a stale branch, as a (name, annotation) pair for
@@ -717,7 +725,8 @@ fn stale_label(row: &StaleRow) -> (String, String) {
         ..row.risk
     });
 
-    let annotation = [ground_label(row.ground), worktree, branch_risk]
+    let follows = !worktree.is_empty() || !branch_risk.is_empty();
+    let annotation = [ground_label(row.ground, follows), worktree, branch_risk]
         .into_iter()
         .filter(|p| !p.is_empty())
         .collect::<Vec<_>>()
@@ -917,8 +926,40 @@ mod tests {
 
     #[test]
     fn ground_label_names_each_ground() {
-        assert_eq!(plain(&ground_label(git::Ground::Gone)), "gone");
-        assert_eq!(plain(&ground_label(git::Ground::Landed)), "landed");
+        assert_eq!(plain(&ground_label(git::Ground::Gone, false)), "gone");
+        assert_eq!(plain(&ground_label(git::Ground::Landed, false)), "landed");
+    }
+
+    /// The grounds are different widths, so a shorter one is padded out to keep
+    /// what follows it in a column — `(+ worktree)` starting two characters
+    /// apart down a mixed list is the whole reason this pads at all.
+    #[test]
+    fn a_shorter_ground_is_padded_so_what_follows_lines_up() {
+        let gone = stale_label(&StaleRow {
+            ground: git::Ground::Gone,
+            ..stale_row("gone-held", Some(worktree(false)), Risk::default())
+        });
+        let landed = stale_label(&stale_row(
+            "landed-held",
+            Some(worktree(false)),
+            Risk::default(),
+        ));
+        assert_eq!(plain(&gone.1), "gone   (+ worktree)");
+        assert_eq!(plain(&landed.1), "landed (+ worktree)");
+        assert_eq!(
+            plain(&gone.1).find('('),
+            plain(&landed.1).find('('),
+            "both annotations should open the parenthesis at the same column"
+        );
+    }
+
+    /// Padding only ever buys alignment for something that follows. A row whose
+    /// whole annotation is its ground gets none, because `align_labels` works
+    /// hard to leave no trailing whitespace and this must not undo that.
+    #[test]
+    fn a_ground_with_nothing_after_it_is_not_padded() {
+        let (_, annotation) = stale_label(&stale_row("fix/typo", None, Risk::default()));
+        assert_eq!(plain(&annotation), "landed");
     }
 
     #[test]
