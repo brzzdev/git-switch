@@ -1088,6 +1088,12 @@ pub fn delete_branch_at(
     }
     // The empty old-value pins "and only if it does not exist yet", so a ref
     // recreated in the gap is not clobbered by putting this one back.
+    let holder = match held {
+        // A holder was seen; that a holder exists is a fact worth reporting.
+        Ok(_) => Holder::Seen,
+        // Only the question failed, so nothing may be said about an answer.
+        Err(_) => Holder::Unknown,
+    };
     Ok(Some(
         match run_in(dir, &["update-ref", &refname, expected, ""]) {
             Ok(_) => match held {
@@ -1096,9 +1102,20 @@ pub fn delete_branch_at(
                     "couldn't tell whether a worktree holds it: {e}"
                 )),
             },
-            Err(e) => BranchDeleteOutcome::DeletedNotRestored {
-                tip: expected.to_string(),
-                detail: e.to_string(),
+            // A refused restore is not the same as a missing branch: the empty
+            // old-value also refuses where the ref exists again, which is a
+            // repository needing nothing rather than one needing repair. So the
+            // ref is read before anything is claimed about it.
+            Err(e) => match resolve(dir, &refname) {
+                Some(now) => BranchDeleteOutcome::DeletedThenRecreated {
+                    tip: expected.to_string(),
+                    now,
+                },
+                None => BranchDeleteOutcome::DeletedNotRestored {
+                    tip: expected.to_string(),
+                    detail: e.to_string(),
+                    holder,
+                },
             },
         },
     ))
@@ -1210,16 +1227,35 @@ pub enum BranchDeleteOutcome {
     /// Deleted, but config of its own outlived it — the keys, so the user can
     /// clear what git-switch couldn't.
     DeletedLeavingConfig(String),
-    /// Deleted at `tip`, and then not put back for a worktree that took the
-    /// branch in the meantime: the ref is gone and that worktree points at
-    /// nothing. The one outcome that describes a repository needing repair.
+    /// Deleted at `tip`, and confirmed gone after putting it back failed. The
+    /// one outcome describing a repository that needs repair — `holder` says
+    /// whether a worktree was actually seen holding the branch, since the
+    /// restore is attempted where that question is what failed too.
     DeletedNotRestored {
         tip: String,
         detail: String,
+        holder: Holder,
+    },
+    /// Deleted at `tip`, and standing again at `now` by another hand: the
+    /// restore was refused because there was nothing left to restore into.
+    /// Nothing to repair — the branch of that name is simply no longer the one
+    /// that was proven.
+    DeletedThenRecreated {
+        tip: String,
+        now: String,
     },
     /// Kept because it has commits not merged into its upstream or HEAD.
     NotMerged,
     Failed(String),
+}
+
+/// Whether a worktree was seen holding a branch, or only failed to be ruled out.
+/// The two read alike in what they cause — the branch goes back either way — and
+/// differently in what may be said about them.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum Holder {
+    Seen,
+    Unknown,
 }
 
 /// Delete `branch` only if git considers it fully merged (`git branch -d`).

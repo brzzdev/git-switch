@@ -155,12 +155,29 @@ fn branch_line(prefix: &str, branch: &str, outcome: &git::BranchDeleteOutcome) -
         ),
         // The one outcome describing a repository that needs repair, so it leads
         // with what happened to the ref and hands over the command to undo it.
-        git::BranchDeleteOutcome::DeletedNotRestored { tip, detail } => format!(
-            "{} {prefix}deleted {branch}, then couldn't put it back for the \
-             worktree now holding it: {detail} (restore it with \
-             `git branch -- {} {tip}`)",
+        // Who it was put back for is only said where a holder was actually seen.
+        git::BranchDeleteOutcome::DeletedNotRestored {
+            tip,
+            detail,
+            holder,
+        } => {
+            let whom = match holder {
+                git::Holder::Seen => " for the worktree now holding it",
+                git::Holder::Unknown => "",
+            };
+            format!(
+                "{} {prefix}deleted {branch}, then couldn't put it back{whom}: {detail} \
+                 (restore it with `git branch -- {} {tip}`)",
+                warn(),
+                shell_quote(branch),
+            )
+        }
+        // The ref is there, so nothing needs repairing and nothing is offered to
+        // repair it with — but the branch standing there is not the one proven,
+        // and the user is the only one who can say whether that matters.
+        git::BranchDeleteOutcome::DeletedThenRecreated { tip, now } => format!(
+            "{} {prefix}deleted {branch} at {tip}, and something recreated it at {now}",
             warn(),
-            shell_quote(branch),
         ),
         git::BranchDeleteOutcome::NotMerged => format!(
             "{} {prefix}kept {branch} with unmerged commits \
@@ -332,9 +349,39 @@ mod tests {
             line(git::BranchDeleteOutcome::DeletedNotRestored {
                 tip: "abc123".into(),
                 detail: "cannot lock ref".into(),
+                holder: git::Holder::Seen,
             }),
             "! deleted feature, then couldn't put it back for the worktree now holding it: \
              cannot lock ref (restore it with `git branch -- feature abc123`)"
+        );
+        assert_eq!(
+            line(git::BranchDeleteOutcome::DeletedThenRecreated {
+                tip: "abc123".into(),
+                now: "def456".into(),
+            }),
+            "! deleted feature at abc123, and something recreated it at def456"
+        );
+    }
+
+    /// A worktree that was only ever *unruled-out* is not a worktree seen, and
+    /// the line must not claim one — the restore is attempted either way.
+    #[test]
+    fn an_unobserved_holder_is_not_reported_as_one() {
+        let report = report(
+            removal::Target::Branch { name: "feature" },
+            None,
+            Some(git::BranchDeleteOutcome::DeletedNotRestored {
+                tip: "abc123".into(),
+                detail: "cannot lock ref".into(),
+                holder: git::Holder::Unknown,
+            }),
+        );
+        assert_eq!(
+            plain_all(&removal_outcome(&report)),
+            [
+                "! deleted feature, then couldn't put it back: cannot lock ref \
+              (restore it with `git branch -- feature abc123`)"
+            ]
         );
     }
 
