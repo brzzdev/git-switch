@@ -41,7 +41,9 @@ Two routes, and either proves it, because work lands in two shapes and neither t
   rename reported as its destination alone would hide the deletion of its source. Blind to how the
   work arrived, so a rebase-merge or a scattered cherry-pick answers it; broken by any later edit to
   those files, which is why it cannot stand alone. A branch that touched nothing has no paths to
-  compare and is proven by neither route.
+  compare and is proven by neither route. Both diffs are asked for in terms configuration cannot
+  narrow — submodules unignored, no textconv, no external driver — since a proof read from a diff
+  the repository chose to shrink is a branch deleted for work the anchor never took.
 
 ## Consequences
 
@@ -59,6 +61,13 @@ Two routes, and either proves it, because work lands in two shapes and neither t
   operation, so a commit made in the gap between the two cannot be discarded unwarned. The anchor
   half has no such gap to close, since no single git command speaks for two refs; that window stays
   open and is accepted, being a rewind of the anchor within the seconds a prompt is on screen.
+- **Deleting by hand means keeping git's guards by hand.** `update-ref` is plumbing: it does not
+  refuse a branch a worktree has checked out, and it does not take the branch's config with it, both
+  of which `branch -D` does. So the holder is looked for either side of the delete — the ref is put
+  back where a worktree won the race, since the branch a worktree checked out must still be there —
+  and the config is cleared key by key, because the section-wide removal git offers cannot parse
+  every name git allows. A key that will not go is reported rather than swallowed: the branch has
+  gone, and clearing what outlived it is now the user's to do.
 - **An inconclusive proof means unmerged.** Equivalence is positive evidence that defeats a warning;
   where it cannot be established — no anchor, a failing `merge-base` — the warning stands, silently
   and indistinguishably from a branch that genuinely holds unique work.

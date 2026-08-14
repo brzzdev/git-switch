@@ -140,6 +140,12 @@ fn branch_line(prefix: &str, branch: &str, outcome: &git::BranchDeleteOutcome) -
         git::BranchDeleteOutcome::Deleted => {
             format!("{} {prefix}deleted {branch}", done())
         }
+        // The branch went; its config wouldn't. Naming the keys is the whole
+        // value of the line — the user is the only one who can clear them now.
+        git::BranchDeleteOutcome::DeletedLeavingConfig(keys) => format!(
+            "{} {prefix}deleted {branch}, but left config behind: {keys}",
+            warn(),
+        ),
         git::BranchDeleteOutcome::NotMerged => format!(
             "{} {prefix}kept {branch} with unmerged commits \
              (run `git branch -D -- {}` to force-delete)",
@@ -263,6 +269,25 @@ mod tests {
                 "! kept topic$(touch${IFS}/tmp/pwned) with unmerged commits \
                  (run `git branch -D -- 'topic$(touch${IFS}/tmp/pwned)'` to force-delete)"
             ]
+        );
+    }
+
+    /// A branch that went while its config stayed is neither a clean deletion
+    /// nor a failure: the line has to say both, and name the keys, because
+    /// clearing them is now the user's job and nobody else knows they are there.
+    #[test]
+    fn config_outliving_its_branch_is_named_key_by_key() {
+        let report = report(
+            removal::Target::Branch { name: "feature" },
+            None,
+            Some(git::BranchDeleteOutcome::DeletedLeavingConfig(
+                "branch.feature.remote, branch.feature.merge".into(),
+            )),
+        );
+        assert_eq!(
+            plain_all(&removal_outcome(&report)),
+            ["! deleted feature, but left config behind: \
+              branch.feature.remote, branch.feature.merge"]
         );
     }
 

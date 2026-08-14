@@ -2285,6 +2285,113 @@ fn a_branch_that_moves_after_the_proof_is_no_longer_covered_by_it() {
     );
 }
 
+/// The content route reads a diff, and repository configuration can shrink one:
+/// `diff.ignoreSubmodules=all` hides a changed gitlink from both the path list
+/// and the comparison, so a branch carrying a landed file edit plus a submodule
+/// bump of its own would be proven on the half git chose to show.
+#[test]
+fn configuration_cannot_shrink_the_diff_a_proof_reads() {
+    let (_bare, work) = setup();
+
+    commit_in(work.path(), "a.txt", "the line before either edit");
+    git(work.path(), &["push", "origin", "main"]);
+    git(work.path(), &["config", "diff.ignoreSubmodules", "all"]);
+
+    // A landed edit and a submodule bump that never landed, in one branch.
+    git(work.path(), &["checkout", "-b", "feature"]);
+    git(work.path(), &["push", "-u", "origin", "feature"]);
+    fs::write(work.path().join("a.txt"), "edited\n").unwrap();
+    git(work.path(), &["add", "a.txt"]);
+    let gitlink = stdout_str(&git(work.path(), &["rev-parse", "HEAD"]));
+    git(
+        work.path(),
+        &[
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            &format!("160000,{},sub", gitlink.trim()),
+        ],
+    );
+    git(
+        work.path(),
+        &["commit", "-m", "edit a file, bump a submodule"],
+    );
+
+    // Only the file edit lands.
+    git(work.path(), &["checkout", "main"]);
+    fs::write(work.path().join("a.txt"), "edited\n").unwrap();
+    git(work.path(), &["commit", "-am", "the file edit alone"]);
+    git(work.path(), &["push", "origin", "main"]);
+    git(work.path(), &["push", "origin", "--delete", "feature"]);
+    git(work.path(), &["fetch", "--prune", "origin"]);
+    git(work.path(), &["branch", "dest", "main"]);
+
+    let text = cleanup_prompt(work.path(), "dest", "feature");
+
+    assert!(
+        text.contains('↑'),
+        "the submodule bump is unique work, whatever the config shows: {text}"
+    );
+}
+
+/// A deleted branch must not leave its upstream config behind for a later branch
+/// of the same name to inherit — and the section-wide removal git offers cannot
+/// parse every name git itself allows.
+#[test]
+fn a_proven_delete_clears_config_for_an_awkward_branch_name() {
+    let (_bare, work) = setup();
+
+    push_topic_branch(work.path(), "topic]x");
+    squash_merge_upstream(work.path(), "topic]x");
+    git(work.path(), &["branch", "dest", "main"]);
+    assert!(
+        stdout_str(&git(work.path(), &["config", "--list", "--name-only"]))
+            .contains("branch.topic]x."),
+        "precondition: the branch should have tracking config to leave behind"
+    );
+
+    cleanup_prompt(work.path(), "dest", "topic]x");
+
+    assert!(
+        !branch_listing(work.path()).contains("topic]x"),
+        "the branch should be gone"
+    );
+    let config = stdout_str(&git(work.path(), &["config", "--list", "--name-only"]));
+    assert!(
+        !config.contains("branch.topic]x."),
+        "its config should have gone with it; got: {config}"
+    );
+}
+
+/// A branch name may contain dots, and git reads a config name by its first and
+/// last dot alone — so `branch.topic.extra.remote` belongs to `topic.extra`.
+/// Deleting `topic` must not clear it.
+#[test]
+fn a_proven_delete_leaves_a_neighbouring_branchs_config_alone() {
+    let (_bare, work) = setup();
+
+    push_topic_branch(work.path(), "topic");
+    squash_merge_upstream(work.path(), "topic");
+    git(work.path(), &["branch", "topic.extra", "main"]);
+    git(
+        work.path(),
+        &["config", "branch.topic.extra.remote", "origin"],
+    );
+    git(work.path(), &["branch", "dest", "main"]);
+
+    cleanup_prompt(work.path(), "dest", "topic");
+
+    let config = stdout_str(&git(work.path(), &["config", "--list", "--name-only"]));
+    assert!(
+        config.contains("branch.topic.extra.remote"),
+        "the neighbour keeps its upstream; got: {config}"
+    );
+    assert!(
+        !branch_listing(work.path()).contains("topic\n"),
+        "and the proven branch still went"
+    );
+}
+
 /// The pinned delete is plumbing, and `git update-ref -d` will happily remove a
 /// branch some worktree has checked out — which `git branch -D` refuses, leaving
 /// that worktree pointing at nothing. A worktree that appears while the picker is

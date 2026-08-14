@@ -572,7 +572,14 @@ pub struct Worktree {
 /// Lists all worktrees for the current repo. Per `git worktree list
 /// --porcelain`, the first record is the main worktree.
 pub fn worktree_list() -> AppResult<Vec<Worktree>> {
-    let output = run(&["worktree", "list", "--porcelain"])?;
+    worktree_list_in(None)
+}
+
+/// [`worktree_list`], asked from `dir` rather than the process cwd — which
+/// matters where the cwd may have just been removed, or may belong to another
+/// repository entirely.
+pub fn worktree_list_in(dir: Option<&Path>) -> AppResult<Vec<Worktree>> {
+    let output = run_in(dir, &["worktree", "list", "--porcelain"])?;
     let mut worktrees: Vec<Worktree> = Vec::new();
     // Each porcelain record starts with a `worktree <path>` line; the attributes
     // that follow apply to it until the next such line. Build the record in place
@@ -856,6 +863,13 @@ fn verbatim_patch_id(dir: Option<&Path>, args: &[&str]) -> Option<String> {
     (!id.is_empty()).then_some(id)
 }
 
+/// Diff options that stop repository configuration from shrinking a comparison
+/// the proof depends on. Each one has a config that would otherwise hide a real
+/// difference — `diff.ignoreSubmodules` a changed gitlink, a `textconv` driver
+/// or `diff.external` two files that render alike — and a proof read from a
+/// shrunken diff is a branch deleted for work the anchor never took.
+const UNSHRINKABLE: [&str; 3] = ["--ignore-submodules=none", "--no-textconv", "--no-ext-diff"];
+
 /// Whether every path the branch touched since the merge-base now reads
 /// byte-identically in the anchor. A branch that touched nothing proves nothing
 /// — the whole-tree comparison a missing pathspec would run is exactly the
@@ -866,11 +880,11 @@ fn content_present(dir: Option<&Path>, anchor: &str, tip: &str, base: &str) -> b
     // not the path. `--no-renames` because a rename is reported as its
     // destination alone, which would drop the source — a deletion the branch
     // performed — out of the comparison, and prove a branch whose deletion never
-    // landed.
-    let Ok(listing) = run_in(
-        dir,
-        &["diff", "--name-only", "--no-renames", "-z", base, tip],
-    ) else {
+    // landed. The rest is [`UNSHRINKABLE`]'s business.
+    let mut listing_args = vec!["diff"];
+    listing_args.extend(UNSHRINKABLE);
+    listing_args.extend(["--name-only", "--no-renames", "-z", base, tip]);
+    let Ok(listing) = run_in(dir, &listing_args) else {
         return false;
     };
     // A path git-switch cannot read is a path it cannot compare: `run_in` decodes
@@ -888,7 +902,9 @@ fn content_present(dir: Option<&Path>, anchor: &str, tip: &str, base: &str) -> b
     // does not disable pathspec magic: a file literally named `:(exclude)x`
     // would otherwise cancel the comparison of `x` and prove the branch on what
     // was left.
-    let mut args = vec!["--literal-pathspecs", "diff", "--quiet", tip, anchor, "--"];
+    let mut args = vec!["--literal-pathspecs", "diff"];
+    args.extend(UNSHRINKABLE);
+    args.extend(["--quiet", tip, anchor, "--"]);
     args.extend(touched);
     // A difference exits 1, which `run_in` reports as an error — and a branch
     // whose files read differently is exactly the branch this cannot prove.
@@ -1029,11 +1045,13 @@ pub fn delete_branch_at(
     // pointing at a ref that no longer exists. A held branch normally reaches
     // this only after its worktree has gone, but one that appeared since the row
     // was drawn is exactly the "became risky after the warning" case ADR 0001
-    // hands to git's own guard, so the guard is kept here by hand.
-    if worktree_branches().is_ok_and(|held| held.contains(branch)) {
-        return Ok(Some(BranchDeleteOutcome::Failed(format!(
-            "cannot delete branch '{branch}': it is checked out in a worktree"
-        ))));
+    // hands to git's own guard, so the guard is kept here by hand. Asked before
+    // the delete it is only a check-then-act, so it is asked again after and the
+    // ref put back where it was if a worktree won the race: `update-ref` is one
+    // operation but two of them are not, and the branch a worktree checked out
+    // is the branch it must still find there.
+    if held_by_worktree(dir, branch)? {
+        return Ok(Some(refused_as_held(branch)));
     }
     let output = git_cmd(dir)
         .args(["update-ref", "-d", &refname, expected])
@@ -1050,14 +1068,66 @@ pub fn delete_branch_at(
             _ => None,
         });
     }
-    // A missing section is the ordinary case for a branch that never tracked
-    // anything, so its failure says nothing worth reporting.
-    let _ = git_cmd(dir)
-        .args(["config", "--remove-section", &format!("branch.{branch}")])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status();
-    Ok(Some(BranchDeleteOutcome::Deleted))
+    if held_by_worktree(dir, branch)? {
+        // The empty old-value pins "and only if it does not exist yet", so a
+        // ref recreated in the gap is not clobbered by putting this one back.
+        run_in(dir, &["update-ref", &refname, expected, ""])?;
+        return Ok(Some(refused_as_held(branch)));
+    }
+    Ok(Some(clear_branch_config(dir, branch)))
+}
+
+/// Whether any worktree has `branch` checked out, asked from the same `dir` the
+/// delete runs in — the process cwd may be a worktree this very run has removed,
+/// and a question asked from a directory that is gone answers nothing. An error
+/// is not an answer either, so it travels rather than reading as "nobody holds
+/// it": the whole point of the question is to refuse where it cannot be settled.
+fn held_by_worktree(dir: Option<&Path>, branch: &str) -> AppResult<bool> {
+    Ok(worktree_list_in(dir)?
+        .into_iter()
+        .any(|w| w.branch.as_deref() == Some(branch)))
+}
+
+fn refused_as_held(branch: &str) -> BranchDeleteOutcome {
+    BranchDeleteOutcome::Failed(format!(
+        "cannot delete branch '{branch}': it is checked out in a worktree"
+    ))
+}
+
+/// Clears the config a deleted branch leaves behind, which `branch -D` would
+/// have taken with it. A branch that is gone must not leave an upstream setting
+/// for a later branch of the same name to inherit.
+///
+/// Each key is unset by its exact name rather than the section dropped whole:
+/// `--remove-section branch.<name>` cannot parse every name git allows — it
+/// fails outright on `topic]x` — and would leave the keys it choked on behind.
+/// Nothing to remove is the ordinary case and not a failure; anything that
+/// refuses to go is reported, since the branch has already gone and the
+/// leftovers are now the user's to clear.
+fn clear_branch_config(dir: Option<&Path>, branch: &str) -> BranchDeleteOutcome {
+    let Ok(listing) = run_in(dir, &["config", "--local", "--list", "--name-only", "-z"]) else {
+        return BranchDeleteOutcome::Deleted;
+    };
+    let left: Vec<String> = listing
+        .split('\0')
+        .filter(|key| config_branch(key) == Some(branch))
+        .filter(|key| run_in(dir, &["config", "--local", "--unset-all", key]).is_err())
+        .map(String::from)
+        .collect();
+    if left.is_empty() {
+        return BranchDeleteOutcome::Deleted;
+    }
+    BranchDeleteOutcome::DeletedLeavingConfig(left.join(", "))
+}
+
+/// Which branch a `branch.<name>.<key>` config entry belongs to, or `None` for
+/// any other key. Git splits a config name at its *first* and *last* dot, so the
+/// branch in the middle keeps whatever dots it has: `branch.release/1.2.remote`
+/// belongs to `release/1.2` and not to `release/1`, and matching on a prefix
+/// would have one branch's deletion clear the other's upstream.
+fn config_branch(key: &str) -> Option<&str> {
+    let (branch, _) = key.strip_prefix("branch.")?.rsplit_once('.')?;
+    (!branch.is_empty()).then_some(branch)
 }
 
 /// Delete a branch with `git branch -D`, discarding unmerged commits. Only for
@@ -1082,6 +1152,9 @@ pub fn force_delete_branch(dir: Option<&Path>, branch: &str) -> AppResult<Branch
 #[derive(Debug, Clone)]
 pub enum BranchDeleteOutcome {
     Deleted,
+    /// Deleted, but config of its own outlived it — the keys, so the user can
+    /// clear what git-switch couldn't.
+    DeletedLeavingConfig(String),
     /// Kept because it has commits not merged into its upstream or HEAD.
     NotMerged,
     Failed(String),
@@ -1428,6 +1501,22 @@ mod tests {
     fn gone_upstream_is_unmerged_without_a_count() {
         let got = unmerged("main", &[("orphan", "refs/heads/orphan", "gone")]);
         assert_eq!(got.get("orphan"), Some(&Unmerged::NoUpstream));
+    }
+
+    /// Git splits a config name at its first and last dot, so a branch whose
+    /// name contains one owns the whole middle — and a branch whose name is a
+    /// prefix of another's owns none of it.
+    #[test]
+    fn a_config_key_belongs_to_the_branch_between_the_outer_dots() {
+        use super::config_branch;
+        assert_eq!(config_branch("branch.feature.remote"), Some("feature"));
+        assert_eq!(
+            config_branch("branch.release/1.2.remote"),
+            Some("release/1.2")
+        );
+        assert_eq!(config_branch("branch.topic]x.merge"), Some("topic]x"));
+        assert_eq!(config_branch("remote.origin.url"), None);
+        assert_eq!(config_branch("branch.autosetupmerge"), None);
     }
 
     #[test]
