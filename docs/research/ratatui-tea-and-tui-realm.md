@@ -59,8 +59,7 @@ State is **local variables in the loop** — `filter`, `cursor`, `view`, `drawn`
 (`src/app.rs`); `selected`, `cursor`, `drawn` (`src/app.rs`). There is no `Model`
 struct and no `Message` enum. What *does* exist is a pure state-derivation function:
 `build_view(sections, filter, opts) -> View` (`src/app.rs`), plus pure helpers
-`fuzzy_match`, `cursor_selection`, `selectable_position`, `format_row` (`src/app.rs`,
-`781-797`, `976-1007`).
+`fuzzy_match`, `cursor_selection`, `selectable_position`, `format_row` (`src/app.rs`).
 
 The input seam is the `KeySource` trait (`src/app.rs`), whose doc comment states its purpose
 outright: "Abstracting input behind a trait lets the event loops be driven by a scripted sequence in
@@ -260,9 +259,8 @@ interaction without a terminal — is already true here.
 What TEA would genuinely tidy: the `pick` loop currently mixes navigation, filtering, and a
 `preserved`/`filter_changed` dance to keep the cursor on the same item across a filter change
 (`src/app.rs`). A `Message` enum and an `update` would make that a data transformation
-rather than a sequence of mutations. But it is one loop, in one file, ~70 lines. Adopting a whole
-architecture for it is exactly the ceremony `CLAUDE.md` warns against ("Keep things simple. Channel
-'yagni' energy").
+rather than a sequence of mutations. But it is one loop, in one file, ~70 lines. Taking on a whole
+architecture to tidy that much is more ceremony than the problem earns.
 
 **tui-realm.** Everything it adds — focus management across mounted components, subscriptions, a
 component standard library, event routing between components
