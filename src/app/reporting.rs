@@ -179,6 +179,13 @@ fn branch_line(prefix: &str, branch: &str, outcome: &git::BranchDeleteOutcome) -
             "{} {prefix}deleted {branch} at {tip}, and something recreated it at {now}",
             warn(),
         ),
+        // Nobody could look, so nothing is recommended: a `git branch` here
+        // would be advice to recreate something that may already be standing.
+        git::BranchDeleteOutcome::DeletedStateUnknown { tip, detail } => format!(
+            "{} {prefix}deleted {branch} at {tip}, then couldn't put it back or read it \
+             back: {detail} (check whether it exists before recreating it)",
+            warn(),
+        ),
         git::BranchDeleteOutcome::NotMerged => format!(
             "{} {prefix}kept {branch} with unmerged commits \
              (run `git branch -D -- {}` to force-delete)",
@@ -360,6 +367,33 @@ mod tests {
                 now: "def456".into(),
             }),
             "! deleted feature at abc123, and something recreated it at def456"
+        );
+    }
+
+    /// A ref nobody could read is not a ref known to be missing, and the line
+    /// that reports one must recommend nothing: telling the user to recreate a
+    /// branch that may be standing there is worse than telling them to look.
+    #[test]
+    fn an_unreadable_ref_earns_no_repair_command() {
+        let report = report(
+            removal::Target::Branch { name: "feature" },
+            None,
+            Some(git::BranchDeleteOutcome::DeletedStateUnknown {
+                tip: "abc123".into(),
+                detail: "cannot lock ref; and reading it back failed too: not a git repository"
+                    .into(),
+            }),
+        );
+        let line = plain_all(&removal_outcome(&report)).join("");
+        assert_eq!(
+            line,
+            "! deleted feature at abc123, then couldn't put it back or read it back: \
+             cannot lock ref; and reading it back failed too: not a git repository \
+             (check whether it exists before recreating it)"
+        );
+        assert!(
+            !line.contains("git branch"),
+            "nothing may be recommended over a ref nobody could look at: {line}"
         );
     }
 

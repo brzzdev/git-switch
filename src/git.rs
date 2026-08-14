@@ -919,10 +919,55 @@ fn content_present(dir: Option<&Path>, anchor: &str, tip: &str, base: &str) -> b
     run_in(dir, &args).is_ok()
 }
 
-/// What `refname` points at, or `None` where it doesn't resolve.
+/// What `refname` points at, or `None` where it doesn't resolve. A ref that is
+/// absent and a ref that could not be read answer alike here; where the
+/// difference matters, ask [`ref_state`] instead.
 #[must_use]
 pub(crate) fn resolve(dir: Option<&Path>, refname: &str) -> Option<String> {
     rev_parse(dir, refname).ok()
+}
+
+/// What a ref lookup established: where the ref points, that it is not there, or
+/// that the question went unanswered. The last is not the middle — reporting a
+/// branch gone on the strength of a failed read is how a user is told to
+/// recreate something that already exists.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub enum RefState {
+    At(String),
+    Missing,
+    Unreadable(String),
+}
+
+/// `rev-parse --verify --quiet` separates the three: it exits 0 with the object
+/// id, 1 for a ref that isn't there, and anything else for a question it could
+/// not answer.
+fn ref_state(dir: Option<&Path>, refname: &str) -> RefState {
+    let Ok(output) = git_cmd(dir)
+        .args(["rev-parse", "--verify", "--quiet", refname])
+        .output()
+    else {
+        return RefState::Unreadable("git could not be run".to_string());
+    };
+    let unreadable = || {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        RefState::Unreadable(if stderr.is_empty() {
+            format!("git rev-parse exited {:?}", output.status.code())
+        } else {
+            stderr
+        })
+    };
+    match output.status.code() {
+        Some(0) => {
+            let oid = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if oid.is_empty() {
+                unreadable()
+            } else {
+                RefState::At(oid)
+            }
+        }
+        Some(1) => RefState::Missing,
+        _ => unreadable(),
+    }
 }
 
 #[must_use]
@@ -1105,16 +1150,22 @@ pub fn delete_branch_at(
             // A refused restore is not the same as a missing branch: the empty
             // old-value also refuses where the ref exists again, which is a
             // repository needing nothing rather than one needing repair. So the
-            // ref is read before anything is claimed about it.
-            Err(e) => match resolve(dir, &refname) {
-                Some(now) => BranchDeleteOutcome::DeletedThenRecreated {
+            // ref is read before anything is claimed about it — and read in a
+            // way that can say "I don't know", since telling someone to recreate
+            // a branch that may be standing there is its own kind of wrong.
+            Err(e) => match ref_state(dir, &refname) {
+                RefState::At(now) => BranchDeleteOutcome::DeletedThenRecreated {
                     tip: expected.to_string(),
                     now,
                 },
-                None => BranchDeleteOutcome::DeletedNotRestored {
+                RefState::Missing => BranchDeleteOutcome::DeletedNotRestored {
                     tip: expected.to_string(),
                     detail: e.to_string(),
                     holder,
+                },
+                RefState::Unreadable(why) => BranchDeleteOutcome::DeletedStateUnknown {
+                    tip: expected.to_string(),
+                    detail: format!("{e}; and reading it back failed too: {why}"),
                 },
             },
         },
@@ -1235,6 +1286,14 @@ pub enum BranchDeleteOutcome {
         tip: String,
         detail: String,
         holder: Holder,
+    },
+    /// Deleted at `tip`, and whether it is there now could not be established:
+    /// putting it back failed, and so did reading it afterwards. Distinct from
+    /// [`Self::DeletedNotRestored`] because nothing may be recommended over a
+    /// ref nobody could look at.
+    DeletedStateUnknown {
+        tip: String,
+        detail: String,
     },
     /// Deleted at `tip`, and standing again at `now` by another hand: the
     /// restore was refused because there was nothing left to restore into.
