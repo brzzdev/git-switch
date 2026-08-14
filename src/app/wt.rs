@@ -310,7 +310,7 @@ fn remove_one(
     } else {
         removal::License::shown(risk)
     };
-    let report = removal::remove(target, license, steps)?;
+    let report = removal::remove(target, &license, steps)?;
 
     for line in reporting::removal_outcome(&report) {
         eprintln!("{line}");

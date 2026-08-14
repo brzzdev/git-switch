@@ -2019,9 +2019,7 @@ fn stale_deletion_outcomes_are_not_printed_in_raw_mode() {
 /// topic branch looks like the moment before it is merged on the forge.
 fn push_topic_branch(work: &Path, branch: &str) {
     git(work, &["checkout", "-b", branch]);
-    fs::write(work.join(format!("{branch}.txt")), "work\n").unwrap();
-    git(work, &["add", "."]);
-    git(work, &["commit", "-m", "topic work"]);
+    commit_in(work, &format!("{branch}.txt"), "topic work");
     git(work, &["push", "-u", "origin", branch]);
 }
 
@@ -2038,7 +2036,9 @@ fn squash_merge_upstream(work: &Path, branch: &str) {
     git(work, &["fetch", "--prune", "origin"]);
 }
 
-fn local_branches(work: &Path) -> String {
+/// The local branch names, as one blob to search — enough to answer "did this
+/// branch survive?".
+fn branch_listing(work: &Path) -> String {
     stdout_str(&git(work, &["branch", "--format=%(refname:short)"]))
 }
 
@@ -2064,9 +2064,9 @@ fn a_squash_merged_branch_is_deleted_without_a_warning() {
         "and nothing for a legend to gloss: {text}"
     );
     assert!(
-        !local_branches(work.path()).contains("feature"),
+        !branch_listing(work.path()).contains("feature"),
         "the branch should be gone: {}",
-        local_branches(work.path())
+        branch_listing(work.path())
     );
 }
 
@@ -2080,9 +2080,7 @@ fn a_commit_on_top_of_a_squash_merge_keeps_its_warning() {
     push_topic_branch(work.path(), "feature");
     squash_merge_upstream(work.path(), "feature");
     git(work.path(), &["checkout", "feature"]);
-    fs::write(work.path().join("later.txt"), "not upstream\n").unwrap();
-    git(work.path(), &["add", "."]);
-    git(work.path(), &["commit", "-m", "work done after the merge"]);
+    commit_in(work.path(), "later.txt", "work done after the merge");
     git(work.path(), &["checkout", "main"]);
     git(work.path(), &["branch", "dest", "main"]);
 
@@ -2099,9 +2097,9 @@ fn a_commit_on_top_of_a_squash_merge_keeps_its_warning() {
     // ADR 0001 from there on: the marker was shown, so ticking the row discards
     // the commits it warned about. Equivalence changed nothing here.
     assert!(
-        !local_branches(work.path()).contains("feature"),
+        !branch_listing(work.path()).contains("feature"),
         "a warned row is still deleted when ticked: {}",
-        local_branches(work.path())
+        branch_listing(work.path())
     );
 }
 
@@ -2117,21 +2115,19 @@ fn a_branch_that_moves_after_the_proof_is_no_longer_covered_by_it() {
     // A commit for the branch to be moved onto, parked out of the way on a
     // branch of its own so nothing else notices it.
     git(work.path(), &["checkout", "-b", "parked"]);
-    fs::write(work.path().join("later.txt"), "not upstream\n").unwrap();
-    git(work.path(), &["add", "."]);
-    git(work.path(), &["commit", "-m", "work done after the proof"]);
+    commit_in(work.path(), "later.txt", "work done after the proof");
     git(work.path(), &["checkout", "main"]);
     git(work.path(), &["branch", "dest", "main"]);
 
     // The rows — and the proof — are built before the picker draws, so moving
     // the branch now is exactly the race the pin exists for.
-    let text = drive_cleanup_prompt(work.path(), "dest", "feature", false, || {
+    let raw = drive_cleanup_prompt(work.path(), "dest", "feature", false, || {
         git(work.path(), &["branch", "--force", "feature", "parked"]);
     });
-    let text = String::from_utf8_lossy(&text);
+    let text = String::from_utf8_lossy(&raw);
 
     assert!(
-        local_branches(work.path()).contains("feature"),
+        branch_listing(work.path()).contains("feature"),
         "the proof no longer covers where the branch points, so git refuses: {text}"
     );
 }
@@ -2152,7 +2148,7 @@ fn an_untouched_branch_cut_from_the_anchor_is_not_read_as_landed() {
         stale_names("origin")
     );
     assert!(
-        git_switch::git::equivalent_branches(None, "origin", &["fresh".to_string()]).is_empty(),
+        git_switch::git::equivalent_branches(None, "origin", &["fresh"]).is_empty(),
         "and an empty diff proves nothing, so equivalence cannot offer it either"
     );
 }

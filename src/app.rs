@@ -609,19 +609,17 @@ pub(crate) fn prompt_delete_stale_branches(
     // whenever that worktree sits on something unrelated, and per ADR 0001 the
     // marker would then license a force-delete it never warned about.
     let main_dir = worktrees.iter().find(|w| w.is_main).map(|w| w.path.clone());
-    let mut unmerged = git::unmerged_branches(main_dir.as_deref()).unwrap_or_default();
+    let unmerged = git::unmerged_branches(main_dir.as_deref()).unwrap_or_default();
     // A branch whose work landed by squash merge is unmerged by every test git
     // offers, and warning about it warns of nothing. Ask only where a warning
-    // would otherwise be drawn, then drop what the proof defeats *before* any
-    // `Risk` is built: an equivalent branch is simply not unmerged from here on,
-    // and no row, legend or license need know why.
-    let candidates: Vec<String> = stale
+    // would otherwise be drawn — a branch both stale and unmerged — since
+    // equivalence subtracts a warning and never adds one.
+    let candidates: Vec<&str> = stale
         .iter()
-        .map(|b| b.name.clone())
-        .filter(|name| unmerged.contains_key(name))
+        .filter(|b| unmerged.contains_key(&b.name))
+        .map(|b| b.name.as_str())
         .collect();
     let equivalent = git::equivalent_branches(main_dir.as_deref(), remote, &candidates);
-    unmerged.retain(|name, _| !equivalent.contains_key(name));
     let rows = stale_rows(
         stale,
         &worktrees,
@@ -642,8 +640,9 @@ pub(crate) fn prompt_delete_stale_branches(
         .collect();
     let items = align_labels(&rows.iter().map(stale_label).collect::<Vec<_>>());
 
-    // Non-interactive (piped/CI): we can't prompt, so delete nothing rather
-    // than blocking on key input or silently acting on the defaults.
+    // The terminal was checked at the top, so this is acquisition rather than a
+    // second guard — raw mode is taken here and not a moment earlier, so it is
+    // never held across the git work above.
     let Some(keys) = interactive_keys() else {
         return Ok(());
     };
@@ -667,9 +666,10 @@ pub(crate) fn prompt_delete_stale_branches(
 
 /// Builds the picker rows, pairing each stale branch with the worktree holding
 /// it and what deleting it would destroy. `equivalent` maps a branch proven
-/// equivalent to the tip it was proven at; the caller has already taken those
-/// names out of `unmerged`, so all that is left to do here is carry the proof.
-/// `dirty` is injected so the rule can be tested without a repo on disk.
+/// equivalent to the tip it was proven at, and a proof is subtracted here —
+/// before the `Risk` is built, so a proven branch is simply not unmerged and no
+/// row can carry both a proof and the marker it defeats. `dirty` is injected so
+/// the rule can be tested without a repo on disk.
 fn stale_rows(
     stale: Vec<git::StaleBranch>,
     worktrees: &[git::Worktree],
@@ -683,13 +683,16 @@ fn stale_rows(
         .filter(|b| destination != Some(b.name.as_str()))
         .map(|b| {
             let worktree = git::worktree_for_branch(worktrees, &b.name);
+            let proven = equivalent.get(&b.name).cloned();
             let risk = Risk {
                 dirty: worktree
                     .as_ref()
                     .is_some_and(|w| !w.prunable && dirty(&w.path)),
-                unmerged: unmerged.get(&b.name).copied(),
+                unmerged: proven
+                    .is_none()
+                    .then(|| unmerged.get(&b.name).copied())
+                    .flatten(),
             };
-            let proven = equivalent.get(&b.name).cloned();
             StaleRow {
                 branch: b.name,
                 ground: b.ground,
@@ -794,7 +797,7 @@ fn delete_stale_row(
         Some(tip) => removal::License::proven(row.risk, tip),
         None => removal::License::shown(row.risk),
     };
-    let report = removal::remove(target, license, steps)?;
+    let report = removal::remove(target, &license, steps)?;
 
     for line in reporting::removal_outcome(&report) {
         eprintln!("{line}");

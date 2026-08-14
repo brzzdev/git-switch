@@ -726,7 +726,7 @@ fn unmerged_from(
 pub fn equivalent_branches(
     dir: Option<&Path>,
     remote: &str,
-    candidates: &[String],
+    candidates: &[&str],
 ) -> HashMap<String, String> {
     let Some((anchor_ref, _)) = merged_anchor(remote) else {
         return HashMap::new();
@@ -735,7 +735,7 @@ pub fn equivalent_branches(
         .iter()
         .filter_map(|name| {
             let tip = branch_tip(dir, name)?;
-            equivalent_to(dir, &anchor_ref, &tip).then(|| (name.clone(), tip))
+            equivalent_to(dir, &anchor_ref, &tip).then(|| ((*name).to_string(), tip))
         })
         .collect()
 }
@@ -752,31 +752,27 @@ pub fn equivalent_branches(
 /// answer equivalence owes it.
 ///
 /// Every step is a question, so a git that refuses one answers "not equivalent"
-/// and says nothing about it.
+/// and says nothing about it — which is what the `?`s below spell.
 fn equivalent_to(dir: Option<&Path>, anchor_ref: &str, tip: &str) -> bool {
-    let Ok(base) = run_in(dir, &["merge-base", anchor_ref, tip]) else {
-        return false;
+    let probe = || {
+        let base = run_in(dir, &["merge-base", anchor_ref, tip]).ok()?;
+        let probe = run_in(
+            dir,
+            &[
+                "commit-tree",
+                &format!("{tip}^{{tree}}"),
+                "-p",
+                base.trim(),
+                "-m",
+                "git-switch: equivalence probe",
+            ],
+        )
+        .ok()?;
+        run_in(dir, &["cherry", anchor_ref, probe.trim()]).ok()
     };
-    let Ok(tree) = run_in(dir, &["rev-parse", &format!("{tip}^{{tree}}")]) else {
-        return false;
-    };
-    let Ok(probe) = run_in(
-        dir,
-        &[
-            "commit-tree",
-            tree.trim(),
-            "-p",
-            base.trim(),
-            "-m",
-            "git-switch: equivalence probe",
-        ],
-    ) else {
-        return false;
-    };
-    let Ok(cherry) = run_in(dir, &["cherry", anchor_ref, probe.trim()]) else {
-        return false;
-    };
-    cherry.lines().next().is_some_and(|l| l.starts_with('-'))
+    probe()
+        .and_then(|cherry| cherry.lines().next().map(|l| l.starts_with('-')))
+        .unwrap_or(false)
 }
 
 /// Where `branch` points, or `None` where the ref doesn't resolve.
