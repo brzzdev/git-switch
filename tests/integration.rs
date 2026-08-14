@@ -2036,6 +2036,23 @@ fn squash_merge_upstream(work: &Path, branch: &str) {
     git(work, &["fetch", "--prune", "origin"]);
 }
 
+/// Land `branch`'s two commits on the remote the way a forge *rebase*-merge
+/// does: each replayed onto `main` under a hash of its own, so no single commit
+/// there carries the branch's whole diff. Then the upstream is deleted, as after
+/// a squash merge.
+///
+/// `-x` is what makes it a replay rather than a fast-forward: it rewords each
+/// commit, so the ones landing on `main` are new objects. Without it git may
+/// produce byte-identical commits, which share the branch's hashes and move the
+/// merge-base — a different scenario entirely, and one this test isn't about.
+fn rebase_merge_upstream(work: &Path, branch: &str) {
+    git(work, &["checkout", "main"]);
+    git(work, &["cherry-pick", "-x", &format!("{branch}~1"), branch]);
+    git(work, &["push", "origin", "main"]);
+    git(work, &["push", "origin", "--delete", branch]);
+    git(work, &["fetch", "--prune", "origin"]);
+}
+
 /// The local branch names, as one blob to search — enough to answer "did this
 /// branch survive?".
 fn branch_listing(work: &Path) -> String {
@@ -2100,6 +2117,69 @@ fn a_commit_on_top_of_a_squash_merge_keeps_its_warning() {
         !branch_listing(work.path()).contains("feature"),
         "a warned row is still deleted when ticked: {}",
         branch_listing(work.path())
+    );
+}
+
+/// A rebase-merge replays each commit separately, so no commit on the anchor
+/// carries the branch's whole diff and the patch-id route finds nothing. The
+/// content route answers it: the files the branch touched read identically on
+/// the anchor, however they got there.
+#[test]
+fn a_rebase_merged_branch_is_deleted_without_a_warning() {
+    let (_bare, work) = setup();
+
+    git(work.path(), &["checkout", "-b", "feature"]);
+    commit_in(work.path(), "one.txt", "first");
+    commit_in(work.path(), "two.txt", "second");
+    git(work.path(), &["push", "-u", "origin", "feature"]);
+    rebase_merge_upstream(work.path(), "feature");
+    git(work.path(), &["branch", "dest", "main"]);
+
+    let text = cleanup_prompt(work.path(), "dest", "feature");
+
+    assert!(
+        !text.contains('↑'),
+        "replayed commit by commit is still landed: {text}"
+    );
+    assert!(
+        !branch_listing(work.path()).contains("feature"),
+        "the branch should be gone: {}",
+        branch_listing(work.path())
+    );
+}
+
+/// The content route compares the paths a branch touched, and git reports a
+/// rename as its destination alone — which would leave the deletion of its
+/// source uncompared, and prove a branch whose deletion never landed.
+#[test]
+fn a_rename_whose_deletion_never_landed_is_not_proven() {
+    let (_bare, work) = setup();
+
+    // The file predates the branch, so removing it is work of the branch's own.
+    commit_in(work.path(), "old.txt", "a file to be renamed");
+    git(work.path(), &["push", "origin", "main"]);
+    git(work.path(), &["checkout", "-b", "feature"]);
+    git(work.path(), &["push", "-u", "origin", "feature"]);
+    git(work.path(), &["mv", "old.txt", "new.txt"]);
+    git(work.path(), &["commit", "-m", "rename it"]);
+
+    // Only the arrival lands on main; `old.txt` stays, so the branch still holds
+    // a deletion the anchor has never seen.
+    git(work.path(), &["checkout", "main"]);
+    let moved = stdout_str(&git(work.path(), &["show", "feature:new.txt"]));
+    fs::write(work.path().join("new.txt"), moved).unwrap();
+    git(work.path(), &["add", "new.txt"]);
+    git(work.path(), &["commit", "-m", "add the new name only"]);
+    git(work.path(), &["push", "origin", "main"]);
+    git(work.path(), &["push", "origin", "--delete", "feature"]);
+    git(work.path(), &["fetch", "--prune", "origin"]);
+    git(work.path(), &["branch", "dest", "main"]);
+
+    let text = cleanup_prompt(work.path(), "dest", "feature");
+
+    assert!(
+        text.contains('↑'),
+        "the deletion is unique work, so the warning stands: {text}"
     );
 }
 

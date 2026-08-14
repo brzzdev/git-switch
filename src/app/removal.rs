@@ -48,15 +48,18 @@ impl<'a> Target<'a> {
 /// discarding files.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum BranchLicense {
-    /// A marker the user has seen, or an explicit `--force`.
-    Marked,
     /// Nothing licenses it, so git's own guard decides.
     None,
-    /// Proof that the branch is *Equivalent*, pinned to the tip it was proven at
-    /// — per [ADR 0005](../../docs/adr/0005-proof-of-equivalence-is-a-license.md)
-    /// a license covers what was established and nothing more, so a branch that
-    /// has moved since is no longer covered by it.
-    Proven(String),
+    /// Licensed outright, on something already settled before the delete began:
+    /// a *Marker* the user has seen, or an explicit `--force`. The two are
+    /// distinct sources of *License* in the glossary and this does not conflate
+    /// them — it says only that neither is conditional on anything still true.
+    Outright,
+    /// Proof that the branch is *Equivalent*, which is conditional: per [ADR
+    /// 0005](../../docs/adr/0005-proof-of-equivalence-is-a-license.md) a license
+    /// covers what was established and nothing more, so it lapses the moment
+    /// either the branch or the anchor moves off what was proven.
+    Proven(git::Proof),
 }
 
 /// What licenses forcing: a warning the user has already seen (ADR 0001), proof
@@ -80,20 +83,20 @@ impl License {
         Self {
             worktree: risk.dirty,
             branch: if risk.unmerged.is_some() {
-                BranchLicense::Marked
+                BranchLicense::Outright
             } else {
                 BranchLicense::None
             },
         }
     }
 
-    /// A branch proven *Equivalent* at `tip`, with the worktree half still
-    /// answering to the risk shown. Nothing was warned of about the branch —
-    /// that is the point of the proof — so the proof stands in for the marker,
-    /// and only for as long as the branch stays where it was proven.
-    pub(crate) fn proven(risk: Risk, tip: &str) -> Self {
+    /// A branch proven *Equivalent*, with the worktree half still answering to
+    /// the risk shown. Nothing was warned of about the branch — that is the
+    /// point of the proof — so the proof stands in for the marker, and only for
+    /// as long as what it was established on still holds.
+    pub(crate) fn proven(risk: Risk, proof: &git::Proof) -> Self {
         Self {
-            branch: BranchLicense::Proven(tip.to_string()),
+            branch: BranchLicense::Proven(proof.clone()),
             ..Self::shown(risk)
         }
     }
@@ -102,7 +105,7 @@ impl License {
     pub(crate) fn forced() -> Self {
         Self {
             worktree: true,
-            branch: BranchLicense::Marked,
+            branch: BranchLicense::Outright,
         }
     }
 }
@@ -133,9 +136,10 @@ impl Report<'_> {
 /// exactly as the key source drives the interactive pickers; [`GitSteps`] is the
 /// real implementation.
 pub(crate) trait Steps {
-    /// Where `branch` points *now* — asked to check a proof still covers it, so
-    /// it must read the repo rather than anything remembered.
-    fn branch_tip(&mut self, branch: &str) -> Option<String>;
+    /// What `refname` points at *now* — asked to check a proof still covers what
+    /// it was established on, so it must read the repo rather than anything
+    /// remembered.
+    fn resolve(&mut self, refname: &str) -> Option<String>;
 
     fn delete_branch(&mut self, branch: &str, force: bool) -> AppResult<git::BranchDeleteOutcome>;
 
@@ -165,8 +169,8 @@ impl GitSteps {
 }
 
 impl Steps for GitSteps {
-    fn branch_tip(&mut self, branch: &str) -> Option<String> {
-        git::branch_tip(self.main.as_deref(), branch)
+    fn resolve(&mut self, refname: &str) -> Option<String> {
+        git::resolve(self.main.as_deref(), refname)
     }
 
     fn delete_branch(&mut self, branch: &str, force: bool) -> AppResult<git::BranchDeleteOutcome> {
@@ -212,14 +216,20 @@ pub(crate) fn remove<'a>(
     }
 
     if let Some(branch) = target.branch() {
-        // A proof is re-checked rather than trusted: the branch may have moved
-        // since it was proven, and a license covers the commit it was
-        // established at. One that has moved falls to `-d` and meets git's own
+        // A proof is re-checked rather than trusted. It was established on two
+        // things — where the branch stood and what the anchor held — and a
+        // license covers both or neither: a branch that moved has work nobody
+        // proved, and an anchor rewound out from under it (by a removal hook on
+        // an earlier row, say) no longer holds the content that made the branch
+        // safe to discard. Either way it falls to `-d` and meets git's own
         // guard, exactly as an unmarked worktree does.
         let force = match &license.branch {
-            BranchLicense::Marked => true,
             BranchLicense::None => false,
-            BranchLicense::Proven(tip) => steps.branch_tip(branch).as_ref() == Some(tip),
+            BranchLicense::Outright => true,
+            BranchLicense::Proven(proof) => {
+                steps.resolve(&format!("refs/heads/{branch}")).as_ref() == Some(&proof.tip)
+                    && steps.resolve(&proof.anchor_ref).as_ref() == Some(&proof.anchor_tip)
+            }
         };
         report.branch = Some(steps.delete_branch(branch, force)?);
     }
@@ -229,6 +239,7 @@ pub(crate) fn remove<'a>(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::mem::discriminant;
 
     use super::*;
@@ -246,31 +257,50 @@ mod tests {
     struct FakeSteps {
         worktree: git::WorktreeRemoveOutcome,
         branch: git::BranchDeleteOutcome,
-        /// Where the branch is when [`remove`] asks — the tests about proof move
-        /// it out from under the license.
-        tip: String,
+        /// What the refs read when [`remove`] asks. The proof tests move one out
+        /// from under the license and leave the other where it was.
+        refs: HashMap<String, String>,
         calls: Vec<Call>,
     }
 
     impl FakeSteps {
-        /// Both steps succeed and the branch sits where `PROVEN_TIP` says; tests
-        /// that care about an outcome override it.
+        /// Both steps succeed and both refs sit where [`proof`] says; tests that
+        /// care about an outcome, or about something moving, override it.
         fn new() -> Self {
             Self {
                 worktree: git::WorktreeRemoveOutcome::Removed,
                 branch: git::BranchDeleteOutcome::Deleted,
-                tip: PROVEN_TIP.to_string(),
+                refs: HashMap::from([
+                    ("refs/heads/feature".to_string(), PROVEN_TIP.to_string()),
+                    (ANCHOR_REF.to_string(), PROVEN_ANCHOR.to_string()),
+                ]),
                 calls: Vec::new(),
             }
         }
+
+        /// Move a ref off what the proof was established on.
+        fn moved(mut self, refname: &str) -> Self {
+            self.refs.insert(refname.to_string(), "moved".to_string());
+            self
+        }
     }
 
-    /// The commit the proof tests establish their license at.
+    const ANCHOR_REF: &str = "refs/heads/main";
+    /// What the proof tests establish their license on.
     const PROVEN_TIP: &str = "abc123";
+    const PROVEN_ANCHOR: &str = "def456";
+
+    fn proof() -> git::Proof {
+        git::Proof {
+            anchor_ref: ANCHOR_REF.to_string(),
+            anchor_tip: PROVEN_ANCHOR.to_string(),
+            tip: PROVEN_TIP.to_string(),
+        }
+    }
 
     impl Steps for FakeSteps {
-        fn branch_tip(&mut self, _branch: &str) -> Option<String> {
-            Some(self.tip.clone())
+        fn resolve(&mut self, refname: &str) -> Option<String> {
+            self.refs.get(refname).cloned()
         }
 
         fn delete_branch(
@@ -442,21 +472,21 @@ mod tests {
             dirty: true,
             unmerged: Some(git::Unmerged::NoUpstream),
         });
-        assert!(both.worktree && both.branch == BranchLicense::Marked);
+        assert!(both.worktree && both.branch == BranchLicense::Outright);
 
         let forced = License::forced();
-        assert!(forced.worktree && forced.branch == BranchLicense::Marked);
+        assert!(forced.worktree && forced.branch == BranchLicense::Outright);
     }
 
     /// Proof is the third source of license (ADR 0005): an equivalent branch
     /// draws no marker, so nothing else in its license would force anything, and
     /// the proof alone is what discards the commits git would refuse.
     #[test]
-    fn a_proof_forces_the_delete_while_the_branch_sits_where_it_was_proven() {
+    fn a_proof_forces_the_delete_while_what_it_was_established_on_still_holds() {
         let mut steps = FakeSteps::new();
         remove(
             held(),
-            &License::proven(Risk::default(), PROVEN_TIP),
+            &License::proven(Risk::default(), &proof()),
             &mut steps,
         )
         .expect("no git to fail");
@@ -469,25 +499,29 @@ mod tests {
         );
     }
 
-    /// A license covers what was established and nothing more. A branch that
-    /// moved after the proof is no longer the thing that was proven, so it falls
-    /// to `-d` and meets git's own guard.
+    /// A license covers what was established and nothing more, and equivalence
+    /// was established on two things at once. Move either — the branch grows a
+    /// commit nobody proved, or the anchor is rewound and no longer holds the
+    /// content that made the branch safe to discard — and the delete falls to
+    /// `-d` to meet git's own guard.
     #[test]
-    fn a_branch_that_moved_since_the_proof_is_no_longer_covered() {
-        let mut steps = FakeSteps::new();
-        steps.tip = "moved".to_string();
-        remove(
-            held(),
-            &License::proven(Risk::default(), PROVEN_TIP),
-            &mut steps,
-        )
-        .expect("no git to fail");
-        assert_eq!(
-            steps.calls,
-            vec![
-                Call::RemoveWorktree { force: false },
-                Call::DeleteBranch { force: false },
-            ]
-        );
+    fn a_proof_lapses_when_either_the_branch_or_the_anchor_moves() {
+        for moved in ["refs/heads/feature", ANCHOR_REF] {
+            let mut steps = FakeSteps::new().moved(moved);
+            remove(
+                held(),
+                &License::proven(Risk::default(), &proof()),
+                &mut steps,
+            )
+            .expect("no git to fail");
+            assert_eq!(
+                steps.calls,
+                vec![
+                    Call::RemoveWorktree { force: false },
+                    Call::DeleteBranch { force: false },
+                ],
+                "{moved} moved, so the proof no longer covers the delete"
+            );
+        }
     }
 }

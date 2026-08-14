@@ -706,11 +706,23 @@ fn unmerged_from(
         .collect()
 }
 
-/// Branches whose whole diff against the anchor is already in the anchor under
-/// some other commit — squash-merged, rebase-merged or cherry-picked. Each is
-/// mapped to the tip the proof was established at, since a *License* covers what
-/// was proven and nothing more: see [ADR
+/// What was established when a branch was proven *Equivalent*: where the branch
+/// stood, and the anchor it was proven against. A *License* covers what was
+/// proven and nothing more, so both are re-checked before the force-delete — a
+/// proof survives neither the branch moving nor the anchor being rewound out
+/// from under it. See [ADR
 /// 0005](../docs/adr/0005-proof-of-equivalence-is-a-license.md).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Proof {
+    /// The ref the proof was made against, kept so it can be resolved again.
+    pub anchor_ref: String,
+    pub anchor_tip: String,
+    pub tip: String,
+}
+
+/// Branches whose whole diff against the anchor is already in the anchor under
+/// some other commit — squash-merged, rebase-merged or cherry-picked — each with
+/// the [`Proof`] established for it.
 ///
 /// Equivalence is positive evidence and only ever subtracts, so ask it only of
 /// branches a warning would otherwise be drawn over — ones both stale and
@@ -718,8 +730,8 @@ fn unmerged_from(
 /// find already there, and is never proven by this; anything that cannot be
 /// established at all leaves the branch treated as holding unique work.
 ///
-/// `dir` must be the worktree the delete will run from, so the tip proven here
-/// and the tip re-checked there are read through the same root. Refs are shared,
+/// `dir` must be the worktree the delete will run from, so what is proven here
+/// and what is re-checked there are read through the same root. Refs are shared,
 /// so the two agree anyway; asking from one place is what keeps that a fact
 /// rather than a coincidence.
 #[must_use]
@@ -727,42 +739,76 @@ pub fn equivalent_branches(
     dir: Option<&Path>,
     remote: &str,
     candidates: &[&str],
-) -> HashMap<String, String> {
+) -> HashMap<String, Proof> {
     let Some((anchor_ref, _)) = merged_anchor(remote) else {
+        return HashMap::new();
+    };
+    let Some(anchor_tip) = resolve(dir, &anchor_ref) else {
         return HashMap::new();
     };
     candidates
         .iter()
         .filter_map(|name| {
-            let tip = branch_tip(dir, name)?;
-            equivalent_to(dir, &anchor_ref, &tip).then(|| ((*name).to_string(), tip))
+            let tip = resolve(dir, &format!("refs/heads/{name}"))?;
+            equivalent_to(dir, &anchor_ref, &tip).then(|| {
+                let proof = Proof {
+                    anchor_ref: anchor_ref.clone(),
+                    anchor_tip: anchor_tip.clone(),
+                    tip,
+                };
+                ((*name).to_string(), proof)
+            })
         })
         .collect()
 }
 
 /// Whether everything `tip` adds over its merge-base with the anchor is already
-/// in the anchor as some other commit.
+/// in the anchor. Two routes, either of which proves it, because a branch's work
+/// can land in two shapes and neither test sees both:
+///
+/// - [`patch_landed`] asks whether the anchor already carries the branch's patch.
+///   It survives the anchor moving on over the same files, and is the only route
+///   that answers a squash merge — but it reads the branch's diff as *one* patch,
+///   so a rebase-merge that replayed several commits individually defeats it.
+/// - [`content_present`] asks whether the files the branch touched now read
+///   identically in the anchor. That is blind to how the work got there, so a
+///   rebase-merge or a scattered cherry-pick answers it, but any later edit to
+///   the same files does too and it falls back to the first route.
+///
+/// Every step is a question, so a git that refuses one answers "not equivalent"
+/// and says nothing about it.
+fn equivalent_to(dir: Option<&Path>, anchor_ref: &str, tip: &str) -> bool {
+    let Some(base) = run_in(dir, &["merge-base", anchor_ref, tip])
+        .ok()
+        .map(|b| b.trim().to_string())
+    else {
+        return false;
+    };
+    patch_landed(dir, anchor_ref, tip, &base) || content_present(dir, anchor_ref, tip, &base)
+}
+
+/// Whether the anchor already carries the branch's patch, by git's own reckoning.
 ///
 /// Git compares content by patch id, but only between commits — so the branch's
-/// whole diff is synthesised as one commit with `commit-tree`, parented on that
+/// whole diff is synthesised as one commit with `commit-tree`, parented on the
 /// merge-base, and handed to `git cherry`, which prints `-` for a commit whose
 /// patch is already upstream and `+` for one that isn't. The synthesised commit
 /// is dangling and unreachable; gc reaps it. An empty diff has no patch id to
 /// match, so a branch holding no work of its own comes back `+` — exactly the
 /// answer equivalence owes it.
 ///
-/// Every step is a question, so a git that refuses one answers "not equivalent"
-/// and says nothing about it — which is what the `?`s below spell.
-fn equivalent_to(dir: Option<&Path>, anchor_ref: &str, tip: &str) -> bool {
+/// This is `git rebase`'s notion of "already applied", patch ids and all, which
+/// is deliberate: a commit git-switch calls landed is one git would itself drop
+/// as redundant when replaying it.
+fn patch_landed(dir: Option<&Path>, anchor_ref: &str, tip: &str, base: &str) -> bool {
     let probe = || {
-        let base = run_in(dir, &["merge-base", anchor_ref, tip]).ok()?;
         let probe = run_in(
             dir,
             &[
                 "commit-tree",
                 &format!("{tip}^{{tree}}"),
                 "-p",
-                base.trim(),
+                base,
                 "-m",
                 "git-switch: equivalence probe",
             ],
@@ -775,10 +821,45 @@ fn equivalent_to(dir: Option<&Path>, anchor_ref: &str, tip: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Where `branch` points, or `None` where the ref doesn't resolve.
+/// Whether every path the branch touched since the merge-base now reads
+/// byte-identically in the anchor. A branch that touched nothing proves nothing
+/// — the whole-tree comparison a missing pathspec would run is exactly the
+/// "trivially equivalent" answer ADR 0005 refuses, so an empty list is a `false`
+/// and never a `git diff` without paths.
+fn content_present(dir: Option<&Path>, anchor_ref: &str, tip: &str, base: &str) -> bool {
+    // `-z` because git otherwise quotes paths that need it, and a quoted path is
+    // not the path. `--no-renames` because a rename is reported as its
+    // destination alone, which would drop the source — a deletion the branch
+    // performed — out of the comparison, and prove a branch whose deletion never
+    // landed.
+    let Ok(listing) = run_in(
+        dir,
+        &["diff", "--name-only", "--no-renames", "-z", base, tip],
+    ) else {
+        return false;
+    };
+    // A path git-switch cannot read is a path it cannot compare: `run_in` decodes
+    // lossily, and a mangled path matches nothing as a pathspec — which `git
+    // diff --quiet` reports as no difference, proving the branch on an empty
+    // comparison. Refuse the whole answer rather than a silent subset.
+    if listing.contains('\u{fffd}') {
+        return false;
+    }
+    let touched: Vec<&str> = listing.split('\0').filter(|p| !p.is_empty()).collect();
+    if touched.is_empty() {
+        return false;
+    }
+    let mut args = vec!["diff", "--quiet", tip, anchor_ref, "--"];
+    args.extend(touched);
+    // A difference exits 1, which `run_in` reports as an error — and a branch
+    // whose files read differently is exactly the branch this cannot prove.
+    run_in(dir, &args).is_ok()
+}
+
+/// What `refname` points at, or `None` where it doesn't resolve.
 #[must_use]
-pub(crate) fn branch_tip(dir: Option<&Path>, branch: &str) -> Option<String> {
-    rev_parse(dir, &format!("refs/heads/{branch}")).ok()
+pub(crate) fn resolve(dir: Option<&Path>, refname: &str) -> Option<String> {
+    rev_parse(dir, refname).ok()
 }
 
 #[must_use]
