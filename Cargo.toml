@@ -6,6 +6,12 @@ categories = ["command-line-utilities", "development-tools"]
 description = "Interactive Git branch switcher with merged-branch cleanup"
 keywords = ["branch", "cli", "git"]
 license = "MIT"
+# The lib target exists for `main.rs` and the integration tests, not as a
+# contract for anyone else — `git-switch` ships as a binary, from a release
+# tarball or `just install`. Saying so here keeps a `pub fn` from reading as
+# published API, and makes an accidental `cargo publish` fail rather than
+# create one.
+publish = false
 readme = "README.md"
 repository = "https://github.com/brzzdev/git-switch"
 
