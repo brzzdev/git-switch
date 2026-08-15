@@ -1,6 +1,6 @@
 [package]
 name = "git-switch"
-version = "1.0.12"
+version = "1.0.13"
 edition = "2024"
 categories = ["command-line-utilities", "development-tools"]
 description = "Interactive Git branch switcher with merged-branch cleanup"
