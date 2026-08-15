@@ -133,6 +133,16 @@ fn worktree_failure(path: &Path, branch: Option<&str>, detail: &str) -> Vec<Stri
         .collect()
 }
 
+/// Who a branch was being put back for, where that was actually established.
+/// A worktree merely never ruled out is not one seen, and a line saying
+/// otherwise reports a holder nobody found.
+fn for_whom(holder: git::Holder) -> &'static str {
+    match holder {
+        git::Holder::Seen => " for the worktree now holding it",
+        git::Holder::Unknown => "",
+    }
+}
+
 /// What became of the branch, as one line. `prefix` carries the worktree that
 /// already went, so success and failure both report it.
 fn branch_line(prefix: &str, branch: &str, outcome: &git::BranchDeleteOutcome) -> String {
@@ -160,18 +170,13 @@ fn branch_line(prefix: &str, branch: &str, outcome: &git::BranchDeleteOutcome) -
             tip,
             detail,
             holder,
-        } => {
-            let whom = match holder {
-                git::Holder::Seen => " for the worktree now holding it",
-                git::Holder::Unknown => "",
-            };
-            format!(
-                "{} {prefix}deleted {branch}, then couldn't put it back{whom}: {detail} \
-                 (restore it with `git branch -- {} {tip}`)",
-                warn(),
-                shell_quote(branch),
-            )
-        }
+        } => format!(
+            "{} {prefix}deleted {branch}, then couldn't put it back{}: {detail} \
+             (restore it with `git branch -- {} {tip}`)",
+            warn(),
+            for_whom(*holder),
+            shell_quote(branch),
+        ),
         // The ref is there, so nothing needs repairing and nothing is offered to
         // repair it with — but the branch standing there is not the one proven,
         // and the user is the only one who can say whether that matters.
@@ -181,10 +186,16 @@ fn branch_line(prefix: &str, branch: &str, outcome: &git::BranchDeleteOutcome) -
         ),
         // Nobody could look, so nothing is recommended: a `git branch` here
         // would be advice to recreate something that may already be standing.
-        git::BranchDeleteOutcome::DeletedStateUnknown { tip, detail } => format!(
-            "{} {prefix}deleted {branch} at {tip}, then couldn't put it back or read it \
+        // A holder seen before any of that failed is still a holder seen.
+        git::BranchDeleteOutcome::DeletedStateUnknown {
+            tip,
+            detail,
+            holder,
+        } => format!(
+            "{} {prefix}deleted {branch} at {tip}, then couldn't put it back{} or read it \
              back: {detail} (check whether it exists before recreating it)",
             warn(),
+            for_whom(*holder),
         ),
         git::BranchDeleteOutcome::NotMerged => format!(
             "{} {prefix}kept {branch} with unmerged commits \
@@ -382,6 +393,7 @@ mod tests {
                 tip: "abc123".into(),
                 detail: "cannot lock ref; and reading it back failed too: not a git repository"
                     .into(),
+                holder: git::Holder::Unknown,
             }),
         );
         let line = plain_all(&removal_outcome(&report)).join("");
@@ -394,6 +406,30 @@ mod tests {
         assert!(
             !line.contains("git branch"),
             "nothing may be recommended over a ref nobody could look at: {line}"
+        );
+    }
+
+    /// A holder seen before the restore failed is still a holder seen, whichever
+    /// outcome the reading afterwards produces — the two lines say the same
+    /// thing about the worktree and differ only in what they know of the ref.
+    #[test]
+    fn a_seen_holder_survives_a_lookup_that_failed_after_it() {
+        let report = report(
+            removal::Target::Branch { name: "feature" },
+            None,
+            Some(git::BranchDeleteOutcome::DeletedStateUnknown {
+                tip: "abc123".into(),
+                detail: "cannot lock ref".into(),
+                holder: git::Holder::Seen,
+            }),
+        );
+        assert_eq!(
+            plain_all(&removal_outcome(&report)),
+            [
+                "! deleted feature at abc123, then couldn't put it back for the worktree now \
+              holding it or read it back: cannot lock ref \
+              (check whether it exists before recreating it)"
+            ]
         );
     }
 

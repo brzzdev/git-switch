@@ -938,9 +938,12 @@ pub enum RefState {
     Unreadable(String),
 }
 
-/// `rev-parse --verify --quiet` separates the three: it exits 0 with the object
-/// id, 1 for a ref that isn't there, and anything else for a question it could
-/// not answer.
+/// `rev-parse --verify --quiet` separates the three, but not by exit code alone:
+/// it exits 0 with the object id, and 1 both for a ref that isn't there *and*
+/// for one that is there but broken — the second warning about it on stderr, the
+/// first saying nothing at all. So silence is what distinguishes them. Only the
+/// presence of output is read and never its wording, which would be a fact about
+/// the user's locale rather than about the ref.
 fn ref_state(dir: Option<&Path>, refname: &str) -> RefState {
     let Ok(output) = git_cmd(dir)
         .args(["rev-parse", "--verify", "--quiet", refname])
@@ -948,12 +951,12 @@ fn ref_state(dir: Option<&Path>, refname: &str) -> RefState {
     else {
         return RefState::Unreadable("git could not be run".to_string());
     };
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
     let unreadable = || {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         RefState::Unreadable(if stderr.is_empty() {
             format!("git rev-parse exited {:?}", output.status.code())
         } else {
-            stderr
+            stderr.clone()
         })
     };
     match output.status.code() {
@@ -965,7 +968,7 @@ fn ref_state(dir: Option<&Path>, refname: &str) -> RefState {
                 RefState::At(oid)
             }
         }
-        Some(1) => RefState::Missing,
+        Some(1) if stderr.is_empty() => RefState::Missing,
         _ => unreadable(),
     }
 }
@@ -1166,6 +1169,7 @@ pub fn delete_branch_at(
                 RefState::Unreadable(why) => BranchDeleteOutcome::DeletedStateUnknown {
                     tip: expected.to_string(),
                     detail: format!("{e}; and reading it back failed too: {why}"),
+                    holder,
                 },
             },
         },
@@ -1290,10 +1294,12 @@ pub enum BranchDeleteOutcome {
     /// Deleted at `tip`, and whether it is there now could not be established:
     /// putting it back failed, and so did reading it afterwards. Distinct from
     /// [`Self::DeletedNotRestored`] because nothing may be recommended over a
-    /// ref nobody could look at.
+    /// ref nobody could look at — `holder` survives all the same, being a fact
+    /// established before any of that went wrong.
     DeletedStateUnknown {
         tip: String,
         detail: String,
+        holder: Holder,
     },
     /// Deleted at `tip`, and standing again at `now` by another hand: the
     /// restore was refused because there was nothing left to restore into.
