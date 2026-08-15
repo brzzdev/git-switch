@@ -133,6 +133,16 @@ fn worktree_failure(path: &Path, branch: Option<&str>, detail: &str) -> Vec<Stri
         .collect()
 }
 
+/// Who a branch was being put back for, where that was actually established.
+/// A worktree merely never ruled out is not one seen, and a line saying
+/// otherwise reports a holder nobody found.
+fn for_whom(holder: git::Holder) -> &'static str {
+    match holder {
+        git::Holder::Seen => " for the worktree now holding it",
+        git::Holder::Unknown => "",
+    }
+}
+
 /// What became of the branch, as one line. `prefix` carries the worktree that
 /// already went, so success and failure both report it.
 fn branch_line(prefix: &str, branch: &str, outcome: &git::BranchDeleteOutcome) -> String {
@@ -140,6 +150,53 @@ fn branch_line(prefix: &str, branch: &str, outcome: &git::BranchDeleteOutcome) -
         git::BranchDeleteOutcome::Deleted => {
             format!("{} {prefix}deleted {branch}", done())
         }
+        // The branch went; its config wouldn't. Naming the keys is the whole
+        // value of the line — the user is the only one who can clear them now.
+        git::BranchDeleteOutcome::DeletedLeavingConfig(keys) => format!(
+            "{} {prefix}deleted {branch}, but left config behind: {keys}",
+            warn(),
+        ),
+        // Nothing is known to have survived here, only that nobody could look —
+        // so the line says that, and not that something was left behind.
+        git::BranchDeleteOutcome::DeletedConfigUnverified(detail) => format!(
+            "{} {prefix}deleted {branch}, but couldn't check whether its config \
+             went with it: {detail}",
+            warn(),
+        ),
+        // The one outcome describing a repository that needs repair, so it leads
+        // with what happened to the ref and hands over the command to undo it.
+        // Who it was put back for is only said where a holder was actually seen.
+        git::BranchDeleteOutcome::DeletedNotRestored {
+            tip,
+            detail,
+            holder,
+        } => format!(
+            "{} {prefix}deleted {branch}, then couldn't put it back{}: {detail} \
+             (restore it with `git branch -- {} {tip}`)",
+            warn(),
+            for_whom(*holder),
+            shell_quote(branch),
+        ),
+        // The ref is there, so nothing needs repairing and nothing is offered to
+        // repair it with — but the branch standing there is not the one proven,
+        // and the user is the only one who can say whether that matters.
+        git::BranchDeleteOutcome::DeletedThenRecreated { tip, now } => format!(
+            "{} {prefix}deleted {branch} at {tip}, and something recreated it at {now}",
+            warn(),
+        ),
+        // Nobody could look, so nothing is recommended: a `git branch` here
+        // would be advice to recreate something that may already be standing.
+        // A holder seen before any of that failed is still a holder seen.
+        git::BranchDeleteOutcome::DeletedStateUnknown {
+            tip,
+            detail,
+            holder,
+        } => format!(
+            "{} {prefix}deleted {branch} at {tip}, then couldn't put it back{} or read it \
+             back: {detail} (check whether it exists before recreating it)",
+            warn(),
+            for_whom(*holder),
+        ),
         git::BranchDeleteOutcome::NotMerged => format!(
             "{} {prefix}kept {branch} with unmerged commits \
              (run `git branch -D -- {}` to force-delete)",
@@ -262,6 +319,138 @@ mod tests {
             [
                 "! kept topic$(touch${IFS}/tmp/pwned) with unmerged commits \
                  (run `git branch -D -- 'topic$(touch${IFS}/tmp/pwned)'` to force-delete)"
+            ]
+        );
+    }
+
+    /// A branch that went while its config stayed is neither a clean deletion
+    /// nor a failure: the line has to say both, and name the keys, because
+    /// clearing them is now the user's job and nobody else knows they are there.
+    #[test]
+    fn config_outliving_its_branch_is_named_key_by_key() {
+        let report = report(
+            removal::Target::Branch { name: "feature" },
+            None,
+            Some(git::BranchDeleteOutcome::DeletedLeavingConfig(
+                "branch.feature.remote, branch.feature.merge".into(),
+            )),
+        );
+        assert_eq!(
+            plain_all(&removal_outcome(&report)),
+            ["! deleted feature, but left config behind: \
+              branch.feature.remote, branch.feature.merge"]
+        );
+    }
+
+    /// Deleted-and-something-else is not the same answer as could-not-delete,
+    /// and a headline claiming the branch is still there would send the user
+    /// looking for a ref that has gone. Each of these leads with the deletion.
+    #[test]
+    fn every_deleted_outcome_leads_with_the_deletion() {
+        let line = |outcome| {
+            let report = report(
+                removal::Target::Branch { name: "feature" },
+                None,
+                Some(outcome),
+            );
+            plain_all(&removal_outcome(&report)).join("")
+        };
+
+        assert_eq!(
+            line(git::BranchDeleteOutcome::DeletedConfigUnverified(
+                "fatal: bad config line 3".into()
+            )),
+            "! deleted feature, but couldn't check whether its config went with it: \
+             fatal: bad config line 3"
+        );
+        assert_eq!(
+            line(git::BranchDeleteOutcome::DeletedNotRestored {
+                tip: "abc123".into(),
+                detail: "cannot lock ref".into(),
+                holder: git::Holder::Seen,
+            }),
+            "! deleted feature, then couldn't put it back for the worktree now holding it: \
+             cannot lock ref (restore it with `git branch -- feature abc123`)"
+        );
+        assert_eq!(
+            line(git::BranchDeleteOutcome::DeletedThenRecreated {
+                tip: "abc123".into(),
+                now: "def456".into(),
+            }),
+            "! deleted feature at abc123, and something recreated it at def456"
+        );
+    }
+
+    /// A ref nobody could read is not a ref known to be missing, and the line
+    /// that reports one must recommend nothing: telling the user to recreate a
+    /// branch that may be standing there is worse than telling them to look.
+    #[test]
+    fn an_unreadable_ref_earns_no_repair_command() {
+        let report = report(
+            removal::Target::Branch { name: "feature" },
+            None,
+            Some(git::BranchDeleteOutcome::DeletedStateUnknown {
+                tip: "abc123".into(),
+                detail: "cannot lock ref; and reading it back failed too: not a git repository"
+                    .into(),
+                holder: git::Holder::Unknown,
+            }),
+        );
+        let line = plain_all(&removal_outcome(&report)).join("");
+        assert_eq!(
+            line,
+            "! deleted feature at abc123, then couldn't put it back or read it back: \
+             cannot lock ref; and reading it back failed too: not a git repository \
+             (check whether it exists before recreating it)"
+        );
+        assert!(
+            !line.contains("git branch"),
+            "nothing may be recommended over a ref nobody could look at: {line}"
+        );
+    }
+
+    /// A holder seen before the restore failed is still a holder seen, whichever
+    /// outcome the reading afterwards produces — the two lines say the same
+    /// thing about the worktree and differ only in what they know of the ref.
+    #[test]
+    fn a_seen_holder_survives_a_lookup_that_failed_after_it() {
+        let report = report(
+            removal::Target::Branch { name: "feature" },
+            None,
+            Some(git::BranchDeleteOutcome::DeletedStateUnknown {
+                tip: "abc123".into(),
+                detail: "cannot lock ref".into(),
+                holder: git::Holder::Seen,
+            }),
+        );
+        assert_eq!(
+            plain_all(&removal_outcome(&report)),
+            [
+                "! deleted feature at abc123, then couldn't put it back for the worktree now \
+              holding it or read it back: cannot lock ref \
+              (check whether it exists before recreating it)"
+            ]
+        );
+    }
+
+    /// A worktree that was only ever *unruled-out* is not a worktree seen, and
+    /// the line must not claim one — the restore is attempted either way.
+    #[test]
+    fn an_unobserved_holder_is_not_reported_as_one() {
+        let report = report(
+            removal::Target::Branch { name: "feature" },
+            None,
+            Some(git::BranchDeleteOutcome::DeletedNotRestored {
+                tip: "abc123".into(),
+                detail: "cannot lock ref".into(),
+                holder: git::Holder::Unknown,
+            }),
+        );
+        assert_eq!(
+            plain_all(&removal_outcome(&report)),
+            [
+                "! deleted feature, then couldn't put it back: cannot lock ref \
+              (restore it with `git branch -- feature abc123`)"
             ]
         );
     }

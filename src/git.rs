@@ -572,7 +572,14 @@ pub struct Worktree {
 /// Lists all worktrees for the current repo. Per `git worktree list
 /// --porcelain`, the first record is the main worktree.
 pub fn worktree_list() -> AppResult<Vec<Worktree>> {
-    let output = run(&["worktree", "list", "--porcelain"])?;
+    worktree_list_in(None)
+}
+
+/// [`worktree_list`], asked from `dir` rather than the process cwd — which
+/// matters where the cwd may have just been removed, or may belong to another
+/// repository entirely.
+pub fn worktree_list_in(dir: Option<&Path>) -> AppResult<Vec<Worktree>> {
+    let output = run_in(dir, &["worktree", "list", "--porcelain"])?;
     let mut worktrees: Vec<Worktree> = Vec::new();
     // Each porcelain record starts with a `worktree <path>` line; the attributes
     // that follow apply to it until the next such line. Build the record in place
@@ -706,6 +713,266 @@ fn unmerged_from(
         .collect()
 }
 
+/// What was established when a branch was proven *Equivalent*: where the branch
+/// stood, and the anchor it was proven against. A *License* covers what was
+/// proven and nothing more, so both are re-checked before the force-delete — a
+/// proof survives neither the branch moving nor the anchor being rewound out
+/// from under it. See [ADR
+/// 0005](../docs/adr/0005-proof-of-equivalence-is-a-license.md).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Proof {
+    /// The ref the proof was made against, kept so it can be resolved again.
+    pub anchor_ref: String,
+    pub anchor_tip: String,
+    pub tip: String,
+}
+
+/// Branches whose whole diff against the anchor is already in the anchor under
+/// some other commit — squash-merged, rebase-merged or cherry-picked — each with
+/// the [`Proof`] established for it.
+///
+/// Equivalence is positive evidence and only ever subtracts, so ask it only of
+/// branches a warning would otherwise be drawn over — ones both stale and
+/// unmerged. A branch cut from the anchor and never committed to has no diff to
+/// find already there, and is never proven by this; anything that cannot be
+/// established at all leaves the branch treated as holding unique work.
+///
+/// `dir` must be the worktree the delete will run from, so what is proven here
+/// and what is re-checked there are read through the same root. Refs are shared,
+/// so the two agree anyway; asking from one place is what keeps that a fact
+/// rather than a coincidence.
+#[must_use]
+pub fn equivalent_branches(
+    dir: Option<&Path>,
+    remote: &str,
+    candidates: &[&str],
+) -> HashMap<String, Proof> {
+    let Some((anchor_ref, _)) = merged_anchor(remote) else {
+        return HashMap::new();
+    };
+    let Some(anchor_tip) = resolve(dir, &anchor_ref) else {
+        return HashMap::new();
+    };
+    candidates
+        .iter()
+        .filter_map(|name| {
+            let tip = resolve(dir, &format!("refs/heads/{name}"))?;
+            // Every question below is asked of the *resolved* anchor, never the
+            // ref name: a ref that moved mid-probe and moved back would
+            // otherwise be proven against one commit and re-checked against
+            // another. The name is kept only for that later re-check.
+            equivalent_to(dir, &anchor_tip, &tip).then(|| {
+                let proof = Proof {
+                    anchor_ref: anchor_ref.clone(),
+                    anchor_tip: anchor_tip.clone(),
+                    tip,
+                };
+                ((*name).to_string(), proof)
+            })
+        })
+        .collect()
+}
+
+/// Whether everything `tip` adds over its merge-base with the anchor is already
+/// in the anchor. Two routes, either of which proves it, because a branch's work
+/// can land in two shapes and neither test sees both:
+///
+/// - [`patch_landed`] asks whether the anchor already carries the branch's patch.
+///   It survives the anchor moving on over the same files, and is the only route
+///   that answers a squash merge — but it reads the branch's diff as *one* patch,
+///   so a rebase-merge that replayed several commits individually defeats it.
+/// - [`content_present`] asks whether the files the branch touched now read
+///   identically in the anchor. That is blind to how the work got there, so a
+///   rebase-merge or a scattered cherry-pick answers it, but any later edit to
+///   the same files does too and it falls back to the first route.
+///
+/// `anchor` is a resolved commit, not a ref name, so every question is asked of
+/// the same anchor the [`Proof`] will record. Every step is a question, so a git
+/// that refuses one answers "not equivalent" and says nothing about it.
+fn equivalent_to(dir: Option<&Path>, anchor: &str, tip: &str) -> bool {
+    let Some(base) = run_in(dir, &["merge-base", anchor, tip])
+        .ok()
+        .map(|b| b.trim().to_string())
+    else {
+        return false;
+    };
+    patch_landed(dir, anchor, tip, &base) || content_present(dir, anchor, tip, &base)
+}
+
+/// Whether the anchor already carries the branch's patch.
+///
+/// Git compares content by patch id, but only between commits — so the branch's
+/// whole diff is synthesised as one commit with `commit-tree`, parented on the
+/// merge-base, and handed to `git cherry`, which prints `-` for a commit whose
+/// patch is already upstream and `+` for one that isn't. The synthesised commit
+/// is dangling and unreachable; gc reaps it. An empty diff has no patch id to
+/// match, so a branch holding no work of its own comes back `+` — exactly the
+/// answer equivalence owes it.
+///
+/// `cherry` is not the whole answer, because the patch ids it compares are
+/// normalised: they ignore whitespace, so a branch differing from what landed by
+/// whitespace alone would pass. That is fine for `git rebase`, which drops such a
+/// commit but leaves the branch to be recovered from; it is not fine for a
+/// force-delete. So `cherry` is used to *find* the commit that carries the patch
+/// — asking it the other way round names it — and the two are then compared
+/// verbatim, whitespace and all.
+fn patch_landed(dir: Option<&Path>, anchor: &str, tip: &str, base: &str) -> bool {
+    let landed = || {
+        let probe = run_in(
+            dir,
+            &[
+                "commit-tree",
+                &format!("{tip}^{{tree}}"),
+                "-p",
+                base,
+                "-m",
+                "git-switch: equivalence probe",
+            ],
+        )
+        .ok()?;
+        let probe = probe.trim();
+        if !run_in(dir, &["cherry", anchor, probe])
+            .ok()?
+            .lines()
+            .next()?
+            .starts_with('-')
+        {
+            return None;
+        }
+        // Asked this way round, `-` marks the anchor-side commits whose patch the
+        // probe already carries: the landing commits themselves.
+        let matches = run_in(dir, &["cherry", probe, anchor]).ok()?;
+        let wanted = verbatim_patch_id(dir, "diff", &[base, tip])?;
+        let exact = matches
+            .lines()
+            .filter_map(|l| l.strip_prefix("- "))
+            .any(|sha| verbatim_patch_id(dir, "show", &[sha]).is_some_and(|id| id == wanted));
+        exact.then_some(true)
+    };
+    landed().unwrap_or(false)
+}
+
+/// The patch id of the diff `command` produces over `rest`, computed *verbatim*
+/// — the whitespace-sensitive reading, unlike the normalised ids `git cherry`
+/// compares. `git patch-id` reads a diff on stdin and answers `<patch-id>
+/// <commit-id>`; only the first field is a fact about the content.
+///
+/// The diff is asked for in [`UNSHRINKABLE`] terms like every other the proof
+/// reads: a textconv driver that renders two files alike would otherwise make an
+/// exact comparison agree about content that differs, which is the whole thing
+/// this comparison exists to catch.
+fn verbatim_patch_id(dir: Option<&Path>, command: &str, rest: &[&str]) -> Option<String> {
+    let mut args = vec![command];
+    args.extend(UNSHRINKABLE);
+    args.extend(rest);
+    let diff = run_in(dir, &args).ok()?;
+    let output = run_with_stdin(dir, &["patch-id", "--verbatim"], diff.as_bytes()).ok()?;
+    let id = output.split_whitespace().next()?.to_string();
+    (!id.is_empty()).then_some(id)
+}
+
+/// Diff options that stop repository configuration from shrinking a comparison
+/// the proof depends on. Each one has a config that would otherwise hide a real
+/// difference — `diff.ignoreSubmodules` a changed gitlink, a `textconv` driver
+/// or `diff.external` two files that render alike — and a proof read from a
+/// shrunken diff is a branch deleted for work the anchor never took.
+const UNSHRINKABLE: [&str; 3] = ["--ignore-submodules=none", "--no-textconv", "--no-ext-diff"];
+
+/// Whether every path the branch touched since the merge-base now reads
+/// byte-identically in the anchor. A branch that touched nothing proves nothing
+/// — the whole-tree comparison a missing pathspec would run is exactly the
+/// "trivially equivalent" answer ADR 0005 refuses, so an empty list is a `false`
+/// and never a `git diff` without paths.
+fn content_present(dir: Option<&Path>, anchor: &str, tip: &str, base: &str) -> bool {
+    // `-z` because git otherwise quotes paths that need it, and a quoted path is
+    // not the path. `--no-renames` because a rename is reported as its
+    // destination alone, which would drop the source — a deletion the branch
+    // performed — out of the comparison, and prove a branch whose deletion never
+    // landed. The rest is [`UNSHRINKABLE`]'s business.
+    let mut listing_args = vec!["diff"];
+    listing_args.extend(UNSHRINKABLE);
+    listing_args.extend(["--name-only", "--no-renames", "-z", base, tip]);
+    let Ok(listing) = run_in(dir, &listing_args) else {
+        return false;
+    };
+    // A path git-switch cannot read is a path it cannot compare: `run_in` decodes
+    // lossily, and a mangled path matches nothing as a pathspec — which `git
+    // diff --quiet` reports as no difference, proving the branch on an empty
+    // comparison. Refuse the whole answer rather than a silent subset.
+    if listing.contains('\u{fffd}') {
+        return false;
+    }
+    let touched: Vec<&str> = listing.split('\0').filter(|p| !p.is_empty()).collect();
+    if touched.is_empty() {
+        return false;
+    }
+    // `--literal-pathspecs` because these are filenames, not patterns, and `--`
+    // does not disable pathspec magic: a file literally named `:(exclude)x`
+    // would otherwise cancel the comparison of `x` and prove the branch on what
+    // was left.
+    let mut args = vec!["--literal-pathspecs", "diff"];
+    args.extend(UNSHRINKABLE);
+    args.extend(["--quiet", tip, anchor, "--"]);
+    args.extend(touched);
+    // A difference exits 1, which `run_in` reports as an error — and a branch
+    // whose files read differently is exactly the branch this cannot prove.
+    run_in(dir, &args).is_ok()
+}
+
+/// What `refname` points at, or `None` where it doesn't resolve. A ref that is
+/// absent and a ref that could not be read answer alike here; where the
+/// difference matters, ask [`ref_state`] instead.
+#[must_use]
+pub(crate) fn resolve(dir: Option<&Path>, refname: &str) -> Option<String> {
+    rev_parse(dir, refname).ok()
+}
+
+/// What a ref lookup established: where the ref points, that it is not there, or
+/// that the question went unanswered. The last is not the middle — reporting a
+/// branch gone on the strength of a failed read is how a user is told to
+/// recreate something that already exists.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub enum RefState {
+    At(String),
+    Missing,
+    Unreadable(String),
+}
+
+/// `rev-parse --verify --quiet` separates the three, but not by exit code alone:
+/// it exits 0 with the object id, and 1 both for a ref that isn't there *and*
+/// for one that is there but broken — the second warning about it on stderr, the
+/// first saying nothing at all. So silence is what distinguishes them. Only the
+/// presence of output is read and never its wording, which would be a fact about
+/// the user's locale rather than about the ref.
+fn ref_state(dir: Option<&Path>, refname: &str) -> RefState {
+    let Ok(output) = git_cmd(dir)
+        .args(["rev-parse", "--verify", "--quiet", refname])
+        .output()
+    else {
+        return RefState::Unreadable("git could not be run".to_string());
+    };
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let unreadable = || {
+        RefState::Unreadable(if stderr.is_empty() {
+            format!("git rev-parse exited {:?}", output.status.code())
+        } else {
+            stderr.clone()
+        })
+    };
+    match output.status.code() {
+        Some(0) => {
+            let oid = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if oid.is_empty() {
+                unreadable()
+            } else {
+                RefState::At(oid)
+            }
+        }
+        Some(1) if stderr.is_empty() => RefState::Missing,
+        _ => unreadable(),
+    }
+}
+
 #[must_use]
 pub fn worktree_for_branch(worktrees: &[Worktree], branch: &str) -> Option<Worktree> {
     worktrees
@@ -813,8 +1080,180 @@ fn path_to_str(path: &Path) -> AppResult<&str> {
     })
 }
 
+/// Delete `branch` only while it still points at `expected`, discarding the
+/// commits it holds. `None` means it had moved, and nothing was deleted.
+///
+/// This is the delete a *Proof* licenses, and it is one command because the
+/// proof covers one commit: checking the tip and then running `branch -D` would
+/// leave a window in which the branch could grow a commit nobody proved and lose
+/// it unwarned. `update-ref` compares and deletes in a single operation, closing
+/// it. It leaves the branch's config behind where `branch -D` wouldn't, so that
+/// is cleared afterwards — a branch that is gone must not leave an upstream
+/// setting for a later branch of the same name to inherit.
+pub fn delete_branch_at(
+    dir: Option<&Path>,
+    branch: &str,
+    expected: &str,
+) -> AppResult<Option<BranchDeleteOutcome>> {
+    let refname = format!("refs/heads/{branch}");
+    // `update-ref` is plumbing and will happily delete a branch some worktree
+    // still has checked out, which `branch -D` refuses — leaving that worktree
+    // pointing at a ref that no longer exists. A held branch normally reaches
+    // this only after its worktree has gone, but one that appeared since the row
+    // was drawn is exactly the "became risky after the warning" case ADR 0001
+    // hands to git's own guard, so the guard is kept here by hand. Asked before
+    // the delete it is only a check-then-act, so it is asked again after and the
+    // ref put back where it was if a worktree won the race: `update-ref` is one
+    // operation but two of them are not, and the branch a worktree checked out
+    // is the branch it must still find there.
+    if held_by_worktree(dir, branch)? {
+        return Ok(Some(refused_as_held(branch)));
+    }
+    let output = git_cmd(dir)
+        .args(["update-ref", "-d", &refname, expected])
+        .output()?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        // Git words the mismatch several ways across versions, so the tip is
+        // re-read rather than the message parsed: still there and unmoved means
+        // a real failure, anything else means the proof no longer covers it.
+        return Ok(match resolve(dir, &refname) {
+            Some(tip) if tip == expected => {
+                Some(BranchDeleteOutcome::Failed(stderr.trim().to_string()))
+            }
+            _ => None,
+        });
+    }
+    // Past the delete, nothing may leave by `?`: the branch is already gone, and
+    // an error that travels takes with it the fact that it went. A holder found
+    // *or* a holder that couldn't be looked for both mean the same thing here —
+    // put it back — and only the restore itself failing is worth an outcome of
+    // its own, since that is the one state nobody can repair from the message
+    // alone.
+    let held = held_by_worktree(dir, branch);
+    if matches!(held, Ok(false)) {
+        return Ok(Some(clear_branch_config(dir, branch)));
+    }
+    // The empty old-value pins "and only if it does not exist yet", so a ref
+    // recreated in the gap is not clobbered by putting this one back.
+    let holder = match held {
+        // A holder was seen; that a holder exists is a fact worth reporting.
+        Ok(_) => Holder::Seen,
+        // Only the question failed, so nothing may be said about an answer.
+        Err(_) => Holder::Unknown,
+    };
+    Ok(Some(
+        match run_in(dir, &["update-ref", &refname, expected, ""]) {
+            Ok(_) => match held {
+                Ok(_) => refused_as_held(branch),
+                Err(e) => BranchDeleteOutcome::Failed(format!(
+                    "couldn't tell whether a worktree holds it: {e}"
+                )),
+            },
+            // A refused restore is not the same as a missing branch: the empty
+            // old-value also refuses where the ref exists again, which is a
+            // repository needing nothing rather than one needing repair. So the
+            // ref is read before anything is claimed about it — and read in a
+            // way that can say "I don't know", since telling someone to recreate
+            // a branch that may be standing there is its own kind of wrong.
+            Err(e) => match ref_state(dir, &refname) {
+                RefState::At(now) => BranchDeleteOutcome::DeletedThenRecreated {
+                    tip: expected.to_string(),
+                    now,
+                },
+                RefState::Missing => BranchDeleteOutcome::DeletedNotRestored {
+                    tip: expected.to_string(),
+                    detail: e.to_string(),
+                    holder,
+                },
+                RefState::Unreadable(why) => BranchDeleteOutcome::DeletedStateUnknown {
+                    tip: expected.to_string(),
+                    detail: format!("{e}; and reading it back failed too: {why}"),
+                    holder,
+                },
+            },
+        },
+    ))
+}
+
+/// Whether any worktree has `branch` checked out, asked from the same `dir` the
+/// delete runs in — the process cwd may be a worktree this very run has removed,
+/// and a question asked from a directory that is gone answers nothing. An error
+/// is not an answer either, so it travels rather than reading as "nobody holds
+/// it": the whole point of the question is to refuse where it cannot be settled.
+fn held_by_worktree(dir: Option<&Path>, branch: &str) -> AppResult<bool> {
+    Ok(worktree_list_in(dir)?
+        .into_iter()
+        .any(|w| w.branch.as_deref() == Some(branch)))
+}
+
+fn refused_as_held(branch: &str) -> BranchDeleteOutcome {
+    BranchDeleteOutcome::Failed(format!(
+        "cannot delete branch '{branch}': it is checked out in a worktree"
+    ))
+}
+
+/// Clears the config a deleted branch leaves behind, which `branch -D` would
+/// have taken with it. A branch that is gone must not leave an upstream setting
+/// for a later branch of the same name to inherit.
+///
+/// Each key is unset by its exact name rather than the section dropped whole:
+/// `--remove-section branch.<name>` cannot parse every name git allows — it
+/// fails outright on `topic]x` — and would leave the keys it choked on behind.
+/// Nothing to remove is the ordinary case and not a failure.
+///
+/// What survives is read back rather than inferred from exit codes: `--list`
+/// repeats a multi-valued key, and the `--unset-all` that clears the first
+/// mention then fails on the second having nothing left to do — an accurate
+/// report can only come from looking again. Whatever is still there is named,
+/// since the branch has gone and the leftovers are now the user's to clear.
+fn clear_branch_config(dir: Option<&Path>, branch: &str) -> BranchDeleteOutcome {
+    let keys = |listing: String| -> Vec<String> {
+        listing
+            .split('\0')
+            .filter(|key| config_branch(key) == Some(branch))
+            .map(String::from)
+            .collect()
+    };
+    let mut to_clear = match local_config_keys(dir) {
+        Ok(listing) => keys(listing),
+        // Config that can't even be read can't be cleared, and saying the branch
+        // went cleanly would be a claim about something never looked at — but
+        // nor is any key known to have survived, so this is neither.
+        Err(e) => return BranchDeleteOutcome::DeletedConfigUnverified(e.to_string()),
+    };
+    to_clear.dedup();
+    for key in &to_clear {
+        let _ = run_in(dir, &["config", "--local", "--unset-all", key]);
+    }
+    let left = match local_config_keys(dir) {
+        Ok(listing) => keys(listing),
+        Err(e) => return BranchDeleteOutcome::DeletedConfigUnverified(e.to_string()),
+    };
+    if left.is_empty() {
+        return BranchDeleteOutcome::Deleted;
+    }
+    BranchDeleteOutcome::DeletedLeavingConfig(left.join(", "))
+}
+
+fn local_config_keys(dir: Option<&Path>) -> AppResult<String> {
+    run_in(dir, &["config", "--local", "--list", "--name-only", "-z"])
+}
+
+/// Which branch a `branch.<name>.<key>` config entry belongs to, or `None` for
+/// any other key. Git splits a config name at its *first* and *last* dot, so the
+/// branch in the middle keeps whatever dots it has: `branch.release/1.2.remote`
+/// belongs to `release/1.2` and not to `release/1`, and matching on a prefix
+/// would have one branch's deletion clear the other's upstream.
+fn config_branch(key: &str) -> Option<&str> {
+    let (branch, _) = key.strip_prefix("branch.")?.rsplit_once('.')?;
+    (!branch.is_empty()).then_some(branch)
+}
+
 /// Delete a branch with `git branch -D`, discarding unmerged commits. Only for
-/// branches whose risk was shown to the user first — see [`unmerged_branches`].
+/// branches whose risk was shown to the user first — see [`unmerged_branches`] —
+/// or for an explicit `--force`. A branch licensed by *proof* instead goes
+/// through [`delete_branch_at`], which is pinned to what was proven.
 ///
 /// `dir` must be the worktree whose HEAD the risk was judged from, so that the
 /// markers shown and the deletion performed agree about what is merged.
@@ -830,12 +1269,58 @@ pub fn force_delete_branch(dir: Option<&Path>, branch: &str) -> AppResult<Branch
     ))
 }
 
+/// What became of a branch. The three `Deleted*` cases all mean the branch went
+/// — they differ in what happened *after* that, and are kept apart because a
+/// line reading "could not delete" over a branch that was in fact deleted tells
+/// the user the opposite of the repository's state.
 #[derive(Debug, Clone)]
 pub enum BranchDeleteOutcome {
     Deleted,
+    /// Deleted, but whether its config went with it could not be established —
+    /// git's reason, since no key was ever read to name.
+    DeletedConfigUnverified(String),
+    /// Deleted, but config of its own outlived it — the keys, so the user can
+    /// clear what git-switch couldn't.
+    DeletedLeavingConfig(String),
+    /// Deleted at `tip`, and confirmed gone after putting it back failed. The
+    /// one outcome describing a repository that needs repair — `holder` says
+    /// whether a worktree was actually seen holding the branch, since the
+    /// restore is attempted where that question is what failed too.
+    DeletedNotRestored {
+        tip: String,
+        detail: String,
+        holder: Holder,
+    },
+    /// Deleted at `tip`, and whether it is there now could not be established:
+    /// putting it back failed, and so did reading it afterwards. Distinct from
+    /// [`Self::DeletedNotRestored`] because nothing may be recommended over a
+    /// ref nobody could look at — `holder` survives all the same, being a fact
+    /// established before any of that went wrong.
+    DeletedStateUnknown {
+        tip: String,
+        detail: String,
+        holder: Holder,
+    },
+    /// Deleted at `tip`, and standing again at `now` by another hand: the
+    /// restore was refused because there was nothing left to restore into.
+    /// Nothing to repair — the branch of that name is simply no longer the one
+    /// that was proven.
+    DeletedThenRecreated {
+        tip: String,
+        now: String,
+    },
     /// Kept because it has commits not merged into its upstream or HEAD.
     NotMerged,
     Failed(String),
+}
+
+/// Whether a worktree was seen holding a branch, or only failed to be ruled out.
+/// The two read alike in what they cause — the branch goes back either way — and
+/// differently in what may be said about them.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum Holder {
+    Seen,
+    Unknown,
 }
 
 /// Delete `branch` only if git considers it fully merged (`git branch -d`).
@@ -875,6 +1360,33 @@ fn git_cmd(dir: Option<&Path>) -> Command {
 
 fn run(args: &[&str]) -> AppResult<String> {
     run_in(None, args)
+}
+
+/// Runs a git command that reads its input on stdin, which is how the plumbing
+/// that takes a diff — `patch-id` — is driven. The input is written from memory
+/// rather than piped from another process, so a git that exits early can't wedge
+/// this on a full pipe.
+fn run_with_stdin(dir: Option<&Path>, args: &[&str], input: &[u8]) -> AppResult<String> {
+    use std::io::Write;
+
+    let mut child = git_cmd(dir)
+        .args(args)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()?;
+    // Dropping the handle closes stdin, which is what tells git the diff ended.
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(input)?;
+    }
+    let output = child.wait_with_output()?;
+    if !output.status.success() {
+        return Err(Error::Git {
+            command: args.first().copied().unwrap_or("<unknown>").to_string(),
+            message: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+        });
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
 fn run_in(dir: Option<&Path>, args: &[&str]) -> AppResult<String> {
@@ -1152,6 +1664,22 @@ mod tests {
     fn gone_upstream_is_unmerged_without_a_count() {
         let got = unmerged("main", &[("orphan", "refs/heads/orphan", "gone")]);
         assert_eq!(got.get("orphan"), Some(&Unmerged::NoUpstream));
+    }
+
+    /// Git splits a config name at its first and last dot, so a branch whose
+    /// name contains one owns the whole middle — and a branch whose name is a
+    /// prefix of another's owns none of it.
+    #[test]
+    fn a_config_key_belongs_to_the_branch_between_the_outer_dots() {
+        use super::config_branch;
+        assert_eq!(config_branch("branch.feature.remote"), Some("feature"));
+        assert_eq!(
+            config_branch("branch.release/1.2.remote"),
+            Some("release/1.2")
+        );
+        assert_eq!(config_branch("branch.topic]x.merge"), Some("topic]x"));
+        assert_eq!(config_branch("remote.origin.url"), None);
+        assert_eq!(config_branch("branch.autosetupmerge"), None);
     }
 
     #[test]

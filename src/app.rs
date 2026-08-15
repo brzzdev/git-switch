@@ -554,7 +554,11 @@ pub(crate) fn build_sections(
 /// confirmation only where the user was shown the specific risk first. In a
 /// picker the row markers are that warning; for a target named on the command
 /// line no marker is possible, so a confirmation naming these risks stands in
-/// for it. Either way, forcing is licensed only by a `Risk` the user has seen.
+/// for it. Either way, a `Risk` the user has seen licenses forcing — it is not
+/// the only thing that can: proof that a branch is *Equivalent* licenses
+/// discarding its commits without any warning being shown, per [ADR
+/// 0005](../docs/adr/0005-proof-of-equivalence-is-a-license.md). What a risk
+/// governs is what a *warning* buys.
 #[derive(Default, Clone, Copy)]
 pub(crate) struct Risk {
     /// The worktree holds uncommitted or untracked changes.
@@ -576,6 +580,11 @@ struct StaleRow {
     ground: git::Ground,
     worktree: Option<git::Worktree>,
     risk: Risk,
+    /// What proved this branch *Equivalent*, where anything did. It rides here
+    /// rather than on the `Risk` because it is not a risk: it is what licenses
+    /// the delete in the absence of one, and it names the commits it was
+    /// established on so the delete can check they still stand.
+    proven: Option<git::Proof>,
 }
 
 /// Offers to delete stale branches, and the worktrees holding them.
@@ -589,6 +598,13 @@ pub(crate) fn prompt_delete_stale_branches(
     destination: Option<&str>,
     remote: &str,
 ) -> AppResult<()> {
+    // Non-interactive (piped/CI): nothing here can be asked, so ask git nothing
+    // either. The equivalence probe below writes an object per candidate, and a
+    // run that will never prompt has no use for the answer.
+    if !is_interactive() {
+        return Ok(());
+    }
+
     let stale = git::stale_branches(remote)?;
     let worktrees = git::worktree_list().unwrap_or_default();
     // Judge risk — and later delete — from the main worktree, where HEAD is
@@ -598,9 +614,26 @@ pub(crate) fn prompt_delete_stale_branches(
     // marker would then license a force-delete it never warned about.
     let main_dir = worktrees.iter().find(|w| w.is_main).map(|w| w.path.clone());
     let unmerged = git::unmerged_branches(main_dir.as_deref()).unwrap_or_default();
-    let rows = stale_rows(stale, &worktrees, &unmerged, destination, &|path| {
-        git::worktree_dirty(path)
-    });
+    // A branch whose work landed by squash merge is unmerged by every test git
+    // offers, and warning about it warns of nothing. Ask only where a warning
+    // would otherwise be drawn — a branch both stale and unmerged, and on offer
+    // at all — since equivalence subtracts a warning and never adds one. The
+    // handoff destination is dropped here for the same reason `stale_rows` drops
+    // it: no row is ever drawn for it, so there is nothing to subtract from.
+    let candidates: Vec<&str> = stale
+        .iter()
+        .map(|b| b.name.as_str())
+        .filter(|name| unmerged.contains_key(*name) && destination != Some(name))
+        .collect();
+    let equivalent = git::equivalent_branches(main_dir.as_deref(), remote, &candidates);
+    let rows = stale_rows(
+        stale,
+        &worktrees,
+        &unmerged,
+        &equivalent,
+        destination,
+        &|path| git::worktree_dirty(path),
+    );
     if rows.is_empty() {
         return Ok(());
     }
@@ -613,8 +646,9 @@ pub(crate) fn prompt_delete_stale_branches(
         .collect();
     let items = align_labels(&rows.iter().map(stale_label).collect::<Vec<_>>());
 
-    // Non-interactive (piped/CI): we can't prompt, so delete nothing rather
-    // than blocking on key input or silently acting on the defaults.
+    // The terminal was checked at the top, so this is acquisition rather than a
+    // second guard — raw mode is taken here and not a moment earlier, so it is
+    // never held across the git work above.
     let Some(keys) = interactive_keys() else {
         return Ok(());
     };
@@ -637,12 +671,16 @@ pub(crate) fn prompt_delete_stale_branches(
 }
 
 /// Builds the picker rows, pairing each stale branch with the worktree holding
-/// it and what deleting it would destroy. `dirty` is injected so the rule can be
-/// tested without a repo on disk.
+/// it and what deleting it would destroy. `equivalent` maps a branch proven
+/// equivalent to the [`git::Proof`] made of it, and a proof is subtracted here —
+/// before the `Risk` is built, so a proven branch is simply not unmerged and no
+/// row can carry both a proof and the marker it defeats. `dirty` is injected so
+/// the rule can be tested without a repo on disk.
 fn stale_rows(
     stale: Vec<git::StaleBranch>,
     worktrees: &[git::Worktree],
     unmerged: &std::collections::HashMap<String, git::Unmerged>,
+    equivalent: &std::collections::HashMap<String, git::Proof>,
     destination: Option<&str>,
     dirty: &dyn Fn(&Path) -> bool,
 ) -> Vec<StaleRow> {
@@ -651,17 +689,22 @@ fn stale_rows(
         .filter(|b| destination != Some(b.name.as_str()))
         .map(|b| {
             let worktree = git::worktree_for_branch(worktrees, &b.name);
+            let proven = equivalent.get(&b.name).cloned();
             let risk = Risk {
                 dirty: worktree
                     .as_ref()
                     .is_some_and(|w| !w.prunable && dirty(&w.path)),
-                unmerged: unmerged.get(&b.name).copied(),
+                unmerged: proven
+                    .is_none()
+                    .then(|| unmerged.get(&b.name).copied())
+                    .flatten(),
             };
             StaleRow {
                 branch: b.name,
                 ground: b.ground,
                 worktree,
                 risk,
+                proven,
             }
         })
         .collect()
@@ -734,9 +777,9 @@ fn stale_label(row: &StaleRow) -> (String, String) {
     (row.branch.clone(), annotation)
 }
 
-/// Removes a ticked stale row and prints what happened. The ordering, and the
-/// rule that only a shown marker licenses forcing, belong to [`removal`]; the
-/// wording belongs to [`reporting`]. This is what's left: which target the row
+/// Removes a ticked stale row and prints what happened. The ordering, and what
+/// licenses forcing — a shown marker, or proof that the branch is *Equivalent* —
+/// belong to [`removal`]; the wording belongs to [`reporting`]. This is what's left: which target the row
 /// describes, and telling the [`hook`] about a worktree that went with it — a
 /// held stale branch takes its worktree along, which is as much a removal as
 /// `wt rm` is. A hook mirrors what happened to the repo, not which command you
@@ -753,7 +796,14 @@ fn delete_stale_row(
         },
         None => removal::Target::Branch { name: &row.branch },
     };
-    let report = removal::remove(target, removal::License::shown(row.risk), steps)?;
+    // A proven branch draws no marker, so the proof is the only thing that could
+    // license discarding its commits — and it licenses them only while what it
+    // was established on still stands.
+    let license = match &row.proven {
+        Some(proof) => removal::License::proven(row.risk, proof),
+        None => removal::License::shown(row.risk),
+    };
+    let report = removal::remove(target, &license, steps)?;
 
     for line in reporting::removal_outcome(&report) {
         eprintln!("{line}");
@@ -832,6 +882,7 @@ mod tests {
             ground: git::Ground::Landed,
             worktree,
             risk,
+            proven: None,
         }
     }
 
@@ -1060,6 +1111,7 @@ mod tests {
             stale,
             &worktrees,
             &std::collections::HashMap::new(),
+            &std::collections::HashMap::new(),
             Some("feature"),
             &|_| false,
         );
@@ -1074,6 +1126,7 @@ mod tests {
             stale,
             &worktrees,
             &std::collections::HashMap::new(),
+            &std::collections::HashMap::new(),
             None,
             &|_| false,
         );
@@ -1087,10 +1140,39 @@ mod tests {
             landed(&["feature"]),
             &worktrees,
             &std::collections::HashMap::new(),
+            &std::collections::HashMap::new(),
             None,
             &|path| path == Path::new("/tmp/wt"),
         );
         assert!(rows[0].risk.dirty);
         assert!(rows[0].worktree.is_some());
+    }
+
+    /// A proof is not a risk: it says what may be destroyed *without* asking,
+    /// so it rides on the row beside the risk rather than inside it. Subtracting
+    /// it here, before the `Risk` is built, is what leaves the row unmarked.
+    #[test]
+    fn a_proven_branch_carries_its_proof_and_no_unmerged_risk() {
+        let proof = git::Proof {
+            anchor_ref: "refs/heads/main".to_string(),
+            anchor_tip: "def".to_string(),
+            tip: "abc".to_string(),
+        };
+        let equivalent = std::collections::HashMap::from([("shipped".to_string(), proof.clone())]);
+        let rows = stale_rows(
+            landed(&["shipped"]),
+            &[],
+            &std::collections::HashMap::from([("shipped".to_string(), git::Unmerged::NoUpstream)]),
+            &equivalent,
+            None,
+            &|_| false,
+        );
+        assert_eq!(rows[0].proven.as_ref(), Some(&proof));
+        assert!(rows[0].risk.unmerged.is_none());
+        assert!(
+            !rows[0].risk.any(),
+            "nothing to warn about, so nothing to ask"
+        );
+        assert_eq!(plain(&stale_label(&rows[0]).1), "landed");
     }
 }

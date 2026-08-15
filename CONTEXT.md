@@ -59,11 +59,11 @@ The rendering of a risk in a picker row: `●` for dirty, `↑N` for unmerged. A
 _Avoid_: Flag, badge, indicator
 
 **Forcing**:
-Destroying something git would otherwise protect — `worktree remove --force`, `branch -D`. Only ever licensed by a warning the user has already seen.
+Destroying something git would otherwise protect — `worktree remove --force`, `branch -D`. Only ever licensed: by a warning the user has already seen, or — for a branch alone — by proof that it is *Equivalent*.
 _Avoid_: Overriding, ignoring
 
 **License**:
-What permits forcing: the markers already shown to the user, an explicit `--force`, or proof that a branch is *Equivalent*. It covers what was warned about or proven and nothing else, so anything that became risky — or moved off the commit proven equivalent — after its row was drawn meets git's own guard instead. See [ADR 0001](./docs/adr/0001-warned-means-forceable.md) and [ADR 0005](./docs/adr/0005-proof-of-equivalence-is-a-license.md).
+What permits forcing: the markers already shown to the user, an explicit `--force`, or proof that a branch is *Equivalent*. It covers what was warned about or proven and nothing else, so anything that became risky after its row was drawn meets git's own guard instead — as does a proof whose ground has shifted, since equivalence is established on a pair of commits and lapses when either the branch or the *Anchor* moves off it. See [ADR 0001](./docs/adr/0001-warned-means-forceable.md) and [ADR 0005](./docs/adr/0005-proof-of-equivalence-is-a-license.md).
 _Avoid_: Permission, approval, consent
 
 **Removal**:

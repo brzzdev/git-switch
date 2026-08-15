@@ -1900,35 +1900,33 @@ fn wait_for(seen: &Mutex<Vec<u8>>, needle: &str) {
     );
 }
 
-/// The stale-branch picker holds the terminal in raw mode, where a bare `\n`
-/// drops a line without returning to column 0. Printing the deletion outcomes
-/// before that mode is released staircases them across the screen, so this
-/// drives the picker over a real pty and insists every newline is a CRLF.
-#[test]
-fn stale_deletion_outcomes_are_not_printed_in_raw_mode() {
+/// Drives the post-switch cleanup prompt over a real pty — the only way to see
+/// the rows it draws and the deletions it performs, since a piped run declines
+/// to prompt at all. Waits for `row` to be drawn, ticks every row with `→`, runs
+/// `before_confirm`, confirms, and returns every byte the child wrote.
+///
+/// `hooks` leaves worktree hooks on for the tests that configure one in the repo
+/// under test; every other caller wants them off, as [`git_switch_args`] does.
+fn drive_cleanup_prompt(
+    work: &Path,
+    target: &str,
+    row: &str,
+    hooks: bool,
+    before_confirm: impl FnOnce(),
+) -> Vec<u8> {
     use portable_pty::{CommandBuilder, PtySize, native_pty_system};
     use std::io::{Read, Write};
     use std::sync::Arc;
-
-    let (_bare, work) = setup();
-
-    // Three stale branches — each published, then its upstream deleted — plus a
-    // destination to switch to, so the post-switch cleanup prompt fires.
-    for branch in ["aaa", "bbb", "ccc"] {
-        git(work.path(), &["checkout", "-b", branch]);
-        git(work.path(), &["push", "-u", "origin", branch]);
-        git(work.path(), &["push", "origin", "--delete", branch]);
-    }
-    git(work.path(), &["checkout", "main"]);
-    git(work.path(), &["fetch", "--prune", "origin"]);
-    git(work.path(), &["branch", "dest", "main"]);
 
     let pty = native_pty_system()
         .openpty(PtySize::default())
         .expect("failed to open pty");
     let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_git-switch"));
-    cmd.arg("dest");
-    cmd.cwd(work.path());
+    cmd.arg(target);
+    cmd.cwd(work);
+    if !hooks {
+        cmd.env("GIT_SWITCH_NO_HOOKS", "1");
+    }
     let mut child = ChildGuard(pty.slave.spawn_command(cmd).expect("failed to spawn"));
     drop(pty.slave);
 
@@ -1953,10 +1951,11 @@ fn stale_deletion_outcomes_are_not_printed_in_raw_mode() {
     // Drive the picker off what it has drawn rather than off a clock: `→` ticks
     // every row, Enter confirms, and each key waits for the redraw that proves
     // the last one landed.
-    wait_for(&seen, "[ ] ccc");
+    wait_for(&seen, &format!("[ ] {row}"));
     writer.write_all(b"\x1b[C").unwrap();
     writer.flush().unwrap();
-    wait_for(&seen, "[x] ccc");
+    wait_for(&seen, &format!("[x] {row}"));
+    before_confirm();
     writer.write_all(b"\r").unwrap();
     writer.flush().unwrap();
 
@@ -1964,7 +1963,35 @@ fn stale_deletion_outcomes_are_not_printed_in_raw_mode() {
     drop(writer);
     drop(pty.master);
     output.join().unwrap();
-    let raw = Arc::try_unwrap(seen).unwrap().into_inner().unwrap();
+    Arc::try_unwrap(seen).unwrap().into_inner().unwrap()
+}
+
+/// [`drive_cleanup_prompt`] with hooks off and nothing to do between ticking and
+/// confirming, read back as text — what most callers want.
+fn cleanup_prompt(work: &Path, target: &str, row: &str) -> String {
+    String::from_utf8_lossy(&drive_cleanup_prompt(work, target, row, false, || {})).into_owned()
+}
+
+/// The stale-branch picker holds the terminal in raw mode, where a bare `\n`
+/// drops a line without returning to column 0. Printing the deletion outcomes
+/// before that mode is released staircases them across the screen, so this
+/// drives the picker over a real pty and insists every newline is a CRLF.
+#[test]
+fn stale_deletion_outcomes_are_not_printed_in_raw_mode() {
+    let (_bare, work) = setup();
+
+    // Three stale branches — each published, then its upstream deleted — plus a
+    // destination to switch to, so the post-switch cleanup prompt fires.
+    for branch in ["aaa", "bbb", "ccc"] {
+        git(work.path(), &["checkout", "-b", branch]);
+        git(work.path(), &["push", "-u", "origin", branch]);
+        git(work.path(), &["push", "origin", "--delete", branch]);
+    }
+    git(work.path(), &["checkout", "main"]);
+    git(work.path(), &["fetch", "--prune", "origin"]);
+    git(work.path(), &["branch", "dest", "main"]);
+
+    let raw = drive_cleanup_prompt(work.path(), "dest", "ccc", false, || {});
     let text = String::from_utf8_lossy(&raw);
 
     let deletions = text.matches(" deleted ").count();
@@ -1981,6 +2008,512 @@ fn stale_deletion_outcomes_are_not_printed_in_raw_mode() {
     assert_eq!(
         staircased, 0,
         "every newline written to a tty must be CRLF; got: {text}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Equivalence
+// ---------------------------------------------------------------------------
+
+/// A branch with a commit of its own, published under its own name — what a
+/// topic branch looks like the moment before it is merged on the forge.
+fn push_topic_branch(work: &Path, branch: &str) {
+    git(work, &["checkout", "-b", branch]);
+    commit_in(work, &format!("{branch}.txt"), "topic work");
+    git(work, &["push", "-u", "origin", branch]);
+}
+
+/// Land `branch`'s work on the remote the way a forge squash-merge does: one new
+/// commit on `main` carrying the whole diff under a hash of its own, then the
+/// branch's upstream deleted. What is left locally is a branch that is stale on
+/// the *Gone* ground and unmerged by every test git offers.
+fn squash_merge_upstream(work: &Path, branch: &str) {
+    git(work, &["checkout", "main"]);
+    git(work, &["merge", "--squash", branch]);
+    git(work, &["commit", "-m", &format!("squash {branch}")]);
+    git(work, &["push", "origin", "main"]);
+    git(work, &["push", "origin", "--delete", branch]);
+    git(work, &["fetch", "--prune", "origin"]);
+}
+
+/// Land `branch`'s two commits on the remote the way a forge *rebase*-merge
+/// does: each replayed onto `main` under a hash of its own, so no single commit
+/// there carries the branch's whole diff. Then the upstream is deleted, as after
+/// a squash merge.
+///
+/// `-x` is what makes it a replay rather than a fast-forward: it rewords each
+/// commit, so the ones landing on `main` are new objects. Without it git may
+/// produce byte-identical commits, which share the branch's hashes and move the
+/// merge-base — a different scenario entirely, and one this test isn't about.
+fn rebase_merge_upstream(work: &Path, branch: &str) {
+    git(work, &["checkout", "main"]);
+    git(work, &["cherry-pick", "-x", &format!("{branch}~1"), branch]);
+    git(work, &["push", "origin", "main"]);
+    git(work, &["push", "origin", "--delete", branch]);
+    git(work, &["fetch", "--prune", "origin"]);
+}
+
+/// The local branch names, as one blob to search — enough to answer "did this
+/// branch survive?".
+fn branch_listing(work: &Path) -> String {
+    stdout_str(&git(work, &["branch", "--format=%(refname:short)"]))
+}
+
+/// The whole point of *Equivalent*: a branch whose diff the anchor already
+/// holds under another hash warns of nothing, so it draws no marker, earns no
+/// legend, and goes — even though `git branch -d` would refuse it.
+#[test]
+fn a_squash_merged_branch_is_deleted_without_a_warning() {
+    let (_bare, work) = setup();
+
+    push_topic_branch(work.path(), "feature");
+    squash_merge_upstream(work.path(), "feature");
+    git(work.path(), &["branch", "dest", "main"]);
+
+    let text = cleanup_prompt(work.path(), "dest", "feature");
+
+    assert!(
+        !text.contains('↑'),
+        "a proven branch destroys nothing, so no marker: {text}"
+    );
+    assert!(
+        !text.contains("unmerged commits"),
+        "and nothing for a legend to gloss: {text}"
+    );
+    assert!(
+        !branch_listing(work.path()).contains("feature"),
+        "the branch should be gone: {}",
+        branch_listing(work.path())
+    );
+}
+
+/// The proof is about content, and a commit on top is content the anchor has
+/// never seen. Landing the rest of the branch buys it nothing: the warning —
+/// and the license it carries — stand.
+#[test]
+fn a_commit_on_top_of_a_squash_merge_keeps_its_warning() {
+    let (_bare, work) = setup();
+
+    push_topic_branch(work.path(), "feature");
+    squash_merge_upstream(work.path(), "feature");
+    git(work.path(), &["checkout", "feature"]);
+    commit_in(work.path(), "later.txt", "work done after the merge");
+    git(work.path(), &["checkout", "main"]);
+    git(work.path(), &["branch", "dest", "main"]);
+
+    let text = cleanup_prompt(work.path(), "dest", "feature");
+
+    assert!(
+        text.contains('↑'),
+        "unique work is still at risk, so the marker stands: {text}"
+    );
+    assert!(
+        text.contains("unmerged commits"),
+        "and the legend still glosses it: {text}"
+    );
+    // ADR 0001 from there on: the marker was shown, so ticking the row discards
+    // the commits it warned about. Equivalence changed nothing here.
+    assert!(
+        !branch_listing(work.path()).contains("feature"),
+        "a warned row is still deleted when ticked: {}",
+        branch_listing(work.path())
+    );
+}
+
+/// A rebase-merge replays each commit separately, so no commit on the anchor
+/// carries the branch's whole diff and the patch-id route finds nothing. The
+/// content route answers it: the files the branch touched read identically on
+/// the anchor, however they got there.
+#[test]
+fn a_rebase_merged_branch_is_deleted_without_a_warning() {
+    let (_bare, work) = setup();
+
+    git(work.path(), &["checkout", "-b", "feature"]);
+    commit_in(work.path(), "one.txt", "first");
+    commit_in(work.path(), "two.txt", "second");
+    git(work.path(), &["push", "-u", "origin", "feature"]);
+    rebase_merge_upstream(work.path(), "feature");
+    git(work.path(), &["branch", "dest", "main"]);
+
+    let text = cleanup_prompt(work.path(), "dest", "feature");
+
+    assert!(
+        !text.contains('↑'),
+        "replayed commit by commit is still landed: {text}"
+    );
+    assert!(
+        !branch_listing(work.path()).contains("feature"),
+        "the branch should be gone: {}",
+        branch_listing(work.path())
+    );
+}
+
+/// `git cherry` compares patch ids, which are normalised: they ignore
+/// whitespace, so a branch differing from what landed by whitespace alone would
+/// pass. That is fine for `git rebase`, which leaves the branch behind; it is
+/// not fine for a force-delete, so the match is confirmed verbatim.
+#[test]
+fn a_branch_differing_only_in_whitespace_is_not_proven() {
+    let (_bare, work) = setup();
+
+    fs::write(work.path().join("a.txt"), "foo\n").unwrap();
+    git(work.path(), &["add", "."]);
+    git(
+        work.path(),
+        &["commit", "-m", "the line before either edit"],
+    );
+    git(work.path(), &["push", "origin", "main"]);
+
+    git(work.path(), &["checkout", "-b", "feature"]);
+    fs::write(work.path().join("a.txt"), "foo bar\n").unwrap();
+    git(work.path(), &["commit", "-am", "spaced"]);
+    git(work.path(), &["push", "-u", "origin", "feature"]);
+
+    // What landed says `foobar`, not `foo bar` — the same patch to git's
+    // normalised reckoning, a different file to anyone reading it.
+    git(work.path(), &["checkout", "main"]);
+    fs::write(work.path().join("a.txt"), "foobar\n").unwrap();
+    git(work.path(), &["commit", "-am", "unspaced"]);
+    git(work.path(), &["push", "origin", "main"]);
+    git(work.path(), &["push", "origin", "--delete", "feature"]);
+    git(work.path(), &["fetch", "--prune", "origin"]);
+    git(work.path(), &["branch", "dest", "main"]);
+
+    let text = cleanup_prompt(work.path(), "dest", "feature");
+
+    assert!(
+        text.contains('↑'),
+        "the whitespace is the branch's own unique work: {text}"
+    );
+}
+
+/// The point of keeping the patch route at all: it answers a branch whose work
+/// landed even after the anchor has moved on over the same file. Confirming the
+/// match verbatim must not cost that — patch ids ignore line numbers, so a later
+/// edit shifting every hunk header leaves the proof standing.
+#[test]
+fn a_squash_merged_branch_is_still_proven_once_the_anchor_moves_on() {
+    let (_bare, work) = setup();
+
+    push_topic_branch(work.path(), "feature");
+    squash_merge_upstream(work.path(), "feature");
+    // An unrelated edit to the same file, above the branch's own change.
+    let landed = fs::read_to_string(work.path().join("feature.txt")).unwrap();
+    fs::write(
+        work.path().join("feature.txt"),
+        format!("a line added later\n{landed}"),
+    )
+    .unwrap();
+    git(work.path(), &["commit", "-am", "later work above it"]);
+    git(work.path(), &["push", "origin", "main"]);
+    git(work.path(), &["branch", "dest", "main"]);
+
+    let text = cleanup_prompt(work.path(), "dest", "feature");
+
+    assert!(
+        !text.contains('↑'),
+        "the branch's patch is still on the anchor, wherever it now sits: {text}"
+    );
+    assert!(
+        !branch_listing(work.path()).contains("feature"),
+        "the branch should be gone: {}",
+        branch_listing(work.path())
+    );
+}
+
+/// The content route compares the paths a branch touched, and git reports a
+/// rename as its destination alone — which would leave the deletion of its
+/// source uncompared, and prove a branch whose deletion never landed.
+#[test]
+fn a_rename_whose_deletion_never_landed_is_not_proven() {
+    let (_bare, work) = setup();
+
+    // The file predates the branch, so removing it is work of the branch's own.
+    commit_in(work.path(), "old.txt", "a file to be renamed");
+    git(work.path(), &["push", "origin", "main"]);
+    git(work.path(), &["checkout", "-b", "feature"]);
+    git(work.path(), &["push", "-u", "origin", "feature"]);
+    git(work.path(), &["mv", "old.txt", "new.txt"]);
+    git(work.path(), &["commit", "-m", "rename it"]);
+
+    // Only the arrival lands on main; `old.txt` stays, so the branch still holds
+    // a deletion the anchor has never seen.
+    git(work.path(), &["checkout", "main"]);
+    let moved = stdout_str(&git(work.path(), &["show", "feature:new.txt"]));
+    fs::write(work.path().join("new.txt"), moved).unwrap();
+    git(work.path(), &["add", "new.txt"]);
+    git(work.path(), &["commit", "-m", "add the new name only"]);
+    git(work.path(), &["push", "origin", "main"]);
+    git(work.path(), &["push", "origin", "--delete", "feature"]);
+    git(work.path(), &["fetch", "--prune", "origin"]);
+    git(work.path(), &["branch", "dest", "main"]);
+
+    let text = cleanup_prompt(work.path(), "dest", "feature");
+
+    assert!(
+        text.contains('↑'),
+        "the deletion is unique work, so the warning stands: {text}"
+    );
+}
+
+/// A license covers the commit it was established at. Move the branch after the
+/// proof and the delete falls back to `git branch -d`, which refuses it — the
+/// same guard an unmarked worktree meets.
+#[test]
+fn a_branch_that_moves_after_the_proof_is_no_longer_covered_by_it() {
+    let (_bare, work) = setup();
+
+    push_topic_branch(work.path(), "feature");
+    squash_merge_upstream(work.path(), "feature");
+    // A commit for the branch to be moved onto, parked out of the way on a
+    // branch of its own so nothing else notices it.
+    git(work.path(), &["checkout", "-b", "parked"]);
+    commit_in(work.path(), "later.txt", "work done after the proof");
+    git(work.path(), &["checkout", "main"]);
+    git(work.path(), &["branch", "dest", "main"]);
+
+    // The rows — and the proof — are built before the picker draws, so moving
+    // the branch now is exactly the race the pin exists for.
+    let raw = drive_cleanup_prompt(work.path(), "dest", "feature", false, || {
+        git(work.path(), &["branch", "--force", "feature", "parked"]);
+    });
+    let text = String::from_utf8_lossy(&raw);
+
+    assert!(
+        branch_listing(work.path()).contains("feature"),
+        "the proof no longer covers where the branch points, so git refuses: {text}"
+    );
+}
+
+/// The content route reads a diff, and repository configuration can shrink one:
+/// `diff.ignoreSubmodules=all` hides a changed gitlink from both the path list
+/// and the comparison, so a branch carrying a landed file edit plus a submodule
+/// bump of its own would be proven on the half git chose to show.
+#[test]
+fn configuration_cannot_shrink_the_diff_a_proof_reads() {
+    let (_bare, work) = setup();
+
+    commit_in(work.path(), "a.txt", "the line before either edit");
+    git(work.path(), &["push", "origin", "main"]);
+    git(work.path(), &["config", "diff.ignoreSubmodules", "all"]);
+
+    // A landed edit and a submodule bump that never landed, in one branch.
+    git(work.path(), &["checkout", "-b", "feature"]);
+    git(work.path(), &["push", "-u", "origin", "feature"]);
+    fs::write(work.path().join("a.txt"), "edited\n").unwrap();
+    git(work.path(), &["add", "a.txt"]);
+    let gitlink = stdout_str(&git(work.path(), &["rev-parse", "HEAD"]));
+    git(
+        work.path(),
+        &[
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            &format!("160000,{},sub", gitlink.trim()),
+        ],
+    );
+    git(
+        work.path(),
+        &["commit", "-m", "edit a file, bump a submodule"],
+    );
+
+    // Only the file edit lands.
+    git(work.path(), &["checkout", "main"]);
+    fs::write(work.path().join("a.txt"), "edited\n").unwrap();
+    git(work.path(), &["commit", "-am", "the file edit alone"]);
+    git(work.path(), &["push", "origin", "main"]);
+    git(work.path(), &["push", "origin", "--delete", "feature"]);
+    git(work.path(), &["fetch", "--prune", "origin"]);
+    git(work.path(), &["branch", "dest", "main"]);
+
+    let text = cleanup_prompt(work.path(), "dest", "feature");
+
+    assert!(
+        text.contains('↑'),
+        "the submodule bump is unique work, whatever the config shows: {text}"
+    );
+}
+
+/// A deleted branch must not leave its upstream config behind for a later branch
+/// of the same name to inherit — and the section-wide removal git offers cannot
+/// parse every name git itself allows.
+#[test]
+fn a_proven_delete_clears_config_for_an_awkward_branch_name() {
+    let (_bare, work) = setup();
+
+    push_topic_branch(work.path(), "topic]x");
+    squash_merge_upstream(work.path(), "topic]x");
+    git(work.path(), &["branch", "dest", "main"]);
+    assert!(
+        stdout_str(&git(work.path(), &["config", "--list", "--name-only"]))
+            .contains("branch.topic]x."),
+        "precondition: the branch should have tracking config to leave behind"
+    );
+
+    cleanup_prompt(work.path(), "dest", "topic]x");
+
+    assert!(
+        !branch_listing(work.path()).contains("topic]x"),
+        "the branch should be gone"
+    );
+    let config = stdout_str(&git(work.path(), &["config", "--list", "--name-only"]));
+    assert!(
+        !config.contains("branch.topic]x."),
+        "its config should have gone with it; got: {config}"
+    );
+}
+
+/// The exact comparison is only exact if it reads the file rather than what a
+/// driver makes of it: a textconv that strips spaces renders `foo bar` and
+/// `foobar` alike, which would agree with the normalised patch ids that let the
+/// whitespace case through in the first place.
+#[test]
+fn a_textconv_driver_cannot_make_the_exact_comparison_agree() {
+    let (_bare, work) = setup();
+
+    fs::write(work.path().join("a.txt"), "foo\n").unwrap();
+    fs::write(work.path().join(".gitattributes"), "*.txt diff=nospace\n").unwrap();
+    git(work.path(), &["add", "."]);
+    git(
+        work.path(),
+        &["commit", "-m", "the line before either edit"],
+    );
+    // A driver that renders every version with its spaces removed.
+    git(
+        work.path(),
+        &["config", "diff.nospace.textconv", "tr -d ' ' <"],
+    );
+    git(work.path(), &["push", "origin", "main"]);
+
+    git(work.path(), &["checkout", "-b", "feature"]);
+    fs::write(work.path().join("a.txt"), "foo bar\n").unwrap();
+    git(work.path(), &["commit", "-am", "spaced"]);
+    git(work.path(), &["push", "-u", "origin", "feature"]);
+
+    git(work.path(), &["checkout", "main"]);
+    fs::write(work.path().join("a.txt"), "foobar\n").unwrap();
+    git(work.path(), &["commit", "-am", "unspaced"]);
+    git(work.path(), &["push", "origin", "main"]);
+    git(work.path(), &["push", "origin", "--delete", "feature"]);
+    git(work.path(), &["fetch", "--prune", "origin"]);
+    git(work.path(), &["branch", "dest", "main"]);
+
+    let text = cleanup_prompt(work.path(), "dest", "feature");
+
+    assert!(
+        text.contains('↑'),
+        "the spaces are the branch's own, whatever the driver renders: {text}"
+    );
+}
+
+/// `git config --list` repeats a multi-valued key, and the `--unset-all` that
+/// clears the first mention leaves the second with nothing to do. Reading exit
+/// codes would call that a leftover and warn about config that is long gone.
+#[test]
+fn a_multi_valued_config_key_is_not_reported_as_left_behind() {
+    let (_bare, work) = setup();
+
+    push_topic_branch(work.path(), "feature");
+    squash_merge_upstream(work.path(), "feature");
+    git(
+        work.path(),
+        &[
+            "config",
+            "--add",
+            "branch.feature.merge",
+            "refs/heads/other",
+        ],
+    );
+    git(work.path(), &["branch", "dest", "main"]);
+
+    let text = cleanup_prompt(work.path(), "dest", "feature");
+
+    assert!(
+        !text.contains("config"),
+        "both values went, so there is nothing to warn about: {text}"
+    );
+    let config = stdout_str(&git(work.path(), &["config", "--list", "--name-only"]));
+    assert!(
+        !config.contains("branch.feature."),
+        "and both really did go; got: {config}"
+    );
+}
+
+/// A branch name may contain dots, and git reads a config name by its first and
+/// last dot alone — so `branch.topic.extra.remote` belongs to `topic.extra`.
+/// Deleting `topic` must not clear it.
+#[test]
+fn a_proven_delete_leaves_a_neighbouring_branchs_config_alone() {
+    let (_bare, work) = setup();
+
+    push_topic_branch(work.path(), "topic");
+    squash_merge_upstream(work.path(), "topic");
+    git(work.path(), &["branch", "topic.extra", "main"]);
+    git(
+        work.path(),
+        &["config", "branch.topic.extra.remote", "origin"],
+    );
+    git(work.path(), &["branch", "dest", "main"]);
+
+    cleanup_prompt(work.path(), "dest", "topic");
+
+    let config = stdout_str(&git(work.path(), &["config", "--list", "--name-only"]));
+    assert!(
+        config.contains("branch.topic.extra.remote"),
+        "the neighbour keeps its upstream; got: {config}"
+    );
+    assert!(
+        !branch_listing(work.path()).contains("topic\n"),
+        "and the proven branch still went"
+    );
+}
+
+/// The pinned delete is plumbing, and `git update-ref -d` will happily remove a
+/// branch some worktree has checked out — which `git branch -D` refuses, leaving
+/// that worktree pointing at nothing. A worktree that appears while the picker is
+/// open is the "became risky after the warning" case, and it must still meet a
+/// guard.
+#[test]
+fn a_worktree_taken_on_the_proven_branch_mid_prompt_saves_it() {
+    let (_bare, parent, work) = setup_with_parent();
+
+    push_topic_branch(&work, "feature");
+    squash_merge_upstream(&work, "feature");
+    git(&work, &["branch", "dest", "main"]);
+    let held = parent.path().join("held");
+
+    let raw = drive_cleanup_prompt(&work, "dest", "feature", false, || {
+        git(
+            &work,
+            &["worktree", "add", held.to_str().unwrap(), "feature"],
+        );
+    });
+    let text = String::from_utf8_lossy(&raw);
+
+    assert!(
+        branch_listing(&work).contains("feature"),
+        "a branch a worktree now holds must survive: {text}"
+    );
+}
+
+/// Equivalence only ever subtracts. A branch cut from the anchor and never
+/// committed to has nothing the anchor lacks, and reading that as "landed"
+/// would offer it for deletion the moment it was created.
+#[test]
+fn an_untouched_branch_cut_from_the_anchor_is_not_read_as_landed() {
+    let (_bare, work) = setup();
+
+    git(work.path(), &["branch", "fresh", "main"]);
+
+    let _cwd = cwd_at(work.path());
+    assert!(
+        !stale_names("origin").contains(&"fresh".to_string()),
+        "an untouched branch is not stale, got: {:?}",
+        stale_names("origin")
+    );
+    assert!(
+        git_switch::git::equivalent_branches(None, "origin", &["fresh"]).is_empty(),
+        "and an empty diff proves nothing, so equivalence cannot offer it either"
     );
 }
 
@@ -2131,10 +2664,6 @@ fn a_chatty_wt_hook_cannot_corrupt_the_handoff() {
 /// drives it over a real pty.
 #[test]
 fn a_stale_branch_taking_its_worktree_fires_the_removal_hook() {
-    use portable_pty::{CommandBuilder, PtySize, native_pty_system};
-    use std::io::{Read, Write};
-    use std::sync::Arc;
-
     let (_bare, work) = setup();
 
     // Published, then its upstream deleted: stale, and holding a commit of its
@@ -2164,42 +2693,7 @@ fn a_stale_branch_taking_its_worktree_fires_the_removal_hook() {
     );
     git(work.path(), &["config", "git-switch.hook.removed", &script]);
 
-    let pty = native_pty_system()
-        .openpty(PtySize::default())
-        .expect("failed to open pty");
-    let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_git-switch"));
-    cmd.arg("dest");
-    cmd.cwd(work.path());
-    let mut child = ChildGuard(pty.slave.spawn_command(cmd).expect("failed to spawn"));
-    drop(pty.slave);
-
-    let mut reader = pty.master.try_clone_reader().unwrap();
-    let mut writer = pty.master.take_writer().unwrap();
-    let seen = Arc::new(Mutex::new(Vec::new()));
-    let collected = Arc::clone(&seen);
-    let output = std::thread::spawn(move || {
-        let mut chunk = [0u8; 1024];
-        while let Ok(n) = reader.read(&mut chunk) {
-            if n == 0 {
-                break;
-            }
-            collected.lock().unwrap().extend_from_slice(&chunk[..n]);
-        }
-    });
-
-    // Tick the row and confirm, each key waiting for the redraw that proves the
-    // last one landed.
-    wait_for(&seen, "[ ] wip");
-    writer.write_all(b"\x1b[C").unwrap();
-    writer.flush().unwrap();
-    wait_for(&seen, "[x] wip");
-    writer.write_all(b"\r").unwrap();
-    writer.flush().unwrap();
-
-    child.wait_bounded();
-    drop(writer);
-    drop(pty.master);
-    output.join().unwrap();
+    drive_cleanup_prompt(work.path(), "dest", "wip", true, || {});
 
     assert!(
         !worktree.exists(),
