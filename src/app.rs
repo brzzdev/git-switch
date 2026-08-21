@@ -857,6 +857,21 @@ fn delete_stale_row(
 ///
 /// Quoting alone doesn't cover a name that looks like an option, so the commands
 /// built from this pass `--` before the ref as well.
+/// How to spell `branch` as the argument to a bare `perch`, so that telling
+/// someone to run it actually reaches the branch.
+///
+/// A branch named after a verb is read as that verb, and `perch wt` opens the
+/// worktree picker rather than going anywhere — so those names need the `--`
+/// escape hatch. Keep this list in step with `dispatch` in `main.rs`, which is
+/// where the verbs are defined.
+pub(crate) fn go_there_argument(branch: &str) -> String {
+    let quoted = shell_quote(branch);
+    match branch {
+        "br" | "wt" => format!("-- {quoted}"),
+        _ => quoted,
+    }
+}
+
 pub(crate) fn shell_quote(word: &str) -> String {
     let safe = |c: char| c.is_ascii_alphanumeric() || "._/@+-".contains(c);
     if !word.is_empty() && word.chars().all(safe) {
@@ -991,6 +1006,22 @@ mod tests {
     #[test]
     fn shell_quote_handles_a_quote_in_the_name() {
         assert_eq!(shell_quote("it's"), r"'it'\''s'");
+    }
+
+    #[test]
+    fn an_ordinary_branch_is_named_to_perch_bare() {
+        assert_eq!(go_there_argument("feature"), "feature");
+    }
+
+    #[test]
+    fn a_branch_named_after_a_verb_is_escaped_past_the_dispatcher() {
+        assert_eq!(go_there_argument("br"), "-- br");
+        assert_eq!(go_there_argument("wt"), "-- wt");
+    }
+
+    #[test]
+    fn an_escaped_branch_is_still_shell_quoted() {
+        assert_eq!(go_there_argument("a b"), "'a b'");
     }
 
     /// The ground is on every row: a branch with nothing at stake still owes the

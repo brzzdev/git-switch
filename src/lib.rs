@@ -22,7 +22,7 @@ pub enum Error {
     /// because that hand-off is the whole difference between the two verbs.
     #[error(
         "{branch} is checked out at {path}; run `perch {}` to go there",
-        app::shell_quote(branch)
+        app::go_there_argument(branch)
     )]
     HeldByWorktree { branch: String, path: String },
 

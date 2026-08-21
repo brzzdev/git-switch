@@ -1539,6 +1539,28 @@ fn br_refuses_a_held_branch_and_names_the_verb_that_reaches_it() {
     assert_eq!(stdout_str(&head).trim(), "main");
 }
 
+/// A branch named after a verb is read as that verb, so the advice `br` gives
+/// has to route around the dispatcher or it lands somewhere else entirely.
+#[test]
+fn br_points_a_verb_named_branch_at_the_escape_hatch() {
+    for verb in ["br", "wt"] {
+        let (_bare, parent, work) = setup_with_parent();
+        add_worktree(&work, &parent, verb);
+
+        let output = perch_args(&work, &["br", verb]);
+        assert!(
+            !output.status.success(),
+            "br into a held branch should fail; stderr: {}",
+            stderr_str(&output)
+        );
+        assert!(
+            stderr_str(&output).contains(&format!("run `perch -- {verb}` to go there")),
+            "a branch named `{verb}` needs the `--` form; got: {}",
+            stderr_str(&output)
+        );
+    }
+}
+
 /// `wt <name>` creates a worktree for any word it doesn't know, so a retired
 /// subverb left to fall through would build a branch called `list`.
 #[test]
