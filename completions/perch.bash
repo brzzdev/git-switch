@@ -13,23 +13,33 @@ _perch_branches_except() {
 _perch_completions() {
   local cur="${COMP_WORDS[COMP_CWORD]}"
   local prev="${COMP_WORDS[COMP_CWORD-1]}"
-  local sub="${COMP_WORDS[1]}"
+  local verb="${COMP_WORDS[1]}"
+  local subverb="${COMP_WORDS[2]}"
+
+  # `--` ends parsing wherever it sits, so whatever precedes it, the next word
+  # is a branch name. Checked before position, since the routes it opens are at
+  # four different depths.
+  if [[ "$prev" == "--" ]]; then
+    COMPREPLY=($(compgen -W "$(_perch_branches)" -- "$cur"))
+    return
+  fi
 
   case "$COMP_CWORD" in
     1)
       COMPREPLY=($(compgen -W "br wt $(_perch_branches_except 'br|wt')" -- "$cur"))
       ;;
     2)
-      if [[ "$prev" == "--" ]]; then
-        COMPREPLY=($(compgen -W "$(_perch_branches)" -- "$cur"))
-      elif [[ "$sub" == "wt" ]]; then
+      if [[ "$verb" == "wt" ]]; then
         COMPREPLY=($(compgen -W "ls rm $(_perch_branches_except 'ls|rm|list|remove')" -- "$cur"))
       else
         COMPREPLY=($(compgen -W "$(_perch_branches)" -- "$cur"))
       fi
       ;;
-    3)
-      if [[ "$prev" == "--" ]] || [[ "$sub" == "wt" && "$prev" == "rm" ]]; then
+    # `wt rm` takes its branch and its `--force` in either order, so keying off
+    # the words rather than the depth is what keeps the branch offered after a
+    # flag. Every other route has taken its argument by here.
+    *)
+      if [[ "$verb" == "wt" && "$subverb" == "rm" ]]; then
         COMPREPLY=($(compgen -W "$(_perch_branches)" -- "$cur"))
       fi
       ;;

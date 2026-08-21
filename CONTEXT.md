@@ -77,7 +77,7 @@ Which of three intents a command carries: bare `perch` goes to the branch wherev
 _Avoid_: Mode, action
 
 **Subverb**:
-A word `wt` reads before it reads a branch name: `ls` and `rm`, plus the retired `list` and `remove`, which are refused rather than taken for branches. Only `wt` has any — `br` reads everything after it as a branch. A branch spelled like a subverb is reachable only through `--`, as is one spelled like a *Verb*.
+A word `wt` reads before it reads a branch name: `ls` and `rm`, plus the retired `list` and `remove`, which are refused rather than taken for branches. Only `wt` has any — `br` reads everything after it as a branch. Collision is positional, and `--` is needed only where the dispatcher would eat the spelling: after `wt` for a subverb, at the top level for a *Verb*. Everywhere else the bare name reaches the branch, so `perch list`, `perch br list` and `perch br wt` all work as written.
 _Avoid_: Subcommand (reserved for the *Verb*), flag, option
 
 **`.`**:
