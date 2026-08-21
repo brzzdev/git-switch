@@ -21,18 +21,27 @@ pub fn run(target: Option<&str>) -> AppResult<()> {
     // A worktree whose directory was deleted by hand can't be entered, so its
     // branch is one to (re)create. `worktree_add`/`checkout` prune the stale
     // registration when it gets in the way.
-    let worktrees = super::live_worktrees()?;
-    let main = main_of(&worktrees)?;
+    let listed = super::live_worktrees()?;
     let current_branch = git::current_branch()?;
     let remote = git::current_remote(current_branch.as_deref());
 
-    let action = match target {
-        Some(name) => resolve_target(name, &worktrees, &remote)?,
-        None => match select(&worktrees, current_branch.as_deref(), &remote)? {
-            Some(a) => a,
-            None => return Ok(()),
-        },
+    let branch = if let Some(name) = target {
+        name.to_string()
+    } else {
+        let Some(picked) = select(&listed, current_branch.as_deref(), &remote)? else {
+            return Ok(());
+        };
+        picked
     };
+
+    // Read the worktrees again before deciding what the branch needs: the list
+    // above was drawn before the picker opened, and it then sat waiting on a
+    // keystroke. A worktree taken on the branch in the meantime would send this
+    // into `worktree add`, which git refuses; one removed would hand the shell a
+    // path that is no longer there.
+    let worktrees = super::live_worktrees()?;
+    let main = main_of(&worktrees)?;
+    let action = resolve_target(&branch, &worktrees, &remote)?;
 
     // The branch comes back alongside the path so the stale prompt can leave the
     // worktree we're about to enter alone.
@@ -377,11 +386,17 @@ fn create_worktree(
     Ok(path)
 }
 
+/// Which branch the user picked, by name. Deciding what that branch *needs* is
+/// deliberately not done here: the answer depends on which worktrees exist,
+/// and this returns while the snapshot behind the list is going stale. A name
+/// is the one part of the answer that can't. The typed "Create new" row is a
+/// name like any other — [`resolve_target`] reads it as a branch that doesn't
+/// exist yet, which is exactly what it is.
 fn select(
     worktrees: &[git::Worktree],
     current_branch: Option<&str>,
     remote: &str,
-) -> AppResult<Option<Action>> {
+) -> AppResult<Option<String>> {
     let catalogue = build_catalogue(current_branch, remote, worktrees)?;
     let sections = picker::sections(&catalogue, Verb::Worktree);
     // Non-interactive (piped/CI): we can't prompt, so report nothing to open
@@ -398,17 +413,9 @@ fn select(
         },
         keys,
     )?;
-    // The list says nothing about which rows already have a worktree beyond the
-    // path it draws, so the action comes from looking the branch up rather than
-    // from which part of the list it was picked out of.
-    let action = match selection {
-        None => return Ok(None),
-        Some(Selection::Existing(name)) => git::worktree_for_branch(worktrees, &name)
-            .map(Action::CdToExisting)
-            .unwrap_or(Action::CreateForBranch(name)),
-        Some(Selection::Create(name)) => Action::CreateNewBranch(name),
-    };
-    Ok(Some(action))
+    Ok(selection.map(|s| match s {
+        Selection::Existing(name) | Selection::Create(name) => name,
+    }))
 }
 
 fn resolve_target(name: &str, worktrees: &[git::Worktree], remote: &str) -> AppResult<Action> {

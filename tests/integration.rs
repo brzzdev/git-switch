@@ -2118,7 +2118,12 @@ fn cleanup_prompt(work: &Path, target: &str, row: &str) -> String {
 ///
 /// Separate from [`drive_cleanup_prompt`], which drives the multi-select that
 /// comes *after* a switch — this one drives the single-select that chooses it.
-fn drive_branch_picker(work: &Path, branch: &str, mid_prompt: impl FnOnce()) -> Vec<u8> {
+fn drive_branch_picker(
+    work: &Path,
+    verb: Option<&str>,
+    branch: &str,
+    mid_prompt: impl FnOnce(),
+) -> Vec<u8> {
     use portable_pty::{CommandBuilder, PtySize, native_pty_system};
     use std::io::{Read, Write};
     use std::sync::Arc;
@@ -2127,6 +2132,9 @@ fn drive_branch_picker(work: &Path, branch: &str, mid_prompt: impl FnOnce()) -> 
         .openpty(PtySize::default())
         .expect("failed to open pty");
     let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_perch"));
+    if let Some(verb) = verb {
+        cmd.arg(verb);
+    }
     cmd.cwd(work);
     cmd.env("PERCH_NO_HOOKS", "1");
     let mut child = ChildGuard(pty.slave.spawn_command(cmd).expect("failed to spawn"));
@@ -2179,7 +2187,7 @@ fn a_worktree_taken_while_the_picker_is_open_is_handed_off_to() {
     git(&work, &["branch", "target"]);
     let held = parent.path().join("held");
 
-    let raw = drive_branch_picker(&work, "target", || {
+    let raw = drive_branch_picker(&work, None, "target", || {
         git(
             &work,
             &["worktree", "add", held.to_str().unwrap(), "target"],
@@ -2194,6 +2202,34 @@ fn a_worktree_taken_while_the_picker_is_open_is_handed_off_to() {
     assert!(
         !text.contains("already used by worktree"),
         "and must not attempt the checkout git forbids; got: {text}"
+    );
+}
+
+/// The same window, in the verb that builds worktrees rather than entering
+/// them: `wt` would otherwise take the branch for one that still needs a
+/// worktree and run `git worktree add` over the one that now exists.
+#[test]
+fn a_worktree_taken_while_the_wt_picker_is_open_is_entered_not_rebuilt() {
+    let (_bare, parent, work) = setup_with_parent();
+
+    git(&work, &["branch", "target"]);
+    let held = parent.path().join("held");
+
+    let raw = drive_branch_picker(&work, Some("wt"), "target", || {
+        git(
+            &work,
+            &["worktree", "add", held.to_str().unwrap(), "target"],
+        );
+    });
+    let text = String::from_utf8_lossy(&raw);
+
+    assert!(
+        text.contains("switched to worktree at"),
+        "should enter the worktree taken mid-prompt; got: {text}"
+    );
+    assert!(
+        !text.contains("already used by worktree"),
+        "and must not try to build a second one; got: {text}"
     );
 }
 
