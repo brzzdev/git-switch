@@ -83,9 +83,6 @@ fn print_help() {
 
 fn print_br_help() {
     println!("Usage: perch br [<branch>]    Check out a branch in this worktree");
-    println!();
-    println!("A branch held by another worktree can't be checked out here; `perch <branch>`");
-    println!("goes to it instead.");
 }
 
 fn print_wt_help() {

@@ -82,7 +82,7 @@ perch main
 perch .
 ```
 
-Bare `perch <branch>` is never ambiguous, because git will not let the same branch be checked out twice: if a worktree already holds it, going there is the only legal move, and if none does, checking it out here is. `perch br` is for when you mean *here* specifically — asked for a branch another worktree holds, it names that path and stops rather than quietly moving you.
+Bare `perch <branch>` never has to ask which you meant, because git will not let the same branch be checked out twice: if a worktree already holds it, going there is the only legal move; if none does, checking it out here is.
 
 `perch .` fetches and brings the branch you're on up to date with its remote. A clean branch integrates with no prompt — fast-forwarding, or (when it has diverged, e.g. after rebasing through a web UI) rebasing your local commits onto the remote, which drops any already upstream and replays genuine new work. Only when the working tree is dirty does it stop to ask: **keep** the uncommitted work (stash, rebase, restore) or **discard** it (hard reset to the remote).
 

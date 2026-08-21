@@ -73,7 +73,7 @@ _Avoid_: Deletion (reserved for branches), cleanup, teardown
 ### Targets
 
 **Verb**:
-Which of three intents a command carries: bare `perch` goes to the branch wherever it lives, `br` checks it out in the worktree you're in, `wt` gives it one of its own. The verb only ever decides what happens to a *Held* branch — `br` refuses it, since a checkout here is the whole of what `br` promises — because in every other case git leaves exactly one move legal. See [ADR 0007](./docs/adr/0007-three-verbs-one-per-intent.md).
+Which of three intents a command carries: bare `perch` goes to the branch wherever it lives, `br` checks it out in the worktree you're in, `wt` gives it one of its own. The verb decides what happens to a *Held* branch and nothing else, since git leaves exactly one move legal in every other case. See [ADR 0007](./docs/adr/0007-three-verbs-one-per-intent.md).
 _Avoid_: Mode, subcommand, action
 
 **`.`**:

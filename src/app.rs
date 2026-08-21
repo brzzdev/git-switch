@@ -42,9 +42,9 @@ fn interactive_term() -> Option<Term> {
     term.is_term().then_some(term)
 }
 
-/// Which intent the caller's verb carries. The two differ only over a branch
-/// another worktree holds: `perch <name>` goes there, and `br` — whose whole
-/// promise is a checkout *here* — has nowhere to go.
+/// Which intent the caller's verb carries. The two differ over a branch another
+/// worktree holds, and nowhere else: `perch <name>` goes there, and `br` — whose
+/// whole promise is a checkout *here* — has nowhere to go.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Verb {
     /// `perch <name>` — hand off to the worktree holding the branch.
@@ -112,7 +112,7 @@ fn run_verb(verb: Verb, target: Option<&str>) -> AppResult<()> {
             "{} {} is checked out at {}",
             style("→").cyan().bold(),
             target,
-            held_by.path.display()
+            display_path(&held_by.path)
         );
         // `target` is where we're about to hand off, so it must not be on offer.
         if let Err(e) = prompt_delete_stale_branches(None, Some(&target), &remote) {
