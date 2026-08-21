@@ -4,10 +4,12 @@ use std::path::{Path, PathBuf};
 use console::{measure_text_width, style};
 use indicatif::ProgressBar;
 
-use super::picker::{PickerOptions, Selection, align_labels, interactive_keys, multi_select, pick};
+use super::picker::{
+    PickerOptions, Selection, align_labels, interactive_keys, multi_select, pick, sections,
+};
 use super::{
     CursorGuard, Risk, Verb, build_catalogue, confirm, display_path, fetch_and_ff, handoff_cd,
-    hook, marker, picker, prompt_delete_stale_branches, removal, report_update, reporting,
+    hook, marker, prompt_delete_stale_branches, removal, report_update, reporting,
 };
 use crate::{AppResult, Error, git};
 
@@ -383,7 +385,7 @@ fn select(
     remote: &str,
 ) -> AppResult<Option<Action>> {
     let catalogue = build_catalogue(current_branch, remote, worktrees)?;
-    let sections = picker::sections(&catalogue, Verb::Worktree);
+    let sections = sections(&catalogue, Verb::Worktree);
     // Non-interactive (piped/CI): we can't prompt, so report nothing to open
     // rather than blocking on key input.
     let Some(keys) = interactive_keys() else {
@@ -393,7 +395,7 @@ fn select(
         current_branch,
         &sections,
         PickerOptions {
-            prompt: "Worktree",
+            prompt: Verb::Worktree.prompt(),
             allow_create_from_filter: true,
         },
         keys,

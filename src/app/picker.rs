@@ -8,6 +8,8 @@
 //! keep separate models and message types: they share a shape but not a state
 //! space, and a union would be half-dead in either.
 
+use std::collections::{HashMap, HashSet};
+
 use console::{Key, Term, measure_text_width, style};
 
 use super::{CursorGuard, Verb, interactive_term};
@@ -130,37 +132,21 @@ mod raw {
     }
 }
 
-/// Where a row's branch can be found. It is a fact about the *row* rather than
-/// the branch: under the *Remote* heading the section already says the branch is
-/// only on the remote, so those rows are `Ready` and carry no cloud.
-#[derive(Clone, Copy)]
-pub(crate) enum Availability {
-    /// Nothing to add — the verb can just act on it.
-    Ready,
-    /// Kept, but only on the remote. Worth marking where no heading says so.
-    RemoteOnly,
-    /// Kept, and nowhere to be found. No verb can reach it.
-    Missing,
-}
-
-/// A branch as the git side found it, before any verb has had an opinion.
-#[derive(Clone)]
-pub(crate) struct Branch {
-    pub name: String,
-    /// The branch the worktree we're standing in has checked out.
-    pub is_current: bool,
-    pub availability: Availability,
-    /// Display path of the worktree *Held*ing it, where one does.
-    pub held_at: Option<String>,
-}
-
-/// Every branch on offer, under the heading it belongs to. There is one of
-/// these per run whichever verb is picking: a verb changes what selecting a row
-/// does, never what is listed.
+/// Everything the git side found: which branches exist where, which are *Kept*,
+/// and which worktree *Held*s each. Only facts — grouping them under headings
+/// and deciding what each row says is [`sections`], which is pure and needs no
+/// repo on disk.
 pub(crate) struct Catalogue {
-    pub pinned: Vec<Branch>,
-    pub local: Vec<Branch>,
-    pub remote: Vec<Branch>,
+    /// The branch the worktree we're standing in has checked out.
+    pub current: Option<String>,
+    /// Display path of the worktree holding a branch, for those a worktree does.
+    pub held: HashMap<String, String>,
+    /// Checked out locally, in the order git listed them.
+    pub local: Vec<String>,
+    /// *Kept* out of the cleanup prompt, listed whether or not they exist yet.
+    pub pinned: Vec<String>,
+    /// On the remote with no local counterpart.
+    pub remote_only: Vec<String>,
 }
 
 /// A branch as the picker draws it: the name, whatever there is to say after
@@ -183,19 +169,33 @@ pub(crate) struct Section {
     pub items: Vec<Pick>,
 }
 
+/// Where a branch can be found, as only the *Pinned* section has to say it. A
+/// kept branch is listed whether or not it is here yet, so its row is the one
+/// that must answer the question; under *Local* and *Remote* the heading
+/// already has.
+#[derive(Clone, Copy)]
+enum Availability {
+    /// Nothing to add — the verb can just act on it.
+    Ready,
+    /// Only on the remote. Fetching it would do.
+    RemoteOnly,
+    /// Nowhere to be found. No verb can reach it.
+    Missing,
+}
+
 /// The worktree holding this branch, where that is somewhere other than here.
 /// Git forbids the same branch in two worktrees and the one we're standing in
 /// holds the current branch, so "elsewhere" is exactly "held, and not current" —
 /// which is also why the row we're standing on is marked `*` and not with a path.
-fn elsewhere(branch: &Branch) -> Option<&str> {
-    if branch.is_current {
+fn elsewhere<'a>(catalogue: &'a Catalogue, name: &str) -> Option<&'a str> {
+    if catalogue.current.as_deref() == Some(name) {
         return None;
     }
-    branch.held_at.as_deref()
+    catalogue.held.get(name).map(String::as_str)
 }
 
-fn row(branch: &Branch, verb: Verb) -> Pick {
-    let (annotation, disabled) = match (branch.availability, elsewhere(branch)) {
+fn row(catalogue: &Catalogue, name: &str, availability: Availability, verb: Verb) -> Pick {
+    let (annotation, disabled) = match (availability, elsewhere(catalogue, name)) {
         (Availability::Missing, _) => ("missing".to_string(), true),
         // `br` promises a checkout *here*, and git will not check out a branch a
         // second worktree already holds. So this is the one row a verb differs
@@ -206,27 +206,57 @@ fn row(branch: &Branch, verb: Verb) -> Pick {
         (Availability::Ready, None) => (String::new(), false),
     };
     Pick {
-        name: branch.name.clone(),
-        is_current: branch.is_current,
+        name: name.to_string(),
+        is_current: catalogue.current.as_deref() == Some(name),
         annotation,
         disabled,
     }
 }
 
-/// The whole list, for any verb. Headings with nothing under them are dropped,
-/// so a repo with nothing kept shows no *Pinned*.
+/// The whole list, for any verb: every branch once, under the heading it
+/// belongs to. Headings with nothing under them are dropped, so a repo with
+/// nothing kept shows no *Pinned*.
 pub(crate) fn sections(catalogue: &Catalogue, verb: Verb) -> Vec<Section> {
+    let local: HashSet<&str> = catalogue.local.iter().map(String::as_str).collect();
+    let remote: HashSet<&str> = catalogue.remote_only.iter().map(String::as_str).collect();
+    let pinned: HashSet<&str> = catalogue.pinned.iter().map(String::as_str).collect();
+
+    // A kept branch is drawn under *Pinned* and never again below, so the two
+    // lower sections skip anything already up there.
+    let unpinned = |names: &[String], availability| -> Vec<Pick> {
+        names
+            .iter()
+            .filter(|name| !pinned.contains(name.as_str()))
+            .map(|name| row(catalogue, name, availability, verb))
+            .collect()
+    };
+
+    let pinned_rows = catalogue
+        .pinned
+        .iter()
+        .map(|name| {
+            let availability = if local.contains(name.as_str()) {
+                Availability::Ready
+            } else if remote.contains(name.as_str()) {
+                Availability::RemoteOnly
+            } else {
+                Availability::Missing
+            };
+            row(catalogue, name, availability, verb)
+        })
+        .collect();
+
     [
-        ("Pinned", &catalogue.pinned),
-        ("Local", &catalogue.local),
-        ("Remote", &catalogue.remote),
+        ("Pinned", pinned_rows),
+        ("Local", unpinned(&catalogue.local, Availability::Ready)),
+        (
+            "Remote",
+            unpinned(&catalogue.remote_only, Availability::Ready),
+        ),
     ]
     .into_iter()
-    .filter(|(_, branches)| !branches.is_empty())
-    .map(|(heading, branches)| Section {
-        heading,
-        items: branches.iter().map(|b| row(b, verb)).collect(),
-    })
+    .filter(|(_, items)| !items.is_empty())
+    .map(|(heading, items)| Section { heading, items })
     .collect()
 }
 
@@ -244,6 +274,10 @@ struct RenderRow {
 struct View {
     rows: Vec<RenderRow>,
     selectable: Vec<usize>,
+    /// Width to pad names to so annotations share a column. Derived per view
+    /// rather than per section, since filtering changes which rows are on
+    /// screen and a column that only lined up within a section wouldn't be one.
+    name_column: usize,
 }
 
 pub(crate) enum Selection {
@@ -315,7 +349,16 @@ fn build_view(sections: &[Section], filter: &str, opts: PickerOptions) -> View {
         selectable.push(idx);
     }
 
-    View { rows, selectable }
+    let name_column = annotation_column(rows.iter().filter_map(|r| match &r.kind {
+        RowKind::Item(p) => Some((p.name.as_str(), p.annotation.as_str())),
+        _ => None,
+    }));
+
+    View {
+        rows,
+        selectable,
+        name_column,
+    }
 }
 
 fn cursor_selection(view: &View, cursor: usize) -> Option<Selection> {
@@ -585,7 +628,7 @@ fn render(term: &Term, view: &View, cursor: usize, filter: &str, prompt_label: &
 
     let end = (scroll + content_h).min(total_rows);
     for r in scroll..end {
-        let line = format_row(&view.rows[r], r == cursor_row);
+        let line = format_row(&view.rows[r], r == cursor_row, view.name_column);
         render_line(&line);
         drawn += visual_rows(&line, width);
     }
@@ -593,7 +636,7 @@ fn render(term: &Term, view: &View, cursor: usize, filter: &str, prompt_label: &
     drawn
 }
 
-fn format_row(row: &RenderRow, is_cursor: bool) -> String {
+fn format_row(row: &RenderRow, is_cursor: bool, name_column: usize) -> String {
     match &row.kind {
         RowKind::Heading(text) => style(text).bold().dim().to_string(),
         RowKind::Item(pick) => {
@@ -602,12 +645,16 @@ fn format_row(row: &RenderRow, is_cursor: bool) -> String {
             // stepping down the list doesn't shuffle them sideways.
             let mark = if pick.is_current { "*" } else { " " };
             let head = format!("  {cursor} {mark} {}", pick.name);
+            // Padded here rather than by `align_labels`, which joins the pair
+            // into one string: the name and its annotation are styled
+            // separately, so they have to stay separate.
+            let pad = " ".repeat(name_column.saturating_sub(measure_text_width(&pick.name)));
             let line = match pick.annotation.as_str() {
                 "" => head,
                 // A disabled row is dimmed whole below, so dimming the
                 // annotation here as well would only double the escape codes.
-                annotation if pick.disabled => format!("{head}  {annotation}"),
-                annotation => format!("{head}  {}", style(annotation).dim()),
+                annotation if pick.disabled => format!("{head}{pad}  {annotation}"),
+                annotation => format!("{head}{pad}  {}", style(annotation).dim()),
             };
             if pick.disabled {
                 style(line).dim().to_string()
@@ -626,16 +673,21 @@ fn format_row(row: &RenderRow, is_cursor: bool) -> String {
     }
 }
 
+/// The width names are padded to so annotations share a column. Only rows that
+/// actually carry an annotation drive it — a list with none needs no column, and
+/// padding for an absent one is just trailing whitespace.
+fn annotation_column<'a>(rows: impl Iterator<Item = (&'a str, &'a str)>) -> usize {
+    rows.filter(|(_, annotation)| !annotation.is_empty())
+        .map(|(name, _)| measure_text_width(name))
+        .max()
+        .unwrap_or(0)
+}
+
 /// Pads (name, annotation) pairs so annotations line up in a column. Rows
 /// without an annotation are left bare, so an unannotated list gains no
 /// trailing whitespace.
 pub(crate) fn align_labels(rows: &[(String, String)]) -> Vec<String> {
-    let width = rows
-        .iter()
-        .filter(|(_, a)| !a.is_empty())
-        .map(|(name, _)| measure_text_width(name))
-        .max()
-        .unwrap_or(0);
+    let width = annotation_column(rows.iter().map(|(n, a)| (n.as_str(), a.as_str())));
 
     rows.iter()
         .map(|(name, annotation)| {
@@ -853,20 +905,27 @@ mod tests {
         }
     }
 
-    fn branch(name: &str) -> Branch {
-        Branch {
-            name: name.to_string(),
-            is_current: false,
-            availability: Availability::Ready,
-            held_at: None,
+    fn names(names: &[&str]) -> Vec<String> {
+        names.iter().map(|n| (*n).to_string()).collect()
+    }
+
+    /// A catalogue with nothing in it, to be filled in by the struct-update
+    /// syntax so each test states only the facts it is about.
+    fn catalogue() -> Catalogue {
+        Catalogue {
+            current: None,
+            held: HashMap::new(),
+            local: Vec::new(),
+            pinned: Vec::new(),
+            remote_only: Vec::new(),
         }
     }
 
-    fn held(name: &str, path: &str) -> Branch {
-        Branch {
-            held_at: Some(path.to_string()),
-            ..branch(name)
-        }
+    fn held(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+        pairs
+            .iter()
+            .map(|(b, p)| ((*b).to_string(), (*p).to_string()))
+            .collect()
     }
 
     /// The whole list as the user reads it: headings, then one line per row
@@ -1163,12 +1222,11 @@ mod tests {
     #[test]
     fn every_verb_draws_the_same_list() {
         let catalogue = Catalogue {
-            pinned: vec![Branch {
-                is_current: true,
-                ..branch("main")
-            }],
-            local: vec![held("feature", "~/wt/repo/feature"), branch("spike")],
-            remote: vec![branch("colleagues-work")],
+            current: Some("main".to_string()),
+            held: held(&[("feature", "~/wt/repo/feature")]),
+            local: names(&["main", "feature", "spike"]),
+            pinned: names(&["main"]),
+            remote_only: names(&["colleagues-work"]),
         };
 
         let listed = [
@@ -1202,12 +1260,10 @@ mod tests {
     #[test]
     fn the_branch_we_are_on_is_marked_but_never_pathed() {
         let catalogue = Catalogue {
-            pinned: Vec::new(),
-            local: vec![Branch {
-                is_current: true,
-                ..held("main", "~/repo")
-            }],
-            remote: Vec::new(),
+            current: Some("main".to_string()),
+            held: held(&[("main", "~/repo")]),
+            local: names(&["main"]),
+            ..catalogue()
         };
         assert_eq!(listing(&catalogue, Verb::Go), ["Local", "* main"]);
         assert_eq!(listing(&catalogue, Verb::Here), ["Local", "* main"]);
@@ -1218,22 +1274,43 @@ mod tests {
     #[test]
     fn a_kept_branch_says_where_it_can_be_found() {
         let catalogue = Catalogue {
-            pinned: vec![
-                Branch {
-                    availability: Availability::RemoteOnly,
-                    ..branch("develop")
-                },
-                Branch {
-                    availability: Availability::Missing,
-                    ..branch("release")
-                },
-            ],
-            local: Vec::new(),
-            remote: Vec::new(),
+            local: names(&["here"]),
+            pinned: names(&["here", "develop", "release"]),
+            remote_only: names(&["develop"]),
+            ..catalogue()
         };
         assert_eq!(
             listing(&catalogue, Verb::Go),
-            ["Pinned", "  develop ☁", "  release missing (disabled)"],
+            [
+                "Pinned",
+                "  here",
+                "  develop ☁",
+                "  release missing (disabled)",
+            ],
+            "a kept branch is drawn whether it is local, remote-only, or nowhere",
+        );
+    }
+
+    /// A kept branch is drawn under *Pinned* and never again below, so the
+    /// lower sections skip whatever is already up there.
+    #[test]
+    fn a_kept_branch_is_listed_once() {
+        let catalogue = Catalogue {
+            local: names(&["main", "spike"]),
+            pinned: names(&["main"]),
+            remote_only: names(&["develop"]),
+            ..catalogue()
+        };
+        assert_eq!(
+            listing(&catalogue, Verb::Go),
+            [
+                "Pinned",
+                "  main",
+                "Local",
+                "  spike",
+                "Remote",
+                "  develop",
+            ],
         );
     }
 
@@ -1241,9 +1318,8 @@ mod tests {
     #[test]
     fn empty_headings_are_dropped() {
         let catalogue = Catalogue {
-            pinned: Vec::new(),
-            local: vec![branch("only")],
-            remote: Vec::new(),
+            local: names(&["only"]),
+            ..catalogue()
         };
         assert_eq!(listing(&catalogue, Verb::Go), ["Local", "  only"]);
     }
@@ -1253,9 +1329,9 @@ mod tests {
     #[test]
     fn a_disabled_row_cannot_be_selected() {
         let catalogue = Catalogue {
-            pinned: Vec::new(),
-            local: vec![held("feature", "~/wt/repo/feature"), branch("spike")],
-            remote: Vec::new(),
+            held: held(&[("feature", "~/wt/repo/feature")]),
+            local: names(&["feature", "spike"]),
+            ..catalogue()
         };
         let sections = sections(&catalogue, Verb::Here);
         let sel = run_pick(&sections, SELECT_OPTS, vec![Key::Enter]);

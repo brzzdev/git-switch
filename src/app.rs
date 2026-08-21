@@ -1,4 +1,3 @@
-use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use console::{Key, Term, style};
@@ -14,8 +13,7 @@ pub(crate) mod reporting;
 pub mod wt;
 
 use picker::{
-    Availability, Branch, Catalogue, PickerOptions, Selection, align_labels, interactive_keys,
-    multi_select, pick,
+    Catalogue, PickerOptions, Selection, align_labels, interactive_keys, multi_select, pick,
 };
 
 pub(crate) struct CursorGuard(Term);
@@ -60,7 +58,7 @@ pub(crate) enum Verb {
 impl Verb {
     /// The picker's prompt. All three verbs draw the same list, so the prompt is
     /// the only thing on screen saying what selecting a row will do.
-    fn prompt(self) -> &'static str {
+    pub(crate) fn prompt(self) -> &'static str {
         match self {
             Verb::Go => "Switch to",
             Verb::Here => "Check out here",
@@ -71,15 +69,15 @@ impl Verb {
 
 /// `perch [<branch>]` — take me to the branch, wherever it lives.
 pub fn run(target: Option<&str>) -> AppResult<()> {
-    run_reach(Verb::Go, target)
+    run_verb(Verb::Go, target)
 }
 
 /// `perch br [<branch>]` — check the branch out here, in this worktree.
 pub fn run_br(target: Option<&str>) -> AppResult<()> {
-    run_reach(Verb::Here, target)
+    run_verb(Verb::Here, target)
 }
 
-fn run_reach(verb: Verb, target: Option<&str>) -> AppResult<()> {
+fn run_verb(verb: Verb, target: Option<&str>) -> AppResult<()> {
     let old_branch = git::current_branch()?;
     let remote = git::current_remote(old_branch.as_deref());
 
@@ -524,9 +522,9 @@ fn select_branch(
 }
 
 /// Reads every branch the repo offers and pairs each with the worktree holding
-/// it, if any. This is the whole of the git side of the list — what a verb makes
-/// of it belongs to [`picker::sections`], which is pure and testable without a
-/// repo on disk.
+/// it, if any. This is the whole of the git side of the list — grouping it into
+/// sections and deciding what each row says belongs to [`picker::sections`],
+/// which is pure and testable without a repo on disk.
 pub(crate) fn build_catalogue(
     current: Option<&str>,
     remote: &str,
@@ -539,48 +537,17 @@ pub(crate) fn build_catalogue(
         return Err(Error::NoBranches);
     }
 
-    let pinned_names = git::pinned_branches(remote);
-    let local_set: HashSet<&str> = local.iter().map(String::as_str).collect();
-    let remote_set: HashSet<&str> = remote_only.iter().map(String::as_str).collect();
-    let pinned_set: HashSet<&str> = pinned_names.iter().map(String::as_str).collect();
-    let held: HashMap<&str, String> = worktrees
-        .iter()
-        .filter_map(|w| w.branch.as_deref().map(|b| (b, display_path(&w.path))))
-        .collect();
-
-    let branch = |name: &String, availability| Branch {
-        name: name.clone(),
-        is_current: current == Some(name.as_str()),
-        availability,
-        held_at: held.get(name.as_str()).cloned(),
-    };
-
     Ok(Catalogue {
-        // A kept branch is listed whether or not it is here yet, so this is the
-        // one section whose rows can be *Missing*.
-        pinned: pinned_names
+        current: current.map(str::to_string),
+        // Once per worktree rather than once per row: `display_path` reads the
+        // environment, and there are far fewer worktrees than branches.
+        held: worktrees
             .iter()
-            .map(|name| {
-                let availability = if local_set.contains(name.as_str()) {
-                    Availability::Ready
-                } else if remote_set.contains(name.as_str()) {
-                    Availability::RemoteOnly
-                } else {
-                    Availability::Missing
-                };
-                branch(name, availability)
-            })
+            .filter_map(|w| w.branch.clone().map(|b| (b, display_path(&w.path))))
             .collect(),
-        local: local
-            .iter()
-            .filter(|b| !pinned_set.contains(b.as_str()))
-            .map(|b| branch(b, Availability::Ready))
-            .collect(),
-        remote: remote_only
-            .iter()
-            .filter(|b| !pinned_set.contains(b.as_str()))
-            .map(|b| branch(b, Availability::Ready))
-            .collect(),
+        pinned: git::pinned_branches(remote),
+        local,
+        remote_only,
     })
 }
 
