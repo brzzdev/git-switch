@@ -2233,6 +2233,31 @@ fn a_worktree_taken_while_the_wt_picker_is_open_is_entered_not_rebuilt() {
     );
 }
 
+/// The same window again, but with the branch going away rather than gaining a
+/// worktree. Re-reading state answers what the branch needs; it cannot answer
+/// what the user asked for, and a picked row that no longer resolves is not a
+/// request to create the name afresh from the default branch.
+#[test]
+fn a_branch_deleted_while_the_wt_picker_is_open_is_reported_not_recreated() {
+    let (_bare, _parent, work) = setup_with_parent();
+
+    git(&work, &["branch", "target"]);
+
+    let raw = drive_branch_picker(&work, Some("wt"), "target", || {
+        git(&work, &["branch", "-D", "target"]);
+    });
+    let text = String::from_utf8_lossy(&raw);
+
+    assert!(
+        text.contains("no longer exists"),
+        "should report the branch that went away; got: {text}"
+    );
+    assert!(
+        !text.contains("created"),
+        "and must not create a fresh branch in its place; got: {text}"
+    );
+}
+
 /// The stale-branch picker holds the terminal in raw mode, where a bare `\n`
 /// drops a line without returning to column 0. Printing the deletion outcomes
 /// before that mode is released staircases them across the screen, so this

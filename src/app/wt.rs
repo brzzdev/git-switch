@@ -17,6 +17,18 @@ enum Action {
     CreateNewBranch(String),
 }
 
+/// What the user's choice claims about the branch behind it, which the fresh
+/// state alone can't say. A picked row claims the branch existed when the list
+/// was drawn, so a branch that has gone since takes the intent with it — there
+/// is nothing to fall back to that the user asked for. A typed name claims
+/// nothing, whether typed at the shell or into the filter behind "Create new",
+/// and creating it is the point.
+#[derive(Clone, Copy, PartialEq)]
+enum Intent {
+    ByName,
+    Existing,
+}
+
 pub fn run(target: Option<&str>) -> AppResult<()> {
     // A worktree whose directory was deleted by hand can't be entered, so its
     // branch is one to (re)create. `worktree_add`/`checkout` prune the stale
@@ -25,8 +37,8 @@ pub fn run(target: Option<&str>) -> AppResult<()> {
     let current_branch = git::current_branch()?;
     let remote = git::current_remote(current_branch.as_deref());
 
-    let branch = if let Some(name) = target {
-        name.to_string()
+    let (branch, intent) = if let Some(name) = target {
+        (name.to_string(), Intent::ByName)
     } else {
         let Some(picked) = select(&listed, current_branch.as_deref(), &remote)? else {
             return Ok(());
@@ -41,7 +53,7 @@ pub fn run(target: Option<&str>) -> AppResult<()> {
     // path that is no longer there.
     let worktrees = super::live_worktrees()?;
     let main = main_of(&worktrees)?;
-    let action = resolve_target(&branch, &worktrees, &remote)?;
+    let action = resolve_target(&branch, intent, &worktrees, &remote)?;
 
     // The branch comes back alongside the path so the stale prompt can leave the
     // worktree we're about to enter alone.
@@ -386,17 +398,17 @@ fn create_worktree(
     Ok(path)
 }
 
-/// Which branch the user picked, by name. Deciding what that branch *needs* is
-/// deliberately not done here: the answer depends on which worktrees exist,
-/// and this returns while the snapshot behind the list is going stale. A name
-/// is the one part of the answer that can't. The typed "Create new" row is a
-/// name like any other — [`resolve_target`] reads it as a branch that doesn't
-/// exist yet, which is exactly what it is.
+/// Which branch the user picked, by name, and what picking it claimed. Deciding
+/// what that branch *needs* is deliberately not done here: the answer depends on
+/// which worktrees exist, and this returns while the snapshot behind the list is
+/// going stale. The name and the claim are the two parts of the answer that
+/// can't go stale, because they are the user's, not git's — [`resolve_target`]
+/// re-reads everything else.
 fn select(
     worktrees: &[git::Worktree],
     current_branch: Option<&str>,
     remote: &str,
-) -> AppResult<Option<String>> {
+) -> AppResult<Option<(String, Intent)>> {
     let catalogue = build_catalogue(current_branch, remote, worktrees)?;
     let sections = picker::sections(&catalogue, Verb::Worktree);
     // Non-interactive (piped/CI): we can't prompt, so report nothing to open
@@ -414,11 +426,21 @@ fn select(
         keys,
     )?;
     Ok(selection.map(|s| match s {
-        Selection::Existing(name) | Selection::Create(name) => name,
+        Selection::Create(name) => (name, Intent::ByName),
+        Selection::Existing(name) => (name, Intent::Existing),
     }))
 }
 
-fn resolve_target(name: &str, worktrees: &[git::Worktree], remote: &str) -> AppResult<Action> {
+/// What the branch needs, decided against state read after the pick. Falling
+/// through every lookup means no branch by that name exists anywhere, which is
+/// a new branch when the name was typed and an error when it was picked: the
+/// row said the branch was there, so its absence is news, not an instruction.
+fn resolve_target(
+    name: &str,
+    intent: Intent,
+    worktrees: &[git::Worktree],
+    remote: &str,
+) -> AppResult<Action> {
     if let Some(wt) = git::worktree_for_branch(worktrees, name) {
         return Ok(Action::CdToExisting(wt));
     }
@@ -429,6 +451,11 @@ fn resolve_target(name: &str, worktrees: &[git::Worktree], remote: &str) -> AppR
     let remote_only = git::remote_only_branches(&locals, remote).unwrap_or_default();
     if remote_only.iter().any(|b| b == name) {
         return Ok(Action::CreateForBranch(name.to_string()));
+    }
+    if intent == Intent::Existing {
+        return Err(Error::Vanished {
+            branch: name.to_string(),
+        });
     }
     Ok(Action::CreateNewBranch(name.to_string()))
 }
