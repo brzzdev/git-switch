@@ -8,7 +8,7 @@ A fast, interactive Git branch and worktree switcher. Pick a branch, fetch & fas
 - **Auto-stash** — dirty working tree? Changes are stashed before switching and restored after
 - **Fast-forward pull** — fetches from origin and fast-forward merges, warns if the branch has diverged
 - **Merged branch cleanup** — prompts to delete local branches that have been merged into the current branch, including ones held by a worktree (the worktree goes too)
-- **Worktree support** — create, switch into, list, and remove worktrees with `perch wt`
+- **Worktree support** — create, switch into, list, and remove worktrees with `perch wt`; `perch br` is the in-place counterpart
 
 ## Install
 
@@ -63,16 +63,26 @@ This builds a release binary and copies it to `~/.local/bin/perch`. Make sure `~
 
 ## Usage
 
+Three verbs, one per intent:
+
+| Command | Meaning |
+| --- | --- |
+| `perch <branch>` | Take me to it, wherever it lives. Creates nothing. |
+| `perch br <branch>` | Check it out **in place**, in this worktree. |
+| `perch wt <branch>` | Ensure it has its **own** worktree. |
+
 ```sh
 # Interactive — pick a branch from a list
 perch
 
-# Direct — switch to a specific branch
+# Direct — go to a specific branch
 perch main
 
 # Refresh the current branch from its remote
 perch .
 ```
+
+Bare `perch <branch>` is never ambiguous, because git will not let the same branch be checked out twice: if a worktree already holds it, going there is the only legal move, and if none does, checking it out here is. `perch br` is for when you mean *here* specifically — asked for a branch another worktree holds, it names that path and stops rather than quietly moving you.
 
 `perch .` fetches and brings the branch you're on up to date with its remote. A clean branch integrates with no prompt — fast-forwarding, or (when it has diverged, e.g. after rebasing through a web UI) rebasing your local commits onto the remote, which drops any already upstream and replays genuine new work. Only when the working tree is dirty does it stop to ask: **keep** the uncommitted work (stash, rebase, restore) or **discard** it (hard reset to the remote).
 
@@ -112,7 +122,11 @@ A named target like `wt rm .` has no row to carry a marker, so the same informat
 
 Nothing at risk means no prompt at all. `--force` (`-f`) skips it. In a pipe or CI run there's no way to show the warning or ask, so a risky removal refuses and exits non-zero unless you pass `--force`.
 
-Plain `perch <branch>` also knows about worktrees: if the picked branch is already checked out in another worktree, it hands off to that worktree rather than failing with git's "already checked out" error.
+Plain `perch <branch>` also knows about worktrees: if the picked branch is already checked out in another worktree, it hands off to that worktree rather than failing with git's "already checked out" error. `perch br <branch>` is the one that won't, since it promises a checkout here:
+
+```
+error: feature is checked out at ~/dev/worktrees/repo/feature; run `perch feature` to go there
+```
 
 ### Shell integration (required for `cd`)
 

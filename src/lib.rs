@@ -17,6 +17,15 @@ pub enum Error {
     #[error("branch diverged from remote")]
     Diverged,
 
+    /// `br` was asked to check out a branch git already holds in another
+    /// worktree. The message names the path and the verb that does reach it,
+    /// because that hand-off is the whole difference between the two verbs.
+    #[error(
+        "{branch} is checked out at {path}; run `perch {}` to go there",
+        app::shell_quote(branch)
+    )]
+    HeldByWorktree { branch: String, path: String },
+
     #[error("no branches found")]
     NoBranches,
 

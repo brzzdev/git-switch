@@ -1493,6 +1493,52 @@ fn in_place_switch_hands_off_when_branch_is_held_by_worktree() {
     assert_eq!(stdout_str(&head).trim(), "main");
 }
 
+#[test]
+fn br_checks_the_branch_out_in_the_current_worktree() {
+    let (_bare, work) = setup();
+
+    git(work.path(), &["branch", "feature"]);
+
+    let output = perch_args(work.path(), &["br", "feature"]);
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+
+    let head = git(work.path(), &["branch", "--show-current"]);
+    assert_eq!(stdout_str(&head).trim(), "feature");
+}
+
+/// The message is the feature: it's where `br` teaches the verb that does
+/// reach a branch another worktree holds.
+#[test]
+fn br_refuses_a_held_branch_and_names_the_verb_that_reaches_it() {
+    let (_bare, parent, work) = setup_with_parent();
+
+    add_worktree(&work, &parent, "feature");
+
+    let output = perch_args(&work, &["br", "feature"]);
+    assert!(
+        !output.status.success(),
+        "br into a held branch should fail; stderr: {}",
+        stderr_str(&output)
+    );
+
+    // The path may come back with `$HOME` abbreviated to `~`, so match its tail.
+    let stderr = stderr_str(&output);
+    assert!(
+        stderr.contains("worktrees/repo/feature"),
+        "error should name the worktree holding the branch; got: {stderr}"
+    );
+    assert!(
+        stderr.contains("run `perch feature` to go there"),
+        "error should point at the verb that reaches it; got: {stderr}"
+    );
+
+    // No handoff: `br` never prints a path for the shell wrapper to `cd` into.
+    assert_eq!(stdout_str(&output).trim(), "");
+
+    let head = git(&work, &["branch", "--show-current"]);
+    assert_eq!(stdout_str(&head).trim(), "main");
+}
+
 /// Creates a worktree for a new branch and returns its path.
 fn add_worktree(work: &Path, parent: &TempDir, branch: &str) -> PathBuf {
     git(work, &["branch", branch]);

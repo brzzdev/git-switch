@@ -7,17 +7,17 @@ _perch_completions() {
 
   case "$COMP_CWORD" in
     1)
-      COMPREPLY=($(compgen -W "wt worktree $branches" -- "$cur"))
+      COMPREPLY=($(compgen -W "br wt $branches" -- "$cur"))
       ;;
     2)
-      if [[ "$sub" == "wt" || "$sub" == "worktree" ]]; then
-        COMPREPLY=($(compgen -W "ls list rm remove $branches" -- "$cur"))
+      if [[ "$sub" == "wt" ]]; then
+        COMPREPLY=($(compgen -W "ls rm $branches" -- "$cur"))
       else
         COMPREPLY=($(compgen -W "$branches" -- "$cur"))
       fi
       ;;
     3)
-      if [[ "$sub" == "wt" || "$sub" == "worktree" ]] && [[ "$prev" == "rm" || "$prev" == "remove" ]]; then
+      if [[ "$sub" == "wt" && "$prev" == "rm" ]]; then
         COMPREPLY=($(compgen -W "$branches" -- "$cur"))
       fi
       ;;

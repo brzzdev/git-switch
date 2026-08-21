@@ -3,14 +3,12 @@
 _perch() {
   local -a subcommands worktree_subs
   subcommands=(
+    'br:Check a branch out here'
     'wt:Worktree commands'
-    'worktree:Worktree commands'
   )
   worktree_subs=(
     'ls:List worktrees'
-    'list:List worktrees'
     'rm:Remove worktree (also deletes branch)'
-    'remove:Remove worktree (also deletes branch)'
   )
 
   local branches
@@ -19,10 +17,10 @@ _perch() {
   if (( CURRENT == 2 )); then
     _describe -t subcommands 'subcommand' subcommands
     _describe -t branches 'branch' branches
-  elif (( CURRENT == 3 )) && [[ "$words[2]" == (wt|worktree) ]]; then
+  elif (( CURRENT == 3 )) && [[ "$words[2]" == wt ]]; then
     _describe -t subcommands 'worktree subcommand' worktree_subs
     _describe -t branches 'branch' branches
-  elif (( CURRENT == 4 )) && [[ "$words[2]" == (wt|worktree) && "$words[3]" == (rm|remove) ]]; then
+  elif (( CURRENT == 4 )) && [[ "$words[2]" == wt && "$words[3]" == rm ]]; then
     _describe -t branches 'branch' branches
   else
     _describe -t branches 'branch' branches
