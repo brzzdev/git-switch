@@ -1,13 +1,13 @@
-# git-switch shell integration (fish)
+# perch shell integration (fish)
 #
 # Source from ~/.config/fish/conf.d/:
-#   source ~/.config/git-switch/git-switch.fish
+#   source ~/.config/perch/perch.fish
 #
 # Behaviour mirrors the bash/zsh wrapper: the binary prints the target path on
 # stdout only when a cd hand-off is wanted; everything else is on stderr.
 
-function git-switch
-    set -l out (command git-switch $argv)
+function perch
+    set -l out (command perch $argv)
     set -l rc $status
     if test -z "$out"
         return $rc

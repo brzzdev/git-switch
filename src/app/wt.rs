@@ -208,7 +208,7 @@ pub fn run_rm(target: Option<&str>, force: bool) -> AppResult<()> {
         // a removal git refused would be describing something still on disk.
         // It fires after the branch delete rather than between the two steps,
         // so the repo a hook shells into is the one the removal leaves behind
-        // — `GIT_SWITCH_BRANCH` names a branch that has already gone with it.
+        // — `PERCH_BRANCH` names a branch that has already gone with it.
         if remove_one(&mut steps, wt, risks[i], force)? {
             hook::fire(
                 hook::Event::Removed,
@@ -258,7 +258,7 @@ fn select_for_removal(
         );
     };
 
-    // `.` means the worktree the cwd sits in, matching `git-switch .` for the
+    // `.` means the worktree the cwd sits in, matching `perch .` for the
     // current branch. The main worktree isn't removable, so standing in it
     // leaves nothing for `.` to name.
     let i = if name == "." {
@@ -339,7 +339,7 @@ pub(crate) fn update_in(path: &Path, branch: &str, remote: &str) -> AppResult<()
 }
 
 /// Creates the worktree for `branch` and reports it — to the user, and to the
-/// created hook. Every worktree `git-switch` creates comes through here, which
+/// created hook. Every worktree `perch` creates comes through here, which
 /// is what makes the hook a consequence of creation and of nothing else rather
 /// than a line each creation arm has to remember.
 fn create_worktree(

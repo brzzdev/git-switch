@@ -1,4 +1,4 @@
-_git_switch_completions() {
+_perch_completions() {
   local cur="${COMP_WORDS[COMP_CWORD]}"
   local prev="${COMP_WORDS[COMP_CWORD-1]}"
   local sub="${COMP_WORDS[1]}"
@@ -24,4 +24,4 @@ _git_switch_completions() {
   esac
 }
 
-complete -F _git_switch_completions git-switch
+complete -F _perch_completions perch

@@ -1,6 +1,6 @@
-# git-switch
+# perch
 
-A fast, interactive Git branch switcher. Pick a branch, fetch & fast-forward it, and clean up merged branches — all in one step.
+A fast, interactive Git branch and worktree switcher. Pick a branch, fetch & fast-forward it, and clean up merged branches — all in one step.
 
 ## Features
 
@@ -8,7 +8,7 @@ A fast, interactive Git branch switcher. Pick a branch, fetch & fast-forward it,
 - **Auto-stash** — dirty working tree? Changes are stashed before switching and restored after
 - **Fast-forward pull** — fetches from origin and fast-forward merges, warns if the branch has diverged
 - **Merged branch cleanup** — prompts to delete local branches that have been merged into the current branch, including ones held by a worktree (the worktree goes too)
-- **Worktree support** — create, switch into, list, and remove worktrees with `git-switch wt`
+- **Worktree support** — create, switch into, list, and remove worktrees with `perch wt`
 
 ## Install
 
@@ -26,17 +26,17 @@ TARGET=aarch64-unknown-linux-musl
 # Linux (x86_64)
 TARGET=x86_64-unknown-linux-musl
 
-curl -fsSL "https://github.com/brzzdev/git-switch/releases/latest/download/git-switch-$TARGET.tar.gz" | tar -xz
-cd "git-switch-$TARGET"
+curl -fsSL "https://github.com/brzzdev/perch/releases/latest/download/perch-$TARGET.tar.gz" | tar -xz
+cd "perch-$TARGET"
 
 # The binary
-mkdir -p ~/.local/bin && mv git-switch ~/.local/bin/
+mkdir -p ~/.local/bin && mv perch ~/.local/bin/
 
 # Shell integration — required for worktree `cd` hand-off (see below)
-mkdir -p ~/.config/git-switch && cp shell/* ~/.config/git-switch/
+mkdir -p ~/.config/perch && cp shell/* ~/.config/perch/
 
 # Completions, for zsh
-mkdir -p ~/.zsh/completions && cp completions/_git-switch ~/.zsh/completions/
+mkdir -p ~/.zsh/completions && cp completions/_perch ~/.zsh/completions/
 ```
 
 Make sure `~/.local/bin` is on your `PATH`, then add the shell integration line to your rc — see [Shell integration](#shell-integration-required-for-cd) for that and [Shell Completions](#shell-completions) for bash and fish.
@@ -46,7 +46,7 @@ The Linux builds are statically linked against musl, so they run on any distribu
 The macOS binaries aren't signed or notarized. Downloading with `curl` as above is fine — quarantine is applied by the downloader, and `curl` doesn't set it. If you download through a browser instead, macOS will refuse to run the binary until you clear the flag:
 
 ```sh
-xattr -d com.apple.quarantine ~/.local/bin/git-switch
+xattr -d com.apple.quarantine ~/.local/bin/perch
 ```
 
 ### Build from source
@@ -54,46 +54,46 @@ xattr -d com.apple.quarantine ~/.local/bin/git-switch
 Requires [Rust](https://rustup.rs) and [just](https://github.com/casey/just).
 
 ```sh
-git clone https://github.com/brzzdev/git-switch.git
-cd git-switch
+git clone https://github.com/brzzdev/perch.git
+cd perch
 just install
 ```
 
-This builds a release binary and copies it to `~/.local/bin/git-switch`. Make sure `~/.local/bin` is on your `PATH`.
+This builds a release binary and copies it to `~/.local/bin/perch`. Make sure `~/.local/bin` is on your `PATH`.
 
 ## Usage
 
 ```sh
 # Interactive — pick a branch from a list
-git-switch
+perch
 
 # Direct — switch to a specific branch
-git-switch main
+perch main
 
 # Refresh the current branch from its remote
-git-switch .
+perch .
 ```
 
-`git-switch .` fetches and brings the branch you're on up to date with its remote. A clean branch integrates with no prompt — fast-forwarding, or (when it has diverged, e.g. after rebasing through a web UI) rebasing your local commits onto the remote, which drops any already upstream and replays genuine new work. Only when the working tree is dirty does it stop to ask: **keep** the uncommitted work (stash, rebase, restore) or **discard** it (hard reset to the remote).
+`perch .` fetches and brings the branch you're on up to date with its remote. A clean branch integrates with no prompt — fast-forwarding, or (when it has diverged, e.g. after rebasing through a web UI) rebasing your local commits onto the remote, which drops any already upstream and replays genuine new work. Only when the working tree is dirty does it stop to ask: **keep** the uncommitted work (stash, rebase, restore) or **discard** it (hard reset to the remote).
 
 ## Worktrees
 
 ```sh
 # Interactive picker: existing worktrees + branches without one; "Create new: <typed>" when filter matches nothing
-git-switch wt
+perch wt
 
 # DWIM — switch into the worktree for `feature`, or create one if it doesn't exist.
 # If `feature` doesn't exist as a branch, a new one is created from the remote's default branch.
-git-switch wt feature
+perch wt feature
 
 # List all worktrees
-git-switch wt ls
+perch wt ls
 
 # Remove one or more worktrees, deleting the branch along with them
-git-switch wt rm           # multi-select picker
-git-switch wt rm feature   # specific
-git-switch wt rm .         # the worktree you're standing in
-git-switch wt rm . --force # …without being asked about uncommitted work
+perch wt rm           # multi-select picker
+perch wt rm feature   # specific
+perch wt rm .         # the worktree you're standing in
+perch wt rm . --force # …without being asked about uncommitted work
 ```
 
 Worktrees land at `../worktrees/<repo>/<branch>` relative to the main checkout. Branch names with slashes (`feature/foo`) preserve their structure as subdirectories.
@@ -112,7 +112,7 @@ A named target like `wt rm .` has no row to carry a marker, so the same informat
 
 Nothing at risk means no prompt at all. `--force` (`-f`) skips it. In a pipe or CI run there's no way to show the warning or ask, so a risky removal refuses and exits non-zero unless you pass `--force`.
 
-Plain `git-switch <branch>` also knows about worktrees: if the picked branch is already checked out in another worktree, it hands off to that worktree rather than failing with git's "already checked out" error.
+Plain `perch <branch>` also knows about worktrees: if the picked branch is already checked out in another worktree, it hands off to that worktree rather than failing with git's "already checked out" error.
 
 ### Shell integration (required for `cd`)
 
@@ -121,12 +121,12 @@ A child process can't change its parent shell's directory. Worktree commands pri
 ```sh
 just install-shell-integration
 # Then add the printed line to your shell rc (e.g. ~/.zshrc):
-#   source ~/.config/git-switch/git-switch.sh
+#   source ~/.config/perch/perch.sh
 ```
 
-Installing from a release tarball? The same files ship in its `shell/` directory — copy them to `~/.config/git-switch/` and source the one for your shell (`git-switch.sh` for zsh and bash, `git-switch.fish` for fish).
+Installing from a release tarball? The same files ship in its `shell/` directory — copy them to `~/.config/perch/` and source the one for your shell (`perch.sh` for zsh and bash, `perch.fish` for fish).
 
-Without the wrapper, `git-switch wt foo` still creates / finds the worktree and prints its path — you'd just `cd` there manually.
+Without the wrapper, `perch wt foo` still creates / finds the worktree and prints its path — you'd just `cd` there manually.
 
 ## Shell Completions
 
@@ -140,9 +140,9 @@ This installs the appropriate completion script for your current shell. From a r
 
 | Shell | File | Destination |
 | ----- | ---- | ----------- |
-| zsh | `_git-switch` | `~/.zsh/completions/_git-switch` |
-| bash | `git-switch.bash` | `~/.local/share/bash-completion/completions/git-switch` |
-| fish | `git-switch.fish` | `~/.config/fish/completions/git-switch.fish` |
+| zsh | `_perch` | `~/.zsh/completions/_perch` |
+| bash | `perch.bash` | `~/.local/share/bash-completion/completions/perch` |
+| fish | `perch.fish` | `~/.config/fish/completions/perch.fish` |
 
 For zsh, make sure `~/.zsh/completions` is in your `fpath` before `compinit`:
 
@@ -153,7 +153,7 @@ autoload -Uz compinit && compinit
 
 ## Cleaning up stale branches
 
-After a switch, git-switch offers to delete branches that have outlived their purpose — those whose work has landed on your default branch, and those whose upstream has been deleted. Nothing is judged against the worktree you happen to be standing in: the default branch is the yardstick. A branch you just created and haven't committed to isn't offered, unless you cut it from a default branch that was itself ahead of or behind its remote, in which case it borrows that branch's position and can be — see [ADR 0002](docs/adr/0002-staleness-is-anchored-to-the-default-branch.md) for why no amount of ref-reading tells the two apart. A branch checked out in another worktree appears here too, annotated with the worktree that holds it; deleting it removes that worktree as well:
+After a switch, `perch` offers to delete branches that have outlived their purpose — those whose work has landed on your default branch, and those whose upstream has been deleted. Nothing is judged against the worktree you happen to be standing in: the default branch is the yardstick. A branch you just created and haven't committed to isn't offered, unless you cut it from a default branch that was itself ahead of or behind its remote, in which case it borrows that branch's position and can be — see [ADR 0002](docs/adr/0002-staleness-is-anchored-to-the-default-branch.md) for why no amount of ref-reading tells the two apart. A branch checked out in another worktree appears here too, annotated with the worktree that holds it; deleting it removes that worktree as well:
 
 ```
 ? Delete stale branches (space to toggle, →/← all/none)
@@ -164,15 +164,15 @@ After a switch, git-switch offers to delete branches that have outlived their pu
 
 The markers mean the same thing as in `wt rm`: `●` for a worktree with uncommitted changes, `↑` for commits that aren't merged anywhere — the case where a branch's remote was deleted while it still held unpushed work. `(+ worktree, missing)` marks a leftover registration whose directory is already gone. Every deletion reports itself, naming the path of any worktree that was removed.
 
-A branch that landed by squash or rebase merge draws no `↑`, and is deleted without being asked about. Git considers it unmerged — its commits are nowhere in your default branch under those hashes — but its work is there under other ones, so the warning would name commits nothing can lose. git-switch proves that for itself, locally: either the anchor already carries the branch's patch (git's own test, the one `git rebase` uses to drop redundant commits), or the files the branch touched now read identically there. It only ever *removes* a warning — a branch it can't prove keeps its marker, and one whose proof it can't establish at all is treated as holding unique work. See [ADR 0005](docs/adr/0005-proof-of-equivalence-is-a-license.md).
+A branch that landed by squash or rebase merge draws no `↑`, and is deleted without being asked about. Git considers it unmerged — its commits are nowhere in your default branch under those hashes — but its work is there under other ones, so the warning would name commits nothing can lose. `perch` proves that for itself, locally: either the anchor already carries the branch's patch (git's own test, the one `git rebase` uses to drop redundant commits), or the files the branch touched now read identically there. It only ever *removes* a warning — a branch it can't prove keeps its marker, and one whose proof it can't establish at all is treated as holding unique work. See [ADR 0005](docs/adr/0005-proof-of-equivalence-is-a-license.md).
 
 ## Configuration
 
 Protect branches from the "delete merged branches" prompt by adding them to your Git config:
 
 ```sh
-git config --add git-switch.keep develop
-git config --add git-switch.keep staging
+git config --add perch.keep develop
+git config --add perch.keep staging
 ```
 
 ### Worktree hooks
@@ -180,22 +180,22 @@ git config --add git-switch.keep staging
 Run a shell command when a worktree is created or removed — to open it in an editor, register it with a session manager, or forget it again when it goes:
 
 ```sh
-git config git-switch.hook.created 'my-editor open "$GIT_SWITCH_WORKTREE"'
-git config git-switch.hook.removed 'my-editor forget "$GIT_SWITCH_WORKTREE"'
+git config perch.hook.created 'my-editor open "$PERCH_WORKTREE"'
+git config perch.hook.removed 'my-editor forget "$PERCH_WORKTREE"'
 ```
 
 Each command runs via `sh -c` from the main checkout, with:
 
 | Variable | Value |
 | -------- | ----- |
-| `GIT_SWITCH_BRANCH` | The worktree's branch, empty for a detached one |
-| `GIT_SWITCH_EVENT` | `created` or `removed` |
-| `GIT_SWITCH_MAIN` | Absolute path of the main checkout |
-| `GIT_SWITCH_WORKTREE` | Absolute path of the worktree the event is about |
+| `PERCH_BRANCH` | The worktree's branch, empty for a detached one |
+| `PERCH_EVENT` | `created` or `removed` |
+| `PERCH_MAIN` | Absolute path of the main checkout |
+| `PERCH_WORKTREE` | Absolute path of the worktree the event is about |
 
 `created` fires the moment the worktree exists, before the stale-branch prompt. `removed` fires once per worktree, only after one is actually gone — so the path it names no longer exists on disk. Both cover every route: `removed` fires for a worktree taken along by the stale-branch cleanup just as it does for `wt rm`, since a hook mirrors what happened to the repo rather than which command you typed.
 
-A hook is told what happened; it is never asked. It cannot refuse a removal or license a forcing, and a non-zero exit is warned about and otherwise ignored. Its stdout is re-emitted on stderr, since stdout carries the path the shell wrapper `cd`s into; its stderr passes through. Set `GIT_SWITCH_NO_HOOKS=1` — or any non-empty value — to turn hooks off for a run. See [ADR 0003](docs/adr/0003-hooks-are-told-never-asked.md) for the reasoning.
+A hook is told what happened; it is never asked. It cannot refuse a removal or license a forcing, and a non-zero exit is warned about and otherwise ignored. Its stdout is re-emitted on stderr, since stdout carries the path the shell wrapper `cd`s into; its stderr passes through. Set `PERCH_NO_HOOKS=1` — or any non-empty value — to turn hooks off for a run. See [ADR 0003](docs/adr/0003-hooks-are-told-never-asked.md) for the reasoning.
 
 ## License
 

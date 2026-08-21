@@ -90,7 +90,7 @@ pub fn has_tracked_changes() -> AppResult<bool> {
 }
 
 pub fn stash_push() -> AppResult<()> {
-    run(&["stash", "push", "--quiet", "-m", "git-switch: auto-stash"])?;
+    run(&["stash", "push", "--quiet", "-m", "perch: auto-stash"])?;
     Ok(())
 }
 
@@ -498,7 +498,7 @@ pub fn stale_branches(remote: &str) -> AppResult<Vec<StaleBranch>> {
 }
 
 /// Branches treated as "pinned" by the picker: the remote's default branch
-/// first, then `git-switch.keep` entries in config order, deduplicated.
+/// first, then `perch.keep` entries in config order, deduplicated.
 #[must_use]
 pub fn pinned_branches(remote: &str) -> Vec<String> {
     let mut seen: HashSet<String> = HashSet::new();
@@ -507,7 +507,7 @@ pub fn pinned_branches(remote: &str) -> Vec<String> {
         seen.insert(default.clone());
         out.push(default);
     }
-    if let Ok(output) = run(&["config", "--get-all", "git-switch.keep"]) {
+    if let Ok(output) = run(&["config", "--get-all", "perch.keep"]) {
         for line in output.lines() {
             let name = line.trim();
             if !name.is_empty() && seen.insert(name.to_string()) {
@@ -518,13 +518,13 @@ pub fn pinned_branches(remote: &str) -> Vec<String> {
     out
 }
 
-/// The shell command configured as `git-switch.hook.<event>`, or `None` when
-/// it's unset or blank. Read straight from git config like `git-switch.keep`,
-/// so a global hook and a per-repo override layer the way git says they do —
-/// `--get` yields the last value, and last wins.
+/// The shell command configured as `perch.hook.<event>`, or `None` when it's
+/// unset or blank. Read straight from git config like `perch.keep`, so a global
+/// hook and a per-repo override layer the way git says they do — `--get` yields
+/// the last value, and last wins.
 #[must_use]
 pub fn hook_command(event: &str) -> Option<String> {
-    let key = format!("git-switch.hook.{event}");
+    let key = format!("perch.hook.{event}");
     let output = run(&["config", "--get", &key]).ok()?;
     let command = output.trim();
     if command.is_empty() {
@@ -548,7 +548,7 @@ pub(crate) fn default_branch(remote: &str) -> Option<String> {
 }
 
 fn kept_branches(remote: &str) -> HashSet<String> {
-    let mut kept: HashSet<String> = run(&["config", "--get-all", "git-switch.keep"])
+    let mut kept: HashSet<String> = run(&["config", "--get-all", "perch.keep"])
         .map(|o| o.lines().map(String::from).collect())
         .unwrap_or_default();
     if let Some(default) = default_branch(remote) {
@@ -826,7 +826,7 @@ fn patch_landed(dir: Option<&Path>, anchor: &str, tip: &str, base: &str) -> bool
                 "-p",
                 base,
                 "-m",
-                "git-switch: equivalence probe",
+                "perch: equivalence probe",
             ],
         )
         .ok()?;
@@ -895,7 +895,7 @@ fn content_present(dir: Option<&Path>, anchor: &str, tip: &str, base: &str) -> b
     let Ok(listing) = run_in(dir, &listing_args) else {
         return false;
     };
-    // A path git-switch cannot read is a path it cannot compare: `run_in` decodes
+    // A path perch cannot read is a path it cannot compare: `run_in` decodes
     // lossily, and a mangled path matches nothing as a pathspec — which `git
     // diff --quiet` reports as no difference, proving the branch on an empty
     // comparison. Refuse the whole answer rather than a silent subset.
@@ -1280,7 +1280,7 @@ pub enum BranchDeleteOutcome {
     /// git's reason, since no key was ever read to name.
     DeletedConfigUnverified(String),
     /// Deleted, but config of its own outlived it — the keys, so the user can
-    /// clear what git-switch couldn't.
+    /// clear what `perch` couldn't.
     DeletedLeavingConfig(String),
     /// Deleted at `tip`, and confirmed gone after putting it back failed. The
     /// one outcome describing a repository that needs repair — `holder` says

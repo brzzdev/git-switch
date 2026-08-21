@@ -3,7 +3,7 @@
 //! 0001](../../docs/adr/0001-warned-means-forceable.md) live.
 //!
 //! Both destruction flows — the stale-branch prompt that follows a switch, and
-//! `git-switch wt rm` — come through [`remove`]. It performs the steps in the
+//! `perch wt rm` — come through [`remove`]. It performs the steps in the
 //! only order that works, forces only what its [`License`] covers, and returns
 //! what happened. It prints nothing: the wording belongs to
 //! [`reporting`](super::reporting), which the [`Report`] is handed to whole.

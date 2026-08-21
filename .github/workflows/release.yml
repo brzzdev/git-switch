@@ -42,17 +42,17 @@ jobs:
       # completions and shell wrappers `just install-*` would otherwise supply.
       - name: Stage the archive contents
         run: |
-          stage="git-switch-${{ matrix.target }}"
+          stage="perch-${{ matrix.target }}"
           mkdir -p "$stage"
-          cp "target/${{ matrix.target }}/release/git-switch" "$stage/"
+          cp "target/${{ matrix.target }}/release/perch" "$stage/"
           cp -R completions shell "$stage/"
           cp README.md LICENSE "$stage/"
           tar -czf "$stage.tar.gz" "$stage"
 
       - uses: actions/upload-artifact@v7
         with:
-          name: git-switch-${{ matrix.target }}
-          path: git-switch-${{ matrix.target }}.tar.gz
+          name: perch-${{ matrix.target }}
+          path: perch-${{ matrix.target }}.tar.gz
 
   release:
     needs: build

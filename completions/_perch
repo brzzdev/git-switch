@@ -1,6 +1,6 @@
-#compdef git-switch
+#compdef perch
 
-_git-switch() {
+_perch() {
   local -a subcommands worktree_subs
   subcommands=(
     'wt:Worktree commands'
@@ -29,4 +29,4 @@ _git-switch() {
   fi
 }
 
-_git-switch "$@"
+_perch "$@"

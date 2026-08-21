@@ -1,4 +1,4 @@
-# git-switch
+# perch
 
 An interactive Git branch and worktree switcher. Its domain is the small set of judgements it makes on the user's behalf: which branches have outlived their purpose, which worktrees can go, and what may be destroyed without asking first.
 
@@ -27,7 +27,7 @@ A branch whose whole diff against the anchor is already in the anchor, under som
 _Avoid_: Squashed, duplicate, redundant
 
 **Kept**:
-Pinned out of the cleanup prompt, via `git-switch.keep` config or by being the remote's default branch.
+Pinned out of the cleanup prompt, via `perch.keep` config or by being the remote's default branch.
 _Avoid_: Protected, ignored, excluded
 
 ### Worktrees
@@ -73,7 +73,7 @@ _Avoid_: Deletion (reserved for branches), cleanup, teardown
 ### Targets
 
 **`.`**:
-The one you're in. `git-switch .` refreshes the current branch; `git-switch wt rm .` removes the current worktree.
+The one you're in. `perch .` refreshes the current branch; `perch wt rm .` removes the current worktree.
 _Avoid_: Here, current, self
 
 **Handoff**:
@@ -83,5 +83,5 @@ _Avoid_: Jump, teleport, redirect
 ### Hooks
 
 **Hook**:
-A user command run after a worktree is created or removed. A hook is told what happened; it is never asked. It cannot refuse a *Removal*, grant a *License*, or change anything git-switch does — one that fails is reported and ignored. See [ADR 0003](./docs/adr/0003-hooks-are-told-never-asked.md).
+A user command run after a worktree is created or removed. A hook is told what happened; it is never asked. It cannot refuse a *Removal*, grant a *License*, or change anything `perch` does — one that fails is reported and ignored. See [ADR 0003](./docs/adr/0003-hooks-are-told-never-asked.md).
 _Avoid_: Callback, plugin, trigger, integration
