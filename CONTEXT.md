@@ -37,7 +37,7 @@ Of a branch, checked out in some worktree. Git forbids the same branch in two wo
 _Avoid_: Locked, checked out, in use
 
 **Missing**:
-A worktree still registered in `.git/worktrees` whose directory is gone — git calls this *prunable*. It cannot be entered, but still blocks its branch from being checked out or deleted. Of a worktree only: a branch that exists nowhere is *Absent*.
+A worktree still registered in `.git/worktrees` whose directory is gone — git calls this *prunable*. It cannot be entered, and it blocks its branch from being checked out or deleted — but only until something prunes the dead registration, which both `checkout` and `worktree add` do for themselves before retrying. So it blocks git and not `perch`, which is why the *Catalogue* treats it as holding nothing. Of a worktree only: a branch that exists nowhere is *Absent*.
 _Avoid_: Stale (reserved for branches), dead, orphaned
 
 **Dirty**:
@@ -77,7 +77,7 @@ Which of three intents a command carries: bare `perch` goes to the branch wherev
 _Avoid_: Mode, action
 
 **Catalogue**:
-Every branch the repo offers, paired with the worktree *Held*ing it. It is what the picker is built from and is the same for all three *Verb*s — a verb changes what selecting a row does, never what is listed. Turning it into rows is pure: given the branches and the worktrees, the *Annotation*s and the unselectable rows follow. See [ADR 0008](./docs/adr/0008-one-list-whichever-verb-is-picking.md).
+Every branch the repo offers, paired with the worktree *Held*ing it — a *Missing* one excepted, since it can be pruned out of the way and so holds nothing anything here has to route around. It is what the picker is built from and is the same for all three *Verb*s — a verb changes what selecting a row does, never what is listed. Turning it into rows is pure: given the branches and the worktrees, the *Annotation*s and the unselectable rows follow. A catalogue is a snapshot, so what is decided *from* one — where to hand the shell off, above all — reads the worktrees again rather than trusting it. See [ADR 0008](./docs/adr/0008-one-list-whichever-verb-is-picking.md).
 _Avoid_: Candidates, options, menu
 
 **Annotation**:

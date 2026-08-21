@@ -632,14 +632,14 @@ fn render(term: &Term, view: &View, cursor: usize, filter: &str, prompt_label: &
         && let Some(h) = cursor_heading_row
         && let RowKind::Heading(text) = &view.rows[h].kind
     {
-        let line = style(text).bold().dim().to_string();
+        let line = style(clip_end(text, width)).bold().dim().to_string();
         render_line(&line);
         drawn += visual_rows(&line, width);
     }
 
     let end = (scroll + content_h).min(total_rows);
     for r in scroll..end {
-        let line = format_row(&view.rows[r], r == cursor_row, view.name_column);
+        let line = format_row(&view.rows[r], r == cursor_row, view.name_column, width);
         render_line(&line);
         drawn += visual_rows(&line, width);
     }
@@ -647,25 +647,100 @@ fn render(term: &Term, view: &View, cursor: usize, filter: &str, prompt_label: &
     drawn
 }
 
-fn format_row(row: &RenderRow, is_cursor: bool, name_column: usize) -> String {
+/// Columns every item row spends before the name: two of indent, the cursor,
+/// and the `*` column, each followed by a space.
+const ROW_INDENT: usize = 6;
+
+/// Shortens `text` to `width` columns, keeping the head and marking the cut —
+/// a branch name reads from the left.
+fn clip_end(text: &str, width: usize) -> String {
+    if measure_text_width(text) <= width {
+        return text.to_string();
+    }
+    let mut out = String::new();
+    // The ellipsis has to fit too, so it is spent before anything else.
+    let mut used = 1;
+    for c in text.chars() {
+        let w = measure_text_width(&c.to_string());
+        if used + w > width {
+            break;
+        }
+        out.push(c);
+        used += w;
+    }
+    out.push('…');
+    out
+}
+
+/// Shortens `text` to `width` columns, keeping the *tail* — a worktree path is
+/// identified by where it ends, and so is the hint on a disabled row.
+fn clip_start(text: &str, width: usize) -> String {
+    if measure_text_width(text) <= width {
+        return text.to_string();
+    }
+    let mut tail = Vec::new();
+    let mut used = 1;
+    for c in text.chars().rev() {
+        let w = measure_text_width(&c.to_string());
+        if used + w > width {
+            break;
+        }
+        tail.push(c);
+        used += w;
+    }
+    let mut out = String::from("…");
+    out.extend(tail.into_iter().rev());
+    out
+}
+
+/// Renders a row, clipped to fit `width` in one terminal line.
+///
+/// Fitting is not cosmetic: [`render`] budgets its viewport in logical rows, so
+/// a row that wrapped would spend more of the screen than it was allotted, push
+/// the prompt off the top, and strand output where `clear_last_lines` can't
+/// reach it. Annotations are worktree paths, which are long, so this is the
+/// ordinary case rather than an edge one.
+fn format_row(row: &RenderRow, is_cursor: bool, name_column: usize, width: usize) -> String {
+    let cursor = if is_cursor { ">" } else { " " };
     match &row.kind {
-        RowKind::Heading(text) => style(text).bold().dim().to_string(),
+        RowKind::Heading(text) => style(clip_end(text, width)).bold().dim().to_string(),
         RowKind::Item(pick) => {
-            let cursor = if is_cursor { ">" } else { " " };
             // The `*` reserves its column on every row, so names line up and
             // stepping down the list doesn't shuffle them sideways.
             let mark = if pick.is_current { "*" } else { " " };
-            let head = format!("  {cursor} {mark} {}", pick.name);
+            let body = width.saturating_sub(ROW_INDENT);
+
+            // Only the terminal clips a name; `name_column` is a padding target
+            // that a longer name simply overruns, pushing its annotation right,
+            // exactly as `align_labels` leaves an over-wide name unpadded.
+            let name = clip_end(&pick.name, body.max(1));
+            let name_w = measure_text_width(&name);
             // Padded here rather than by `align_labels`, which joins the pair
             // into one string: the name and its annotation are styled
             // separately, so they have to stay separate.
-            let pad = " ".repeat(name_column.saturating_sub(measure_text_width(&pick.name)));
+            let pad_w = name_column
+                .saturating_sub(name_w)
+                .min(body.saturating_sub(name_w));
+            let pad = " ".repeat(pad_w);
+            let room = body.saturating_sub(name_w + pad_w + 2);
+
+            // Below a few columns there is no annotation worth reading, and a
+            // bare name beats a lone ellipsis.
             let line = match pick.annotation.as_str() {
-                "" => head,
-                // A disabled row is dimmed whole below, so dimming the
-                // annotation here as well would only double the escape codes.
-                annotation if pick.disabled => format!("{head}{pad}  {annotation}"),
-                annotation => format!("{head}{pad}  {}", style(annotation).dim()),
+                "" => format!("  {cursor} {mark} {name}"),
+                _ if room < 2 => format!("  {cursor} {mark} {name}"),
+                annotation if pick.disabled => {
+                    // A disabled row is dimmed whole below, so dimming the
+                    // annotation here as well would only double the escapes.
+                    format!(
+                        "  {cursor} {mark} {name}{pad}  {}",
+                        clip_start(annotation, room)
+                    )
+                }
+                annotation => format!(
+                    "  {cursor} {mark} {name}{pad}  {}",
+                    style(clip_start(annotation, room)).dim()
+                ),
             };
             if pick.disabled {
                 style(line).dim().to_string()
@@ -674,11 +749,14 @@ fn format_row(row: &RenderRow, is_cursor: bool, name_column: usize) -> String {
             }
         }
         RowKind::CreateNew(name) => {
-            let cursor = if is_cursor { ">" } else { " " };
+            let label = clip_end(
+                &format!("Create new: {name}"),
+                width.saturating_sub(ROW_INDENT),
+            );
             format!(
                 "  {cursor} {} {}",
                 style("+").green().bold(),
-                style(format!("Create new: {name}")).italic()
+                style(label).italic()
             )
         }
     }
@@ -1347,6 +1425,75 @@ mod tests {
         let sections = sections(&catalogue, Verb::Here);
         let sel = run_pick(&sections, SELECT_OPTS, vec![Key::Enter]);
         assert_eq!(picked_name(sel).as_deref(), Some("spike"));
+    }
+
+    /// Strips styling so a row asserts as the user sees it.
+    fn plain(s: &str) -> String {
+        console::strip_ansi_codes(s).into_owned()
+    }
+
+    fn item_row(name: &str, annotation: &str, disabled: bool) -> RenderRow {
+        RenderRow {
+            kind: RowKind::Item(Pick {
+                name: name.to_string(),
+                is_current: false,
+                annotation: annotation.to_string(),
+                disabled,
+            }),
+            section_idx: 0,
+        }
+    }
+
+    /// The viewport budgets one terminal line per row, so a row that wrapped
+    /// would spend screen it was never allotted — pushing the prompt off the
+    /// top and stranding output `clear_last_lines` can't reach.
+    #[test]
+    fn a_row_never_exceeds_the_terminal_width() {
+        let long = "/Users/someone/Developer/Personal/worktrees/repo/feature";
+        for width in [10, 20, 40, 80] {
+            for disabled in [false, true] {
+                let row = item_row("feature", long, disabled);
+                let drawn = plain(&format_row(&row, true, 7, width));
+                assert!(
+                    measure_text_width(&drawn) <= width,
+                    "{width}-column row overflowed (disabled={disabled}): {drawn:?}"
+                );
+            }
+        }
+    }
+
+    /// A path is identified by where it ends, so the tail is what survives.
+    #[test]
+    fn a_clipped_annotation_keeps_its_tail() {
+        let row = item_row(
+            "feature",
+            "/very/long/path/to/worktrees/repo/feature",
+            false,
+        );
+        let drawn = plain(&format_row(&row, false, 7, 40));
+        assert!(
+            drawn.ends_with("worktrees/repo/feature"),
+            "should keep the identifying tail, got: {drawn:?}"
+        );
+        assert!(drawn.contains('…'), "and mark the cut, got: {drawn:?}");
+    }
+
+    /// A branch name reads from the left, and it outranks its annotation: with
+    /// too little room for both, the annotation goes rather than being cut to a
+    /// lone ellipsis.
+    #[test]
+    fn a_narrow_row_keeps_the_name_and_drops_the_annotation() {
+        let row = item_row("feature", "/very/long/path", false);
+        let drawn = plain(&format_row(&row, false, 7, 14));
+        assert_eq!(drawn, "      feature");
+    }
+
+    #[test]
+    fn clipping_marks_the_cut_at_the_end_it_took_from() {
+        assert_eq!(clip_end("abcdefgh", 4), "abc…");
+        assert_eq!(clip_start("abcdefgh", 4), "…fgh");
+        assert_eq!(clip_end("short", 10), "short", "untouched where it fits");
+        assert_eq!(clip_start("short", 10), "short");
     }
 
     #[test]

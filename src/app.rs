@@ -90,15 +90,23 @@ fn run_verb(verb: Verb, target: Option<&str>) -> AppResult<()> {
         return refresh_current(&remote, current);
     }
 
-    let worktrees = live_worktrees()?;
-
-    let target = match target {
-        Some(name) => name.to_string(),
-        None => match select_branch(old_branch.as_deref(), &remote, &worktrees, verb)? {
-            Some(t) => t,
-            None => return Ok(()),
-        },
+    let target = if let Some(name) = target {
+        name.to_string()
+    } else {
+        let listed = live_worktrees()?;
+        let Some(picked) = select_branch(old_branch.as_deref(), &remote, &listed, verb)? else {
+            return Ok(());
+        };
+        picked
     };
+
+    // Read the worktrees again rather than reusing what the picker was drawn
+    // from: that snapshot was taken before it opened, and the picker then sat
+    // waiting on a keystroke. A worktree taken on the target in the meantime
+    // would be missed here, and git refuses the checkout this would otherwise
+    // attempt; one removed in the meantime would send the shell somewhere that
+    // no longer exists.
+    let worktrees = live_worktrees()?;
 
     // `git checkout` refuses for a branch already checked out in another
     // worktree; hand off to the shell wrapper instead.
