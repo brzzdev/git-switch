@@ -42,7 +42,28 @@ fn interactive_term() -> Option<Term> {
     term.is_term().then_some(term)
 }
 
+/// How far a verb may reach for its branch. This is the whole of what separates
+/// `perch <name>` from `perch br <name>`: a branch another worktree holds is out
+/// of `br`'s reach, since a checkout *here* is all `br` promises.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Reach {
+    /// `perch <name>` — hand off to the worktree holding the branch.
+    Anywhere,
+    /// `perch br <name>` — refuse, naming the path and the verb that reaches it.
+    Here,
+}
+
+/// `perch [<branch>]` — take me to the branch, wherever it lives.
 pub fn run(target: Option<&str>) -> AppResult<()> {
+    run_reach(Reach::Anywhere, target)
+}
+
+/// `perch br [<branch>]` — check the branch out here, in this worktree.
+pub fn run_br(target: Option<&str>) -> AppResult<()> {
+    run_reach(Reach::Here, target)
+}
+
+fn run_reach(reach: Reach, target: Option<&str>) -> AppResult<()> {
     let old_branch = git::current_branch()?;
     let remote = git::current_remote(old_branch.as_deref());
 
@@ -71,6 +92,13 @@ pub fn run(target: Option<&str>) -> AppResult<()> {
         && let Some(held_by) =
             git::worktree_for_branch(&git::worktree_list()?, &target).filter(|w| !w.prunable)
     {
+        // `br` promises a checkout *here*, so it can't quietly `cd` elsewhere.
+        if reach == Reach::Here {
+            return Err(Error::HeldByWorktree {
+                branch: target,
+                path: display_path(&held_by.path),
+            });
+        }
         // The target may track a different remote than the current branch.
         let target_remote = git::current_remote(Some(target.as_str()));
         if let Err(e) = wt::update_in(&held_by.path, &target, &target_remote) {
@@ -84,7 +112,7 @@ pub fn run(target: Option<&str>) -> AppResult<()> {
             "{} {} is checked out at {}",
             style("→").cyan().bold(),
             target,
-            held_by.path.display()
+            display_path(&held_by.path)
         );
         // `target` is where we're about to hand off, so it must not be on offer.
         if let Err(e) = prompt_delete_stale_branches(None, Some(&target), &remote) {
@@ -829,6 +857,21 @@ fn delete_stale_row(
 ///
 /// Quoting alone doesn't cover a name that looks like an option, so the commands
 /// built from this pass `--` before the ref as well.
+/// How to spell `branch` as the argument to a bare `perch`, so that telling
+/// someone to run it actually reaches the branch.
+///
+/// A branch named after a verb is read as that verb, and `perch wt` opens the
+/// worktree picker rather than going anywhere — so those names need the `--`
+/// escape hatch. Keep this list in step with `dispatch` in `main.rs`, which is
+/// where the verbs are defined.
+pub(crate) fn go_there_argument(branch: &str) -> String {
+    let quoted = shell_quote(branch);
+    match branch {
+        "br" | "wt" => format!("-- {quoted}"),
+        _ => quoted,
+    }
+}
+
 pub(crate) fn shell_quote(word: &str) -> String {
     let safe = |c: char| c.is_ascii_alphanumeric() || "._/@+-".contains(c);
     if !word.is_empty() && word.chars().all(safe) {
@@ -963,6 +1006,22 @@ mod tests {
     #[test]
     fn shell_quote_handles_a_quote_in_the_name() {
         assert_eq!(shell_quote("it's"), r"'it'\''s'");
+    }
+
+    #[test]
+    fn an_ordinary_branch_is_named_to_perch_bare() {
+        assert_eq!(go_there_argument("feature"), "feature");
+    }
+
+    #[test]
+    fn a_branch_named_after_a_verb_is_escaped_past_the_dispatcher() {
+        assert_eq!(go_there_argument("br"), "-- br");
+        assert_eq!(go_there_argument("wt"), "-- wt");
+    }
+
+    #[test]
+    fn an_escaped_branch_is_still_shell_quoted() {
+        assert_eq!(go_there_argument("a b"), "'a b'");
     }
 
     /// The ground is on every row: a branch with nothing at stake still owes the

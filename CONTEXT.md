@@ -72,6 +72,14 @@ _Avoid_: Deletion (reserved for branches), cleanup, teardown
 
 ### Targets
 
+**Verb**:
+Which of three intents a command carries: bare `perch` goes to the branch wherever it lives, `br` checks it out in the worktree you're in, `wt` gives it one of its own. The verb decides what happens to a *Held* branch and nothing else, since git leaves exactly one move legal in every other case. See [ADR 0007](./docs/adr/0007-three-verbs-one-per-intent.md).
+_Avoid_: Mode, action
+
+**Subverb**:
+A word `wt` reads before it reads a branch name: `ls` and `rm`, plus the retired `list` and `remove`, which are refused rather than taken for branches. Only `wt` has any — `br` reads everything after it as a branch. Collision is positional, and `--` is needed only where the dispatcher would eat the spelling: after `wt` for a subverb, at the top level for a *Verb*. Everywhere else the bare name reaches the branch, so `perch list`, `perch br list` and `perch br wt` all work as written.
+_Avoid_: Subcommand (reserved for the *Verb*), flag, option
+
 **`.`**:
 The one you're in. `perch .` refreshes the current branch; `perch wt rm .` removes the current worktree.
 _Avoid_: Here, current, self

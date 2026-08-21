@@ -1493,6 +1493,147 @@ fn in_place_switch_hands_off_when_branch_is_held_by_worktree() {
     assert_eq!(stdout_str(&head).trim(), "main");
 }
 
+#[test]
+fn br_checks_the_branch_out_in_the_current_worktree() {
+    let (_bare, work) = setup();
+
+    git(work.path(), &["branch", "feature"]);
+
+    let output = perch_args(work.path(), &["br", "feature"]);
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+
+    let head = git(work.path(), &["branch", "--show-current"]);
+    assert_eq!(stdout_str(&head).trim(), "feature");
+}
+
+/// The message is the feature: it's where `br` teaches the verb that does
+/// reach a branch another worktree holds.
+#[test]
+fn br_refuses_a_held_branch_and_names_the_verb_that_reaches_it() {
+    let (_bare, parent, work) = setup_with_parent();
+
+    add_worktree(&work, &parent, "feature");
+
+    let output = perch_args(&work, &["br", "feature"]);
+    assert!(
+        !output.status.success(),
+        "br into a held branch should fail; stderr: {}",
+        stderr_str(&output)
+    );
+
+    // The path may come back with `$HOME` abbreviated to `~`, so match its tail.
+    let stderr = stderr_str(&output);
+    assert!(
+        stderr.contains("worktrees/repo/feature"),
+        "error should name the worktree holding the branch; got: {stderr}"
+    );
+    assert!(
+        stderr.contains("run `perch feature` to go there"),
+        "error should point at the verb that reaches it; got: {stderr}"
+    );
+
+    // No handoff: `br` never prints a path for the shell wrapper to `cd` into.
+    assert_eq!(stdout_str(&output).trim(), "");
+
+    let head = git(&work, &["branch", "--show-current"]);
+    assert_eq!(stdout_str(&head).trim(), "main");
+}
+
+/// A branch named after a verb is read as that verb, so the advice `br` gives
+/// has to route around the dispatcher or it lands somewhere else entirely.
+#[test]
+fn br_points_a_verb_named_branch_at_the_escape_hatch() {
+    for verb in ["br", "wt"] {
+        let (_bare, parent, work) = setup_with_parent();
+        add_worktree(&work, &parent, verb);
+
+        let output = perch_args(&work, &["br", verb]);
+        assert!(
+            !output.status.success(),
+            "br into a held branch should fail; stderr: {}",
+            stderr_str(&output)
+        );
+        assert!(
+            stderr_str(&output).contains(&format!("run `perch -- {verb}` to go there")),
+            "a branch named `{verb}` needs the `--` form; got: {}",
+            stderr_str(&output)
+        );
+    }
+}
+
+/// `wt <name>` creates a worktree for any word it doesn't know, so a retired
+/// subverb left to fall through would build a branch called `list`.
+#[test]
+fn a_retired_wt_subverb_is_refused_rather_than_taken_for_a_branch() {
+    let (_bare, _parent, work) = setup_with_parent();
+
+    for (retired, keep) in [("list", "wt ls"), ("remove", "wt rm")] {
+        let output = perch_args(&work, &["wt", retired]);
+        assert!(
+            !output.status.success(),
+            "`wt {retired}` should fail; stderr: {}",
+            stderr_str(&output)
+        );
+        assert!(
+            stderr_str(&output).contains(&format!("use `perch {keep}`")),
+            "error should name the spelling that replaced it; got: {}",
+            stderr_str(&output)
+        );
+        assert!(
+            stderr_str(&output).contains(&format!("`perch wt -- {retired}`")),
+            "error should name the escape hatch for a branch by that name; got: {}",
+            stderr_str(&output)
+        );
+
+        let branches = git(&work, &["branch", "--format=%(refname:short)"]);
+        assert!(
+            !stdout_str(&branches).lines().any(|l| l == retired),
+            "`wt {retired}` must not create a branch; got: {}",
+            stdout_str(&branches)
+        );
+    }
+}
+
+/// `--` ends subverb parsing, which is the only way left to name a branch that
+/// collides with a subverb — `wt list` is the retired-spelling error, not a
+/// branch.
+#[test]
+fn a_wt_subverb_named_branch_is_reachable_past_the_dispatcher() {
+    for name in ["list", "remove", "ls", "rm"] {
+        let (_bare, _parent, work) = setup_with_parent();
+        git(&work, &["branch", name]);
+
+        let output = perch_args(&work, &["wt", "--", name]);
+        assert!(
+            output.status.success(),
+            "`wt -- {name}` should worktree the branch; stderr: {}",
+            stderr_str(&output)
+        );
+
+        let worktrees = git(&work, &["worktree", "list", "--porcelain"]);
+        assert!(
+            stdout_str(&worktrees).contains(&format!("branch refs/heads/{name}")),
+            "`wt -- {name}` should hold branch `{name}`; got: {}",
+            stdout_str(&worktrees)
+        );
+    }
+}
+
+/// `br` has no subverbs, but `--` after it is the same habit and must not be
+/// taken for the branch name.
+#[test]
+fn br_takes_the_branch_after_a_double_dash() {
+    let (_bare, work) = setup();
+
+    git(work.path(), &["branch", "feature"]);
+
+    let output = perch_args(work.path(), &["br", "--", "feature"]);
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+
+    let head = git(work.path(), &["branch", "--show-current"]);
+    assert_eq!(stdout_str(&head).trim(), "feature");
+}
+
 /// Creates a worktree for a new branch and returns its path.
 fn add_worktree(work: &Path, parent: &TempDir, branch: &str) -> PathBuf {
     git(work, &["branch", branch]);

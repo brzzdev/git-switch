@@ -58,7 +58,7 @@ pub fn run(target: Option<&str>) -> AppResult<()> {
             eprintln!(
                 "{} switched to worktree at {}",
                 style("→").cyan().bold(),
-                wt.path.display()
+                display_path(&wt.path)
             );
             (wt.path, branch)
         }

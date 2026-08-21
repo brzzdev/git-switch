@@ -30,11 +30,23 @@ fn dispatch(args: &[String]) -> perch::AppResult<()> {
             Ok(())
         }
         // `--` ends option/subcommand parsing: everything after is a branch,
-        // so a branch literally named `wt`/`worktree` stays reachable.
+        // so a branch literally named `br`/`wt` stays reachable.
         Some("--") => perch::app::run(args.get(1).map(String::as_str)),
-        Some("wt" | "worktree") => dispatch_wt(&args[1..]),
+        Some("br") => dispatch_br(&args[1..]),
+        Some("wt") => dispatch_wt(&args[1..]),
         Some(name) => perch::app::run(Some(name)),
         None => perch::app::run(None),
+    }
+}
+
+fn dispatch_br(args: &[String]) -> perch::AppResult<()> {
+    match args.first().map(String::as_str) {
+        Some("--help" | "-h") => {
+            print_br_help();
+            Ok(())
+        }
+        Some("--") => perch::app::run_br(args.get(1).map(String::as_str)),
+        name => perch::app::run_br(name),
     }
 }
 
@@ -44,8 +56,16 @@ fn dispatch_wt(args: &[String]) -> perch::AppResult<()> {
             print_wt_help();
             Ok(())
         }
-        Some("ls" | "list") => perch::app::wt::run_ls(),
-        Some("rm" | "remove") => {
+        // As at the top level, `--` ends subverb parsing, which is what keeps a
+        // branch named `ls`, `rm`, or one of the retired words below reachable.
+        Some("--") => perch::app::wt::run(args.get(1).map(String::as_str)),
+        Some("ls") => perch::app::wt::run_ls(),
+        // `wt <name>` creates a worktree for any word it doesn't recognise, so
+        // the retired subverbs have to be turned away by name: left to fall
+        // through, old muscle memory would build a branch called `list`.
+        Some("list") => Err(perch::Error::retired("list", "ls")),
+        Some("remove") => Err(perch::Error::retired("remove", "rm")),
+        Some("rm") => {
             let rest = &args[1..];
             let force = rest.iter().any(|a| a == "--force" || a == "-f");
             let target = rest
@@ -60,19 +80,26 @@ fn dispatch_wt(args: &[String]) -> perch::AppResult<()> {
 }
 
 fn print_help() {
-    println!("Usage: perch [<branch>]");
-    println!("       perch .               Refresh the current branch from its remote");
-    println!("       perch -- <branch>     Switch to a branch named wt/worktree");
-    println!("       perch wt [<branch>]");
-    println!("       perch wt ls");
+    println!("Usage: perch [<branch>]       Go to the branch, wherever it lives");
+    println!("       perch br [<branch>]    Check the branch out here");
+    println!("       perch wt [<branch>]    Give the branch its own worktree");
+    println!();
+    println!("       perch .                Refresh the current branch from its remote");
+    println!("       perch -- <branch>      Go to a branch named br/wt");
+    println!("       perch wt ls            List worktrees");
     println!("       perch wt rm [<branch>|.]");
 }
 
+fn print_br_help() {
+    println!("Usage: perch br [<branch>]    Check the branch out here");
+}
+
 fn print_wt_help() {
-    println!("Usage: perch wt [<branch>]    Switch to or create a worktree");
+    println!("Usage: perch wt [<branch>]    Give the branch its own worktree");
     println!("       perch wt ls            List worktrees");
     println!("       perch wt rm [<branch>] Remove a worktree (deletes branch if merged)");
     println!("       perch wt rm .          Remove the worktree you're in");
+    println!("       perch wt -- <branch>   Worktree a branch named ls/rm/list/remove");
     println!();
     println!("Options:");
     println!("  -f, --force   Skip the confirmation for uncommitted or unmerged work");
