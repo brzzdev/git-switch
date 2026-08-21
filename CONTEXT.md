@@ -83,5 +83,5 @@ _Avoid_: Jump, teleport, redirect
 ### Hooks
 
 **Hook**:
-A user command run after a worktree is created or removed. A hook is told what happened; it is never asked. It cannot refuse a *Removal*, grant a *License*, or change anything perch does — one that fails is reported and ignored. See [ADR 0003](./docs/adr/0003-hooks-are-told-never-asked.md).
+A user command run after a worktree is created or removed. A hook is told what happened; it is never asked. It cannot refuse a *Removal*, grant a *License*, or change anything `perch` does — one that fails is reported and ignored. See [ADR 0003](./docs/adr/0003-hooks-are-told-never-asked.md).
 _Avoid_: Callback, plugin, trigger, integration

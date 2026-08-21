@@ -59,8 +59,7 @@ fn git(dir: &Path, args: &[&str]) -> Output {
 
 /// Hooks come from git config, which layers in the developer's global file, so
 /// suppress them everywhere: a machine with `perch.hook.created` set would
-/// otherwise run it throughout the suite. The hook tests use
-/// [`perch_hooked`].
+/// otherwise run it throughout the suite. The hook tests use [`perch_hooked`].
 fn perch_args(dir: &Path, args: &[&str]) -> Output {
     perch_command(dir, args)
         .env("PERCH_NO_HOOKS", "1")
@@ -68,8 +67,8 @@ fn perch_args(dir: &Path, args: &[&str]) -> Output {
         .expect("failed to run perch")
 }
 
-/// Like [`perch_args`], but with hooks left on — for the tests that
-/// configure one in the repo under test.
+/// Like [`perch_args`], but with hooks left on — for the tests that configure
+/// one in the repo under test.
 fn perch_hooked(dir: &Path, args: &[&str]) -> Output {
     perch_command(dir, args)
         .env_remove("PERCH_NO_HOOKS")
@@ -668,8 +667,8 @@ fn tracked_branch_without_unique_commits_not_stale() {
     );
 }
 
-/// Adds a worktree the way `perch wt` does: a new branch off
-/// `origin/main`, tracking it.
+/// Adds a worktree the way `perch wt` does: a new branch off `origin/main`,
+/// tracking it.
 fn add_worktree_branch(work: &Path, parent: &Path, branch: &str) -> PathBuf {
     let path = parent.join("worktrees").join("repo").join(branch);
     fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -727,9 +726,9 @@ fn fresh_worktree_branch_is_not_stale_from_a_sibling_worktree() {
 }
 
 /// `perch wt`'s own merge-locally workflow: a worktree branch that did real
-/// work, fast-forwarded into main. It tracks `origin/main` rather than its own
-/// counterpart rather than its own, so only being *ahead* of what it tracks
-/// separates it from a branch that never held a commit.
+/// work, fast-forwarded into main. It tracks `origin/main` rather than a
+/// counterpart of its own, so only being *ahead* of what it tracks separates it
+/// from a branch that never held a commit.
 #[test]
 fn worktree_branch_fast_forwarded_into_main_is_stale() {
     let (_bare, parent, work) = setup_with_parent();
@@ -1866,7 +1865,7 @@ fn poll_until(mut ready: impl FnMut() -> bool) -> bool {
 
 /// Kills the child when the test ends, however it ends. An assertion that fires
 /// mid-session — a `wait_for` timeout, say — unwinds with the picker still on
-/// screen, and an orphaned pty-attached perch would outlive the test.
+/// screen, and an orphaned pty-attached `perch` would outlive the test.
 struct ChildGuard(Box<dyn portable_pty::Child + Send + Sync>);
 
 impl Drop for ChildGuard {

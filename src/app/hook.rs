@@ -1,7 +1,6 @@
 //! Telling the outside world that a worktree appeared or went away — the shell
-//! commands configured as `perch.hook.created` and
-//! `perch.hook.removed`, per [ADR
-//! 0003](../../docs/adr/0003-hooks-are-told-never-asked.md).
+//! commands configured as `perch.hook.created` and `perch.hook.removed`, per
+//! [ADR 0003](../../docs/adr/0003-hooks-are-told-never-asked.md).
 //!
 //! A hook is told what happened and is never consulted: it cannot veto a
 //! removal, cannot license a forcing, and its failure is warned about and

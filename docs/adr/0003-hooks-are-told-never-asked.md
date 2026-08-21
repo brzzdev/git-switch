@@ -1,5 +1,7 @@
 # Hooks are told, never asked
 
+> The config keys and environment variables below were spelled `git-switch.*` and `GIT_SWITCH_*` when this was written. They are now `perch.*` and `PERCH_*`, with no fallback — see [ADR 0006](./0006-named-for-the-motion-not-the-mode.md). The decision is unchanged; only the spelling is.
+
 Worktrees created by `git-switch wt` have a life outside git — an editor or session manager wants to open them, and to forget them again when they go. Git covers half of that already: `git worktree add` fires `post-checkout`, distinguishable from an ordinary checkout by the null SHA it passes as the previous ref. Git fires *nothing* on `git worktree remove` — confirmed against githooks(5)'s closed list, the single hook call site in `builtin/worktree.c`, and empirically on git 2.55. Rather than an integration living half in a git hook parsing SHAs out of `$1` and half in `git-switch`, both moments are `git-switch`'s: two shell commands read from git config, `git-switch.hook.created` and `git-switch.hook.removed`, run for their effect and never consulted. A hook is told what happened; it is never asked.
 
 The alternative to building anything was the `post-checkout` route plus living without teardown, and it is a real option — it is why this decision needed recording at all. See [the research snapshot](../research/post-switch-hooks.md) for what git, jj, gh, cargo and direnv each do, pinned to the versions it was checked against.

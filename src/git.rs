@@ -518,10 +518,10 @@ pub fn pinned_branches(remote: &str) -> Vec<String> {
     out
 }
 
-/// The shell command configured as `perch.hook.<event>`, or `None` when
-/// it's unset or blank. Read straight from git config like `perch.keep`,
-/// so a global hook and a per-repo override layer the way git says they do —
-/// `--get` yields the last value, and last wins.
+/// The shell command configured as `perch.hook.<event>`, or `None` when it's
+/// unset or blank. Read straight from git config like `perch.keep`, so a global
+/// hook and a per-repo override layer the way git says they do — `--get` yields
+/// the last value, and last wins.
 #[must_use]
 pub fn hook_command(event: &str) -> Option<String> {
     let key = format!("perch.hook.{event}");
@@ -1280,7 +1280,7 @@ pub enum BranchDeleteOutcome {
     /// git's reason, since no key was ever read to name.
     DeletedConfigUnverified(String),
     /// Deleted, but config of its own outlived it — the keys, so the user can
-    /// clear what perch couldn't.
+    /// clear what `perch` couldn't.
     DeletedLeavingConfig(String),
     /// Deleted at `tip`, and confirmed gone after putting it back failed. The
     /// one outcome describing a repository that needs repair — `holder` says
