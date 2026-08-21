@@ -29,6 +29,14 @@ pub enum Error {
     #[error("no branches found")]
     NoBranches,
 
+    /// One of the long spellings dropped at 2.0.0. Worth its own error because
+    /// `wt` would otherwise read the retired word as a branch to create.
+    #[error("`perch {given}` is gone; use `perch {keep}`")]
+    Retired {
+        given: &'static str,
+        keep: &'static str,
+    },
+
     #[error("invalid number from git: {0}")]
     ParseInt(#[from] std::num::ParseIntError),
 
@@ -39,6 +47,12 @@ pub enum Error {
 }
 
 impl Error {
+    /// A retired spelling, named alongside the one that replaced it.
+    #[must_use]
+    pub fn retired(given: &'static str, keep: &'static str) -> Self {
+        Error::Retired { given, keep }
+    }
+
     /// True when this wraps a Ctrl+C (`Interrupted`) raised by an interactive
     /// prompt. Callers that otherwise swallow prompt errors must still honour it
     /// so the user can cancel — raw mode delivers Ctrl+C as this error rather

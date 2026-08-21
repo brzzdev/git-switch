@@ -56,6 +56,11 @@ fn dispatch_wt(args: &[String]) -> perch::AppResult<()> {
             Ok(())
         }
         Some("ls") => perch::app::wt::run_ls(),
+        // `wt <name>` creates a worktree for any word it doesn't recognise, so
+        // the retired subverbs have to be turned away by name: left to fall
+        // through, old muscle memory would build a branch called `list`.
+        Some("list") => Err(perch::Error::retired("wt list", "wt ls")),
+        Some("remove") => Err(perch::Error::retired("wt remove", "wt rm")),
         Some("rm") => {
             let rest = &args[1..];
             let force = rest.iter().any(|a| a == "--force" || a == "-f");
@@ -82,11 +87,11 @@ fn print_help() {
 }
 
 fn print_br_help() {
-    println!("Usage: perch br [<branch>]    Check out a branch in this worktree");
+    println!("Usage: perch br [<branch>]    Check the branch out here");
 }
 
 fn print_wt_help() {
-    println!("Usage: perch wt [<branch>]    Switch to or create a worktree");
+    println!("Usage: perch wt [<branch>]    Give the branch its own worktree");
     println!("       perch wt ls            List worktrees");
     println!("       perch wt rm [<branch>] Remove a worktree (deletes branch if merged)");
     println!("       perch wt rm .          Remove the worktree you're in");

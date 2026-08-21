@@ -1539,6 +1539,34 @@ fn br_refuses_a_held_branch_and_names_the_verb_that_reaches_it() {
     assert_eq!(stdout_str(&head).trim(), "main");
 }
 
+/// `wt <name>` creates a worktree for any word it doesn't know, so a retired
+/// subverb left to fall through would build a branch called `list`.
+#[test]
+fn a_retired_wt_subverb_is_refused_rather_than_taken_for_a_branch() {
+    let (_bare, _parent, work) = setup_with_parent();
+
+    for (retired, keep) in [("list", "wt ls"), ("remove", "wt rm")] {
+        let output = perch_args(&work, &["wt", retired]);
+        assert!(
+            !output.status.success(),
+            "`wt {retired}` should fail; stderr: {}",
+            stderr_str(&output)
+        );
+        assert!(
+            stderr_str(&output).contains(&format!("use `perch {keep}`")),
+            "error should name the spelling that replaced it; got: {}",
+            stderr_str(&output)
+        );
+
+        let branches = git(&work, &["branch", "--format=%(refname:short)"]);
+        assert!(
+            !stdout_str(&branches).lines().any(|l| l == retired),
+            "`wt {retired}` must not create a branch; got: {}",
+            stdout_str(&branches)
+        );
+    }
+}
+
 /// Creates a worktree for a new branch and returns its path.
 fn add_worktree(work: &Path, parent: &TempDir, branch: &str) -> PathBuf {
     git(work, &["branch", branch]);

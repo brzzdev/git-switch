@@ -42,28 +42,28 @@ fn interactive_term() -> Option<Term> {
     term.is_term().then_some(term)
 }
 
-/// Which intent the caller's verb carries. The two differ over a branch another
-/// worktree holds, and nowhere else: `perch <name>` goes there, and `br` — whose
-/// whole promise is a checkout *here* — has nowhere to go.
+/// How far a verb may reach for its branch. This is the whole of what separates
+/// `perch <name>` from `perch br <name>`: a branch another worktree holds is out
+/// of `br`'s reach, since a checkout *here* is all `br` promises.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Verb {
+enum Reach {
     /// `perch <name>` — hand off to the worktree holding the branch.
     Anywhere,
     /// `perch br <name>` — refuse, naming the path and the verb that reaches it.
-    InPlace,
+    Here,
 }
 
 /// `perch [<branch>]` — take me to the branch, wherever it lives.
 pub fn run(target: Option<&str>) -> AppResult<()> {
-    run_verb(Verb::Anywhere, target)
+    run_reach(Reach::Anywhere, target)
 }
 
 /// `perch br [<branch>]` — check the branch out here, in this worktree.
 pub fn run_br(target: Option<&str>) -> AppResult<()> {
-    run_verb(Verb::InPlace, target)
+    run_reach(Reach::Here, target)
 }
 
-fn run_verb(verb: Verb, target: Option<&str>) -> AppResult<()> {
+fn run_reach(reach: Reach, target: Option<&str>) -> AppResult<()> {
     let old_branch = git::current_branch()?;
     let remote = git::current_remote(old_branch.as_deref());
 
@@ -93,7 +93,7 @@ fn run_verb(verb: Verb, target: Option<&str>) -> AppResult<()> {
             git::worktree_for_branch(&git::worktree_list()?, &target).filter(|w| !w.prunable)
     {
         // `br` promises a checkout *here*, so it can't quietly `cd` elsewhere.
-        if verb == Verb::InPlace {
+        if reach == Reach::Here {
             return Err(Error::HeldByWorktree {
                 branch: target,
                 path: display_path(&held_by.path),
