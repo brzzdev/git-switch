@@ -19,17 +19,32 @@ _perch() {
 
   branches=(${(f)"$(git branch --format='%(refname:short)' 2>/dev/null)"})
 
-  if [[ "$words[CURRENT-1]" == -- ]]; then
+  # `wt rm` reads its target as the first word after `rm` that isn't an option,
+  # and takes its `--force` in either order, so a flag or a `--` leaves the slot
+  # open while a bare word closes it. Words typed after a target are ignored.
+  if (( CURRENT >= 4 )) && [[ "$words[2]" == wt && "$words[3]" == rm ]]; then
+    local word
+    for word in "${(@)words[4,CURRENT-1]}"; do
+      [[ "$word" == -* ]] || return
+    done
     _describe -t branches 'branch' branches
+  # `--` ends parsing, but only where the dispatcher still has a branch left to
+  # read: `perch --`, `perch br --`, `perch wt --`. Past `perch wt ls`, or a
+  # branch the dispatcher has already taken, the words after `--` go nowhere.
+  elif [[ "$words[CURRENT-1]" == -- ]]; then
+    if (( CURRENT == 3 )) || { (( CURRENT == 4 )) && [[ "$words[2]" == (br|wt) ]] }; then
+      _describe -t branches 'branch' branches
+    fi
   elif (( CURRENT == 2 )); then
     offer=(${branches:|verbs})
     _describe -t subcommands 'subcommand' subcommands
     _describe -t branches 'branch' offer
   elif (( CURRENT == 3 )) && [[ "$words[2]" == wt ]]; then
     offer=(${branches:|subverbs})
-    _describe -t subcommands 'worktree subcommand' worktree_subs
+    _describe -t subverbs 'worktree subverb' worktree_subs
     _describe -t branches 'branch' offer
-  else
+  # `br` reads everything after it as a branch, so nothing is filtered here.
+  elif (( CURRENT == 3 )) && [[ "$words[2]" == br ]]; then
     _describe -t branches 'branch' branches
   fi
 }

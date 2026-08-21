@@ -10,11 +10,29 @@ function __perch_branches_except
     __perch_branches | string match --invert --regex "^($argv[1])\$"
 end
 
-# True once `--` has been typed, whichever verb it followed: everything after it
-# is a branch name, so every escaped route completes the same way.
+# True where `--` has just been typed and the dispatcher still has a branch left
+# to read: `perch --`, `perch br --`, `perch wt --`. Past `perch wt ls`, or a
+# branch the dispatcher has already taken, the words after `--` go nowhere.
 function __perch_after_double_dash
     set -l tokens (commandline -opc)
-    test (count $tokens) -ge 2; and test "$tokens[-1]" = "--"
+    test "$tokens[-1]" = "--"; or return 1
+    test (count $tokens) -eq 2; and return 0
+    test (count $tokens) -eq 3; and contains -- $tokens[2] br wt
+end
+
+# True while `wt rm` still wants a target. It reads that target as the first word
+# after `rm` that isn't an option, and takes its `--force` in either order, so a
+# flag or a `--` leaves the slot open while a bare word closes it.
+function __perch_wt_rm_wants_target
+    set -l tokens (commandline -opc)
+    test (count $tokens) -ge 3; or return 1
+    test "$tokens[2]" = wt; and test "$tokens[3]" = rm; or return 1
+    if test (count $tokens) -gt 3
+        for token in $tokens[4..-1]
+            string match --quiet -- '-*' $token; or return 1
+        end
+    end
+    return 0
 end
 
 # Top-level: subcommands + the branches reachable without `--`.
@@ -22,8 +40,9 @@ complete -c perch -f -n '__fish_is_nth_token 1' -a '(__perch_branches_except "br
 complete -c perch -f -n '__fish_is_nth_token 1' -a 'br' -d 'Check a branch out here'
 complete -c perch -f -n '__fish_is_nth_token 1' -a 'wt' -d 'Worktree commands'
 
-# After any `--`: branches, unfiltered. One rule covers every escaped route,
-# because the position rules below are all false once `--` has been typed.
+# After a `--` that still has a branch to escape: branches, unfiltered. The
+# position rules below are all false once `--` has been typed; `wt rm --` is the
+# one escaped route this misses, and its own rule below takes it.
 complete -c perch -f -n '__perch_after_double_dash' -a '(__perch_branches)'
 
 # After `br`: branches. Unlike bash and zsh, fish has no fall-through case, so
@@ -35,5 +54,5 @@ complete -c perch -f -n '__fish_seen_subcommand_from br; and __fish_is_nth_token
 complete -c perch -f -n '__fish_seen_subcommand_from wt; and __fish_is_nth_token 2' -a 'ls rm'
 complete -c perch -f -n '__fish_seen_subcommand_from wt; and __fish_is_nth_token 2' -a '(__perch_branches_except "ls|rm|list|remove")'
 
-# After `wt rm`: branches.
-complete -c perch -f -n '__fish_seen_subcommand_from wt; and __fish_seen_subcommand_from rm' -a '(__perch_branches)'
+# After `wt rm`: branches, until one has been taken.
+complete -c perch -f -n '__perch_wt_rm_wants_target' -a '(__perch_branches)'
