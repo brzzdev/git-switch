@@ -1595,9 +1595,10 @@ fn a_retired_wt_subverb_is_refused_rather_than_taken_for_a_branch() {
 }
 
 /// `--` ends subverb parsing, which is the only way left to name a branch that
-/// collides with a verb — `wt list` is the retired-spelling error, not a branch.
+/// collides with a subverb — `wt list` is the retired-spelling error, not a
+/// branch.
 #[test]
-fn a_verb_named_branch_is_reachable_past_each_dispatcher() {
+fn a_wt_subverb_named_branch_is_reachable_past_the_dispatcher() {
     for name in ["list", "remove", "ls", "rm"] {
         let (_bare, _parent, work) = setup_with_parent();
         git(&work, &["branch", name]);

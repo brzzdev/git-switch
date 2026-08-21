@@ -1,7 +1,7 @@
 #compdef perch
 
 _perch() {
-  local -a subcommands worktree_subs
+  local -a subcommands worktree_subs verbs subverbs branches offer
   subcommands=(
     'br:Check a branch out here'
     'wt:Worktree commands'
@@ -10,18 +10,25 @@ _perch() {
     'ls:List worktrees'
     'rm:Remove worktree (also deletes branch)'
   )
+  # The dispatcher reads these words as commands before it reads them as branch
+  # names, and `--` is the only way to reach a branch spelled like one. Offering
+  # such a name where it would be eaten completes into a command that misfires,
+  # so subtract it there. Keep these in step with `dispatch`/`dispatch_wt`.
+  verbs=(br wt)
+  subverbs=(ls rm list remove)
 
-  local branches
   branches=(${(f)"$(git branch --format='%(refname:short)' 2>/dev/null)"})
 
-  if (( CURRENT == 2 )); then
+  if [[ "$words[CURRENT-1]" == -- ]]; then
+    _describe -t branches 'branch' branches
+  elif (( CURRENT == 2 )); then
+    offer=(${branches:|verbs})
     _describe -t subcommands 'subcommand' subcommands
-    _describe -t branches 'branch' branches
+    _describe -t branches 'branch' offer
   elif (( CURRENT == 3 )) && [[ "$words[2]" == wt ]]; then
+    offer=(${branches:|subverbs})
     _describe -t subcommands 'worktree subcommand' worktree_subs
-    _describe -t branches 'branch' branches
-  elif (( CURRENT == 4 )) && [[ "$words[2]" == wt && "$words[3]" == rm ]]; then
-    _describe -t branches 'branch' branches
+    _describe -t branches 'branch' offer
   else
     _describe -t branches 'branch' branches
   fi

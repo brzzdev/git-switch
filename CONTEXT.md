@@ -76,6 +76,10 @@ _Avoid_: Deletion (reserved for branches), cleanup, teardown
 Which of three intents a command carries: bare `perch` goes to the branch wherever it lives, `br` checks it out in the worktree you're in, `wt` gives it one of its own. The verb decides what happens to a *Held* branch and nothing else, since git leaves exactly one move legal in every other case. See [ADR 0007](./docs/adr/0007-three-verbs-one-per-intent.md).
 _Avoid_: Mode, action
 
+**Subverb**:
+A word `wt` reads before it reads a branch name: `ls` and `rm`, plus the retired `list` and `remove`, which are refused rather than taken for branches. Only `wt` has any — `br` reads everything after it as a branch. A branch spelled like a subverb is reachable only through `--`, as is one spelled like a *Verb*.
+_Avoid_: Subcommand (reserved for the *Verb*), flag, option
+
 **`.`**:
 The one you're in. `perch .` refreshes the current branch; `perch wt rm .` removes the current worktree.
 _Avoid_: Here, current, self
