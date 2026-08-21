@@ -37,7 +37,7 @@ Of a branch, checked out in some worktree. Git forbids the same branch in two wo
 _Avoid_: Locked, checked out, in use
 
 **Missing**:
-A worktree still registered in `.git/worktrees` whose directory is gone — git calls this *prunable*. It cannot be entered, but still blocks its branch from being checked out or deleted.
+A worktree still registered in `.git/worktrees` whose directory is gone — git calls this *prunable*. It cannot be entered, but still blocks its branch from being checked out or deleted. Of a worktree only: a branch that exists nowhere is *Absent*.
 _Avoid_: Stale (reserved for branches), dead, orphaned
 
 **Dirty**:
@@ -77,8 +77,16 @@ Which of three intents a command carries: bare `perch` goes to the branch wherev
 _Avoid_: Mode, action
 
 **Catalogue**:
-Every branch the repo offers, paired with the worktree *Held*ing it. It is what the picker is built from and is the same for all three *Verb*s — a verb changes what selecting a row does, never what is listed. Turning it into rows is pure: given the branches and the worktrees, the markers and the unselectable rows follow. See [ADR 0008](./docs/adr/0008-one-list-whichever-verb-is-picking.md).
+Every branch the repo offers, paired with the worktree *Held*ing it. It is what the picker is built from and is the same for all three *Verb*s — a verb changes what selecting a row does, never what is listed. Turning it into rows is pure: given the branches and the worktrees, the *Annotation*s and the unselectable rows follow. See [ADR 0008](./docs/adr/0008-one-list-whichever-verb-is-picking.md).
 _Avoid_: Candidates, options, menu
+
+**Annotation**:
+The dim text after a name in a picker row, saying what there is to know about it: the path of the worktree *Held*ing a branch, or why a row is inert. An annotation is not a *Marker* — it warns of no loss and licenses no *Forcing*, exactly as a *Ground* doesn't. Rows share a column for it, so a list reads down as well as across. See [ADR 0004](./docs/adr/0004-a-ground-is-not-a-marker.md) and [ADR 0008](./docs/adr/0008-one-list-whichever-verb-is-picking.md).
+_Avoid_: Marker (reserved for risk), label, badge, hint
+
+**Absent**:
+Of a *Kept* branch, existing neither locally nor on the remote — so it is listed, because keeping it says it matters, but no *Verb* can reach it and its row is inert. Distinct from *Missing*, which is a worktree whose directory is gone.
+_Avoid_: Missing (reserved for worktrees), gone (reserved for a *Ground*), unavailable
 
 **Subverb**:
 A word `wt` reads before it reads a branch name: `ls` and `rm`, plus the retired `list` and `remove`, which are refused rather than taken for branches. Only `wt` has any — `br` reads everything after it as a branch. Collision is positional, and `--` is needed only where the dispatcher would eat the spelling: after `wt` for a subverb, at the top level for a *Verb*. Everywhere else the bare name reaches the branch, so `perch list`, `perch br list` and `perch br wt` all work as written.

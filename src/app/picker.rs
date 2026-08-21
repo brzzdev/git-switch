@@ -173,30 +173,41 @@ pub(crate) struct Section {
 /// kept branch is listed whether or not it is here yet, so its row is the one
 /// that must answer the question; under *Local* and *Remote* the heading
 /// already has.
+///
+/// Deliberately not *Missing*: the glossary reserves that for a worktree whose
+/// directory is gone, and `wt rm` already draws the word for one. A branch that
+/// exists nowhere is a different fact, so it gets a different word.
 #[derive(Clone, Copy)]
 enum Availability {
+    /// Neither here nor on the remote. No verb can reach it.
+    Absent,
     /// Nothing to add — the verb can just act on it.
     Ready,
     /// Only on the remote. Fetching it would do.
     RemoteOnly,
-    /// Nowhere to be found. No verb can reach it.
-    Missing,
 }
 
-/// The worktree holding this branch, where that is somewhere other than here.
-/// Git forbids the same branch in two worktrees and the one we're standing in
-/// holds the current branch, so "elsewhere" is exactly "held, and not current" —
-/// which is also why the row we're standing on is marked `*` and not with a path.
-fn elsewhere<'a>(catalogue: &'a Catalogue, name: &str) -> Option<&'a str> {
-    if catalogue.current.as_deref() == Some(name) {
-        return None;
+impl Catalogue {
+    fn is_current(&self, name: &str) -> bool {
+        self.current.as_deref() == Some(name)
     }
-    catalogue.held.get(name).map(String::as_str)
+
+    /// The worktree holding this branch, where that is somewhere other than
+    /// here. Git forbids the same branch in two worktrees and the one we're
+    /// standing in holds the current branch, so "elsewhere" is exactly "held,
+    /// and not current" — which is also why the row we're standing on is marked
+    /// `*` and not with a path.
+    fn elsewhere(&self, name: &str) -> Option<&str> {
+        if self.is_current(name) {
+            return None;
+        }
+        self.held.get(name).map(String::as_str)
+    }
 }
 
 fn row(catalogue: &Catalogue, name: &str, availability: Availability, verb: Verb) -> Pick {
-    let (annotation, disabled) = match (availability, elsewhere(catalogue, name)) {
-        (Availability::Missing, _) => ("missing".to_string(), true),
+    let (annotation, disabled) = match (availability, catalogue.elsewhere(name)) {
+        (Availability::Absent, _) => ("absent".to_string(), true),
         // `br` promises a checkout *here*, and git will not check out a branch a
         // second worktree already holds. So this is the one row a verb differs
         // over — everywhere else git leaves exactly one move legal.
@@ -207,7 +218,7 @@ fn row(catalogue: &Catalogue, name: &str, availability: Availability, verb: Verb
     };
     Pick {
         name: name.to_string(),
-        is_current: catalogue.current.as_deref() == Some(name),
+        is_current: catalogue.is_current(name),
         annotation,
         disabled,
     }
@@ -240,7 +251,7 @@ pub(crate) fn sections(catalogue: &Catalogue, verb: Verb) -> Vec<Section> {
             } else if remote.contains(name.as_str()) {
                 Availability::RemoteOnly
             } else {
-                Availability::Missing
+                Availability::Absent
             };
             row(catalogue, name, availability, verb)
         })
@@ -1285,9 +1296,9 @@ mod tests {
                 "Pinned",
                 "  here",
                 "  develop ☁",
-                "  release missing (disabled)",
+                "  release absent (disabled)",
             ],
-            "a kept branch is drawn whether it is local, remote-only, or nowhere",
+            "a kept branch is drawn whether it is local, remote-only, or nowhere at all",
         );
     }
 
