@@ -45,6 +45,7 @@ fn dispatch_br(args: &[String]) -> perch::AppResult<()> {
             print_br_help();
             Ok(())
         }
+        Some("--") => perch::app::run_br(args.get(1).map(String::as_str)),
         name => perch::app::run_br(name),
     }
 }
@@ -55,12 +56,15 @@ fn dispatch_wt(args: &[String]) -> perch::AppResult<()> {
             print_wt_help();
             Ok(())
         }
+        // As at the top level, `--` ends subverb parsing, which is what keeps a
+        // branch named `ls`, `rm`, or one of the retired words below reachable.
+        Some("--") => perch::app::wt::run(args.get(1).map(String::as_str)),
         Some("ls") => perch::app::wt::run_ls(),
         // `wt <name>` creates a worktree for any word it doesn't recognise, so
         // the retired subverbs have to be turned away by name: left to fall
         // through, old muscle memory would build a branch called `list`.
-        Some("list") => Err(perch::Error::retired("wt list", "wt ls")),
-        Some("remove") => Err(perch::Error::retired("wt remove", "wt rm")),
+        Some("list") => Err(perch::Error::retired("list", "ls")),
+        Some("remove") => Err(perch::Error::retired("remove", "rm")),
         Some("rm") => {
             let rest = &args[1..];
             let force = rest.iter().any(|a| a == "--force" || a == "-f");
@@ -95,6 +99,7 @@ fn print_wt_help() {
     println!("       perch wt ls            List worktrees");
     println!("       perch wt rm [<branch>] Remove a worktree (deletes branch if merged)");
     println!("       perch wt rm .          Remove the worktree you're in");
+    println!("       perch wt -- <branch>   Worktree a branch named ls/rm/list/remove");
     println!();
     println!("Options:");
     println!("  -f, --force   Skip the confirmation for uncommitted or unmerged work");

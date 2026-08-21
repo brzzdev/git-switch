@@ -1579,6 +1579,11 @@ fn a_retired_wt_subverb_is_refused_rather_than_taken_for_a_branch() {
             "error should name the spelling that replaced it; got: {}",
             stderr_str(&output)
         );
+        assert!(
+            stderr_str(&output).contains(&format!("`perch wt -- {retired}`")),
+            "error should name the escape hatch for a branch by that name; got: {}",
+            stderr_str(&output)
+        );
 
         let branches = git(&work, &["branch", "--format=%(refname:short)"]);
         assert!(
@@ -1587,6 +1592,45 @@ fn a_retired_wt_subverb_is_refused_rather_than_taken_for_a_branch() {
             stdout_str(&branches)
         );
     }
+}
+
+/// `--` ends subverb parsing, which is the only way left to name a branch that
+/// collides with a verb — `wt list` is the retired-spelling error, not a branch.
+#[test]
+fn a_verb_named_branch_is_reachable_past_each_dispatcher() {
+    for name in ["list", "remove", "ls", "rm"] {
+        let (_bare, _parent, work) = setup_with_parent();
+        git(&work, &["branch", name]);
+
+        let output = perch_args(&work, &["wt", "--", name]);
+        assert!(
+            output.status.success(),
+            "`wt -- {name}` should worktree the branch; stderr: {}",
+            stderr_str(&output)
+        );
+
+        let worktrees = git(&work, &["worktree", "list", "--porcelain"]);
+        assert!(
+            stdout_str(&worktrees).contains(&format!("branch refs/heads/{name}")),
+            "`wt -- {name}` should hold branch `{name}`; got: {}",
+            stdout_str(&worktrees)
+        );
+    }
+}
+
+/// `br` has no subverbs, but `--` after it is the same habit and must not be
+/// taken for the branch name.
+#[test]
+fn br_takes_the_branch_after_a_double_dash() {
+    let (_bare, work) = setup();
+
+    git(work.path(), &["branch", "feature"]);
+
+    let output = perch_args(work.path(), &["br", "--", "feature"]);
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+
+    let head = git(work.path(), &["branch", "--show-current"]);
+    assert_eq!(stdout_str(&head).trim(), "feature");
 }
 
 /// Creates a worktree for a new branch and returns its path.
