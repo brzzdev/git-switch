@@ -26,7 +26,7 @@ fn dispatch(args: &[String]) -> perch::AppResult<()> {
             Ok(())
         }
         Some("--version" | "-V") => {
-            println!("{} {}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
+            println!("perch {}", env!("CARGO_PKG_VERSION"));
             Ok(())
         }
         // `--` ends option/subcommand parsing: everything after is a branch,
