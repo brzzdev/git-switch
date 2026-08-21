@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use console::{Key, Term, style};
@@ -14,8 +14,8 @@ pub(crate) mod reporting;
 pub mod wt;
 
 use picker::{
-    Availability, Pick, PickKind, PickerOptions, Section, Selection, align_labels,
-    interactive_keys, multi_select, pick,
+    Availability, Branch, Catalogue, PickerOptions, Selection, align_labels, interactive_keys,
+    multi_select, pick,
 };
 
 pub(crate) struct CursorGuard(Term);
@@ -42,28 +42,44 @@ fn interactive_term() -> Option<Term> {
     term.is_term().then_some(term)
 }
 
-/// How far a verb may reach for its branch. This is the whole of what separates
-/// `perch <name>` from `perch br <name>`: a branch another worktree holds is out
-/// of `br`'s reach, since a checkout *here* is all `br` promises.
+/// Which of three intents a command carries. A verb decides what happens to a
+/// *Held* branch and nothing else, since git leaves exactly one move legal in
+/// every other case — so it also decides which picker rows are inert, and never
+/// which are listed. See [ADR
+/// 0007](../docs/adr/0007-three-verbs-one-per-intent.md).
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Reach {
-    /// `perch <name>` — hand off to the worktree holding the branch.
-    Anywhere,
+pub(crate) enum Verb {
+    /// Bare `perch <name>` — hand off to the worktree holding the branch.
+    Go,
     /// `perch br <name>` — refuse, naming the path and the verb that reaches it.
     Here,
+    /// `perch wt <name>` — give the branch a worktree of its own.
+    Worktree,
+}
+
+impl Verb {
+    /// The picker's prompt. All three verbs draw the same list, so the prompt is
+    /// the only thing on screen saying what selecting a row will do.
+    fn prompt(self) -> &'static str {
+        match self {
+            Verb::Go => "Switch to",
+            Verb::Here => "Check out here",
+            Verb::Worktree => "Worktree",
+        }
+    }
 }
 
 /// `perch [<branch>]` — take me to the branch, wherever it lives.
 pub fn run(target: Option<&str>) -> AppResult<()> {
-    run_reach(Reach::Anywhere, target)
+    run_reach(Verb::Go, target)
 }
 
 /// `perch br [<branch>]` — check the branch out here, in this worktree.
 pub fn run_br(target: Option<&str>) -> AppResult<()> {
-    run_reach(Reach::Here, target)
+    run_reach(Verb::Here, target)
 }
 
-fn run_reach(reach: Reach, target: Option<&str>) -> AppResult<()> {
+fn run_reach(verb: Verb, target: Option<&str>) -> AppResult<()> {
     let old_branch = git::current_branch()?;
     let remote = git::current_remote(old_branch.as_deref());
 
@@ -76,9 +92,11 @@ fn run_reach(reach: Reach, target: Option<&str>) -> AppResult<()> {
         return refresh_current(&remote, current);
     }
 
+    let worktrees = live_worktrees()?;
+
     let target = match target {
         Some(name) => name.to_string(),
-        None => match select_branch(old_branch.as_deref(), &remote)? {
+        None => match select_branch(old_branch.as_deref(), &remote, &worktrees, verb)? {
             Some(t) => t,
             None => return Ok(()),
         },
@@ -86,14 +104,11 @@ fn run_reach(reach: Reach, target: Option<&str>) -> AppResult<()> {
 
     // `git checkout` refuses for a branch already checked out in another
     // worktree; hand off to the shell wrapper instead.
-    // A prunable worktree (directory gone) still holds the branch but can't be
-    // entered; skip it so we fall through to the self-healing checkout below.
     if old_branch.as_deref() != Some(target.as_str())
-        && let Some(held_by) =
-            git::worktree_for_branch(&git::worktree_list()?, &target).filter(|w| !w.prunable)
+        && let Some(held_by) = git::worktree_for_branch(&worktrees, &target)
     {
         // `br` promises a checkout *here*, so it can't quietly `cd` elsewhere.
-        if reach == Reach::Here {
+        if verb == Verb::Here {
             return Err(Error::HeldByWorktree {
                 branch: target,
                 path: display_path(&held_by.path),
@@ -471,8 +486,23 @@ pub(crate) fn confirm(prompt: &str, default_yes: bool) -> AppResult<bool> {
     }
 }
 
-fn select_branch(current: Option<&str>, remote: &str) -> AppResult<Option<String>> {
-    let sections = build_sections(current, remote, &HashSet::new())?;
+/// The worktrees a verb can actually reach. A *Missing* one is still registered
+/// but gone from disk, so it can't be entered — and both the checkout and the
+/// worktree path recreate it. For the list it therefore holds nothing.
+pub(crate) fn live_worktrees() -> AppResult<Vec<git::Worktree>> {
+    Ok(git::worktree_list()?
+        .into_iter()
+        .filter(|w| !w.prunable)
+        .collect())
+}
+
+fn select_branch(
+    current: Option<&str>,
+    remote: &str,
+    worktrees: &[git::Worktree],
+    verb: Verb,
+) -> AppResult<Option<String>> {
+    let sections = picker::sections(&build_catalogue(current, remote, worktrees)?, verb);
     // Non-interactive (piped/CI): we can't prompt, so report nothing to switch
     // to rather than blocking on key input.
     let Some(keys) = interactive_keys() else {
@@ -482,22 +512,26 @@ fn select_branch(current: Option<&str>, remote: &str) -> AppResult<Option<String
         current,
         &sections,
         PickerOptions {
-            prompt: "Switch to",
+            prompt: verb.prompt(),
             allow_create_from_filter: false,
         },
         keys,
     )?;
     Ok(selection.map(|s| match s {
-        Selection::Existing { name, .. } => name,
+        Selection::Existing(name) => name,
         Selection::Create(_) => unreachable!("create-from-filter disabled"),
     }))
 }
 
-pub(crate) fn build_sections(
+/// Reads every branch the repo offers and pairs each with the worktree holding
+/// it, if any. This is the whole of the git side of the list — what a verb makes
+/// of it belongs to [`picker::sections`], which is pure and testable without a
+/// repo on disk.
+pub(crate) fn build_catalogue(
     current: Option<&str>,
     remote: &str,
-    exclude: &HashSet<String>,
-) -> AppResult<Vec<Section>> {
+    worktrees: &[git::Worktree],
+) -> AppResult<Catalogue> {
     let local = git::local_branches()?;
     let remote_only = git::remote_only_branches(&local, remote).unwrap_or_default();
 
@@ -509,71 +543,45 @@ pub(crate) fn build_sections(
     let local_set: HashSet<&str> = local.iter().map(String::as_str).collect();
     let remote_set: HashSet<&str> = remote_only.iter().map(String::as_str).collect();
     let pinned_set: HashSet<&str> = pinned_names.iter().map(String::as_str).collect();
-
-    let pinned_picks: Vec<Pick> = pinned_names
+    let held: HashMap<&str, String> = worktrees
         .iter()
-        .filter(|name| !exclude.contains(name.as_str()))
-        .map(|name| {
-            let in_local = local_set.contains(name.as_str());
-            let in_remote = remote_set.contains(name.as_str());
-            let availability = if in_local {
-                Availability::Local
-            } else if in_remote {
-                Availability::RemoteOnly
-            } else {
-                Availability::Missing
-            };
-            Pick {
-                name: name.clone(),
-                is_current: current == Some(name.as_str()),
-                availability,
-                kind: PickKind::Branch,
-            }
-        })
+        .filter_map(|w| w.branch.as_deref().map(|b| (b, display_path(&w.path))))
         .collect();
 
-    let local_picks: Vec<Pick> = local
-        .iter()
-        .filter(|b| !pinned_set.contains(b.as_str()) && !exclude.contains(b.as_str()))
-        .map(|b| Pick {
-            name: b.clone(),
-            is_current: current == Some(b.as_str()),
-            availability: Availability::Local,
-            kind: PickKind::Branch,
-        })
-        .collect();
+    let branch = |name: &String, availability| Branch {
+        name: name.clone(),
+        is_current: current == Some(name.as_str()),
+        availability,
+        held_at: held.get(name.as_str()).cloned(),
+    };
 
-    let remote_picks: Vec<Pick> = remote_only
-        .iter()
-        .filter(|b| !pinned_set.contains(b.as_str()) && !exclude.contains(b.as_str()))
-        .map(|b| Pick {
-            name: b.clone(),
-            is_current: false,
-            availability: Availability::Local,
-            kind: PickKind::Branch,
-        })
-        .collect();
-
-    let mut sections = Vec::new();
-    if !pinned_picks.is_empty() {
-        sections.push(Section {
-            heading: "Pinned",
-            items: pinned_picks,
-        });
-    }
-    if !local_picks.is_empty() {
-        sections.push(Section {
-            heading: "Local",
-            items: local_picks,
-        });
-    }
-    if !remote_picks.is_empty() {
-        sections.push(Section {
-            heading: "Remote",
-            items: remote_picks,
-        });
-    }
-    Ok(sections)
+    Ok(Catalogue {
+        // A kept branch is listed whether or not it is here yet, so this is the
+        // one section whose rows can be *Missing*.
+        pinned: pinned_names
+            .iter()
+            .map(|name| {
+                let availability = if local_set.contains(name.as_str()) {
+                    Availability::Ready
+                } else if remote_set.contains(name.as_str()) {
+                    Availability::RemoteOnly
+                } else {
+                    Availability::Missing
+                };
+                branch(name, availability)
+            })
+            .collect(),
+        local: local
+            .iter()
+            .filter(|b| !pinned_set.contains(b.as_str()))
+            .map(|b| branch(b, Availability::Ready))
+            .collect(),
+        remote: remote_only
+            .iter()
+            .filter(|b| !pinned_set.contains(b.as_str()))
+            .map(|b| branch(b, Availability::Ready))
+            .collect(),
+    })
 }
 
 /// What removing something would irreversibly destroy.

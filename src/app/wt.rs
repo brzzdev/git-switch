@@ -1,17 +1,13 @@
-use std::collections::HashSet;
 use std::env;
 use std::path::{Path, PathBuf};
 
 use console::{measure_text_width, style};
 use indicatif::ProgressBar;
 
-use super::picker::{
-    Availability, Pick, PickKind, PickerOptions, Section, Selection, align_labels,
-    interactive_keys, multi_select, pick,
-};
+use super::picker::{PickerOptions, Selection, align_labels, interactive_keys, multi_select, pick};
 use super::{
-    CursorGuard, Risk, build_sections, confirm, display_path, fetch_and_ff, handoff_cd, hook,
-    marker, prompt_delete_stale_branches, removal, report_update, reporting,
+    CursorGuard, Risk, Verb, build_catalogue, confirm, display_path, fetch_and_ff, handoff_cd,
+    hook, marker, picker, prompt_delete_stale_branches, removal, report_update, reporting,
 };
 use crate::{AppResult, Error, git};
 
@@ -22,13 +18,10 @@ enum Action {
 }
 
 pub fn run(target: Option<&str>) -> AppResult<()> {
-    // Drop worktrees whose directory was deleted by hand: they can't be entered,
-    // so treat their branch as one to (re)create. `worktree_add`/`checkout` prune
-    // the stale registration when it gets in the way.
-    let worktrees: Vec<git::Worktree> = git::worktree_list()?
-        .into_iter()
-        .filter(|w| !w.prunable)
-        .collect();
+    // A worktree whose directory was deleted by hand can't be entered, so its
+    // branch is one to (re)create. `worktree_add`/`checkout` prune the stale
+    // registration when it gets in the way.
+    let worktrees = super::live_worktrees()?;
     let main = main_of(&worktrees)?;
     let current_branch = git::current_branch()?;
     let remote = git::current_remote(current_branch.as_deref());
@@ -389,7 +382,8 @@ fn select(
     current_branch: Option<&str>,
     remote: &str,
 ) -> AppResult<Option<Action>> {
-    let sections = build_wt_sections(worktrees, current_branch, remote)?;
+    let catalogue = build_catalogue(current_branch, remote, worktrees)?;
+    let sections = picker::sections(&catalogue, Verb::Worktree);
     // Non-interactive (piped/CI): we can't prompt, so report nothing to open
     // rather than blocking on key input.
     let Some(keys) = interactive_keys() else {
@@ -404,52 +398,17 @@ fn select(
         },
         keys,
     )?;
+    // The list says nothing about which rows already have a worktree beyond the
+    // path it draws, so the action comes from looking the branch up rather than
+    // from which part of the list it was picked out of.
     let action = match selection {
         None => return Ok(None),
-        Some(Selection::Existing {
-            name,
-            kind: PickKind::Worktree,
-        }) => git::worktree_for_branch(worktrees, &name)
+        Some(Selection::Existing(name)) => git::worktree_for_branch(worktrees, &name)
             .map(Action::CdToExisting)
             .unwrap_or(Action::CreateForBranch(name)),
-        Some(Selection::Existing {
-            name,
-            kind: PickKind::Branch,
-        }) => Action::CreateForBranch(name),
         Some(Selection::Create(name)) => Action::CreateNewBranch(name),
     };
     Ok(Some(action))
-}
-
-fn build_wt_sections(
-    worktrees: &[git::Worktree],
-    current_branch: Option<&str>,
-    remote: &str,
-) -> AppResult<Vec<Section>> {
-    let held: HashSet<String> = worktrees.iter().filter_map(|w| w.branch.clone()).collect();
-
-    let mut wt_picks: Vec<Pick> = worktrees
-        .iter()
-        .filter_map(|w| {
-            w.branch.as_ref().map(|b| Pick {
-                name: b.clone(),
-                is_current: current_branch == Some(b.as_str()),
-                availability: Availability::Local,
-                kind: PickKind::Worktree,
-            })
-        })
-        .collect();
-    wt_picks.sort_by(|a, b| a.name.cmp(&b.name));
-
-    let mut sections = Vec::new();
-    if !wt_picks.is_empty() {
-        sections.push(Section {
-            heading: "Worktrees",
-            items: wt_picks,
-        });
-    }
-    sections.extend(build_sections(current_branch, remote, &held)?);
-    Ok(sections)
 }
 
 fn resolve_target(name: &str, worktrees: &[git::Worktree], remote: &str) -> AppResult<Action> {

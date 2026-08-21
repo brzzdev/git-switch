@@ -73,8 +73,12 @@ _Avoid_: Deletion (reserved for branches), cleanup, teardown
 ### Targets
 
 **Verb**:
-Which of three intents a command carries: bare `perch` goes to the branch wherever it lives, `br` checks it out in the worktree you're in, `wt` gives it one of its own. The verb decides what happens to a *Held* branch and nothing else, since git leaves exactly one move legal in every other case. See [ADR 0007](./docs/adr/0007-three-verbs-one-per-intent.md).
+Which of three intents a command carries: bare `perch` goes to the branch wherever it lives, `br` checks it out in the worktree you're in, `wt` gives it one of its own. The verb decides what happens to a *Held* branch and nothing else, since git leaves exactly one move legal in every other case. That holds in the *Catalogue* too: all three verbs draw the same list, and the only row any of them differs over is a held one. See [ADR 0007](./docs/adr/0007-three-verbs-one-per-intent.md) and [ADR 0008](./docs/adr/0008-one-list-whichever-verb-is-picking.md).
 _Avoid_: Mode, action
+
+**Catalogue**:
+Every branch the repo offers, paired with the worktree *Held*ing it. It is what the picker is built from and is the same for all three *Verb*s — a verb changes what selecting a row does, never what is listed. Turning it into rows is pure: given the branches and the worktrees, the markers and the unselectable rows follow. See [ADR 0008](./docs/adr/0008-one-list-whichever-verb-is-picking.md).
+_Avoid_: Candidates, options, menu
 
 **Subverb**:
 A word `wt` reads before it reads a branch name: `ls` and `rm`, plus the retired `list` and `remove`, which are refused rather than taken for branches. Only `wt` has any — `br` reads everything after it as a branch. Collision is positional, and `--` is needed only where the dispatcher would eat the spelling: after `wt` for a subverb, at the top level for a *Verb*. Everywhere else the bare name reaches the branch, so `perch list`, `perch br list` and `perch br wt` all work as written.
