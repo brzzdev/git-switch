@@ -1,0 +1,10 @@
+# Named for the motion, not the mode
+
+`git-switch` got both halves of its name wrong. The `git-` prefix promised subcommand dispatch a standalone binary cannot deliver — `git switch` has been a builtin since 2.23, so `git switch main` will always be git's, never ours — and `switch` named branch switching at a point where worktrees had become an equal mode of the same job, not a bolt-on to it. Every candidate that fixed the second fault by naming the second mode — `tree-switcher` and its kin — reproduced the first, and would date again the moment a third mode appeared. `perch` names the motion instead: landing on a branch, wherever it lives. It ties to git's own branch metaphor and commits to no mode, so no future mode makes it a lie.
+
+## Consequences
+
+- **The mode names stay verbs on the front of the tool.** A name that describes the motion leaves the modes to the command surface, where they can be added and reworded without the binary's name arguing with them. See [#87](https://github.com/brzzdev/perch/issues/87).
+- **No compatibility shim.** The git config keys, the `PERCH_*` hook environment, the config directory and the completion filenames all move with no fallback read of their old spellings. Dual-reading is permanent code that exists to serve one migration; this tool has one user, whose migration is a checklist run once.
+- **The ADRs and research notes keep the old name.** They record what was decided when the tool was called `git-switch`, and editing them to say otherwise makes them claim a name they were never written under. Only documents that describe the tool as it is now — `README.md`, `CONTEXT.md`, `CLAUDE.md` — were renamed through.
+- **The name no longer says what the tool does.** `git-switch` did, which is the one thing it had going for it, and it said something false. The description now lives where a reader looks for it — the first line of the README and the `description` in `Cargo.toml` — rather than being carried by a word that has to keep being true.

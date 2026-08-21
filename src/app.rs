@@ -46,7 +46,7 @@ pub fn run(target: Option<&str>) -> AppResult<()> {
     let old_branch = git::current_branch()?;
     let remote = git::current_remote(old_branch.as_deref());
 
-    // `git-switch .` refreshes the branch we're already on against its remote,
+    // `perch .` refreshes the branch we're already on against its remote,
     // rather than switching anywhere.
     if target == Some(".") {
         let Some(current) = old_branch.as_deref() else {
@@ -139,7 +139,7 @@ fn report_stash_pop() {
     }
 }
 
-/// Outcome of the keep/discard prompt shown when `git-switch .` finds local
+/// Outcome of the keep/discard prompt shown when `perch .` finds local
 /// work that a refresh would otherwise overwrite.
 enum RefreshChoice {
     /// Rebase local commits onto the remote, restoring any stashed edits.
@@ -148,7 +148,7 @@ enum RefreshChoice {
     Discard,
 }
 
-/// Refresh the branch we're on against its remote (`git-switch .`).
+/// Refresh the branch we're on against its remote (`perch .`).
 ///
 /// With nothing to pull it just reports status. When the remote has new
 /// commits, a clean tree integrates them with no prompt — fast-forwarding, or

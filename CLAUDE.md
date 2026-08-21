@@ -1,6 +1,6 @@
-# git-switch
+# perch
 
-Interactive Git branch switcher with merged branch cleanup, written in Rust.
+Interactive Git branch and worktree switcher with merged branch cleanup, written in Rust.
 
 ## Releasing
 

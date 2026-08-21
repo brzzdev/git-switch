@@ -1,21 +1,21 @@
-# git-switch shell integration (bash/zsh)
+# perch shell integration (bash/zsh)
 #
-# Wraps the `git-switch` binary so that worktree create / switch operations
+# Wraps the `perch` binary so that worktree create / switch operations
 # `cd` the parent shell into the target directory. The binary prints the
 # target path on stdout only when a `cd` hand-off is wanted; everything else
 # (prompts, status, errors) is written to stderr.
 #
 # Source from your shell rc:
-#   source ~/.config/git-switch/git-switch.sh
+#   source ~/.config/perch/perch.sh
 #
 # Behaviour:
 #   - empty stdout              → nothing to do
 #   - single-line existing dir  → cd there
 #   - anything else             → print stdout through unchanged
 
-git-switch() {
+perch() {
   local out
-  out="$(command git-switch "$@")"
+  out="$(command perch "$@")"
   local rc=$?
   if [ -z "$out" ]; then
     return $rc

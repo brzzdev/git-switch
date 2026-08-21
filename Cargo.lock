@@ -220,19 +220,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "git-switch"
-version = "1.0.13"
-dependencies = [
- "console",
- "crossterm",
- "ctrlc",
- "indicatif",
- "portable-pty",
- "tempfile",
- "thiserror 2.0.20",
-]
-
-[[package]]
 name = "hashbrown"
 version = "0.15.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -429,6 +416,19 @@ dependencies = [
  "redox_syscall",
  "smallvec",
  "windows-link",
+]
+
+[[package]]
+name = "perch"
+version = "1.0.13"
+dependencies = [
+ "console",
+ "crossterm",
+ "ctrlc",
+ "indicatif",
+ "portable-pty",
+ "tempfile",
+ "thiserror 2.0.20",
 ]
 
 [[package]]

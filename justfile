@@ -11,7 +11,7 @@ format:
 # Install the release binary locally.
 install: build-release
   mkdir -p ~/.local/bin
-  cp target/release/git-switch ~/.local/bin/git-switch
+  cp target/release/perch ~/.local/bin/perch
 
 # Install shell completions.
 install-completions:
@@ -19,18 +19,18 @@ install-completions:
   case "$(basename "$SHELL")" in \
     zsh) \
       mkdir -p ~/.zsh/completions && \
-      cp completions/_git-switch ~/.zsh/completions/_git-switch && \
-      echo "Installed zsh completion to ~/.zsh/completions/_git-switch" && \
+      cp completions/_perch ~/.zsh/completions/_perch && \
+      echo "Installed zsh completion to ~/.zsh/completions/_perch" && \
       echo "Ensure ~/.zsh/completions is in your fpath. Add to ~/.zshrc:" && \
       echo '  fpath=(~/.zsh/completions $fpath)' && \
       echo '  autoload -Uz compinit && compinit' ;; \
     bash) \
       mkdir -p ~/.local/share/bash-completion/completions && \
-      cp completions/git-switch.bash ~/.local/share/bash-completion/completions/git-switch && \
+      cp completions/perch.bash ~/.local/share/bash-completion/completions/perch && \
       echo "Installed bash completion." ;; \
     fish) \
       mkdir -p ~/.config/fish/completions && \
-      cp completions/git-switch.fish ~/.config/fish/completions/git-switch.fish && \
+      cp completions/perch.fish ~/.config/fish/completions/perch.fish && \
       echo "Installed fish completion." ;; \
     *) \
       echo "Unsupported shell: $SHELL" && exit 1 ;; \
@@ -39,18 +39,18 @@ install-completions:
 # Install the shell wrapper function (required for worktree cd hand-off).
 install-shell-integration:
   #!/usr/bin/env sh
-  mkdir -p ~/.config/git-switch
+  mkdir -p ~/.config/perch
   case "$(basename "$SHELL")" in \
     zsh|bash) \
-      cp shell/git-switch.sh ~/.config/git-switch/git-switch.sh && \
-      echo "Installed shell integration to ~/.config/git-switch/git-switch.sh" && \
+      cp shell/perch.sh ~/.config/perch/perch.sh && \
+      echo "Installed shell integration to ~/.config/perch/perch.sh" && \
       echo "Add to your shell rc:" && \
-      echo "  source ~/.config/git-switch/git-switch.sh" ;; \
+      echo "  source ~/.config/perch/perch.sh" ;; \
     fish) \
-      cp shell/git-switch.fish ~/.config/git-switch/git-switch.fish && \
-      echo "Installed shell integration to ~/.config/git-switch/git-switch.fish" && \
-      echo "Add to ~/.config/fish/conf.d/git-switch.fish:" && \
-      echo "  source ~/.config/git-switch/git-switch.fish" ;; \
+      cp shell/perch.fish ~/.config/perch/perch.fish && \
+      echo "Installed shell integration to ~/.config/perch/perch.fish" && \
+      echo "Add to ~/.config/fish/conf.d/perch.fish:" && \
+      echo "  source ~/.config/perch/perch.fish" ;; \
     *) \
       echo "Unsupported shell: $SHELL" && exit 1 ;; \
   esac

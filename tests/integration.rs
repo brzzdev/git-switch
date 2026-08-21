@@ -58,33 +58,33 @@ fn git(dir: &Path, args: &[&str]) -> Output {
 }
 
 /// Hooks come from git config, which layers in the developer's global file, so
-/// suppress them everywhere: a machine with `git-switch.hook.created` set would
+/// suppress them everywhere: a machine with `perch.hook.created` set would
 /// otherwise run it throughout the suite. The hook tests use
-/// [`git_switch_hooked`].
-fn git_switch_args(dir: &Path, args: &[&str]) -> Output {
-    git_switch_command(dir, args)
-        .env("GIT_SWITCH_NO_HOOKS", "1")
+/// [`perch_hooked`].
+fn perch_args(dir: &Path, args: &[&str]) -> Output {
+    perch_command(dir, args)
+        .env("PERCH_NO_HOOKS", "1")
         .output()
-        .expect("failed to run git-switch")
+        .expect("failed to run perch")
 }
 
-/// Like [`git_switch_args`], but with hooks left on — for the tests that
+/// Like [`perch_args`], but with hooks left on — for the tests that
 /// configure one in the repo under test.
-fn git_switch_hooked(dir: &Path, args: &[&str]) -> Output {
-    git_switch_command(dir, args)
-        .env_remove("GIT_SWITCH_NO_HOOKS")
+fn perch_hooked(dir: &Path, args: &[&str]) -> Output {
+    perch_command(dir, args)
+        .env_remove("PERCH_NO_HOOKS")
         .output()
-        .expect("failed to run git-switch")
+        .expect("failed to run perch")
 }
 
-fn git_switch_command(dir: &Path, args: &[&str]) -> Command {
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_git-switch"));
+fn perch_command(dir: &Path, args: &[&str]) -> Command {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_perch"));
     cmd.args(args).current_dir(dir);
     cmd
 }
 
-fn git_switch(dir: &Path, branch: &str) -> Output {
-    git_switch_args(dir, &[branch])
+fn perch(dir: &Path, branch: &str) -> Output {
+    perch_args(dir, &[branch])
 }
 
 /// Point a bare repo's HEAD at `main`.
@@ -199,7 +199,7 @@ fn stderr_str(output: &Output) -> String {
 /// Just the names of the stale branches. Which ground each is stale on is
 /// covered by the unit tests in `git`, against fixed refs rather than a repo.
 fn stale_names(remote: &str) -> Vec<String> {
-    git_switch::git::stale_branches(remote)
+    perch::git::stale_branches(remote)
         .unwrap()
         .into_iter()
         .map(|b| b.name)
@@ -216,7 +216,7 @@ fn fast_forward_pull() {
 
     push_upstream_change(work.path(), "file.txt", "updated\n", "upstream change");
 
-    let output = git_switch(work.path(), "main");
+    let output = perch(work.path(), "main");
 
     assert!(output.status.success(), "stderr: {}", stderr_str(&output));
     assert!(
@@ -244,7 +244,7 @@ fn auto_stash_and_restore() {
     // Dirty a tracked file.
     fs::write(work.path().join("other.txt"), "local work in progress\n").unwrap();
 
-    let output = git_switch(work.path(), "main");
+    let output = perch(work.path(), "main");
 
     assert!(output.status.success(), "stderr: {}", stderr_str(&output));
     assert!(
@@ -267,7 +267,7 @@ fn stash_pop_conflict_shows_guidance() {
     // Create a conflicting local modification to the same file.
     fs::write(work.path().join("file.txt"), "local version\n").unwrap();
 
-    let output = git_switch(work.path(), "main");
+    let output = perch(work.path(), "main");
 
     // The pull itself succeeds; only the stash pop conflicts.
     assert!(output.status.success(), "stderr: {}", stderr_str(&output));
@@ -310,7 +310,7 @@ fn diverged_branch_reports_error() {
     git(second.path(), &["commit", "-m", "remote diverge"]);
     git(second.path(), &["push", "--force", "origin", "feature"]);
 
-    let output = git_switch(work.path(), "feature");
+    let output = perch(work.path(), "feature");
 
     assert!(!output.status.success());
 
@@ -327,7 +327,7 @@ fn refresh_dot_fast_forwards_clean_branch() {
 
     push_upstream_change(work.path(), "file.txt", "updated\n", "upstream change");
 
-    let output = git_switch(work.path(), ".");
+    let output = perch(work.path(), ".");
 
     assert!(output.status.success(), "stderr: {}", stderr_str(&output));
     assert!(
@@ -343,7 +343,7 @@ fn refresh_dot_fast_forwards_clean_branch() {
 fn refresh_dot_already_up_to_date_reports_so() {
     let (_bare, work) = setup();
 
-    let output = git_switch(work.path(), ".");
+    let output = perch(work.path(), ".");
 
     assert!(output.status.success(), "stderr: {}", stderr_str(&output));
     assert!(
@@ -372,7 +372,7 @@ fn refresh_dot_clean_diverge_rebases_onto_remote() {
     );
     git(work.path(), &["fetch", "origin"]);
 
-    let output = git_switch(work.path(), ".");
+    let output = perch(work.path(), ".");
 
     // Clean tree: the local commit is rebased on top of the remote commit with
     // no prompt. Both changes are present and origin/main is now in HEAD.
@@ -413,7 +413,7 @@ fn refresh_dot_clean_diverge_with_conflict_aborts() {
     );
     git(work.path(), &["fetch", "origin"]);
 
-    let output = git_switch(work.path(), ".");
+    let output = perch(work.path(), ".");
 
     // The rebase conflicts, aborts, and restores the original HEAD.
     assert!(!output.status.success());
@@ -439,7 +439,7 @@ fn refresh_dot_dirty_with_incoming_is_left_unchanged_non_interactively() {
     fs::write(work.path().join("file.txt"), "uncommitted edit\n").unwrap();
     let head_before = stdout_str(&git(work.path(), &["rev-parse", "HEAD"]));
 
-    let output = git_switch(work.path(), ".");
+    let output = perch(work.path(), ".");
 
     assert!(output.status.success(), "stderr: {}", stderr_str(&output));
     let stderr = stderr_str(&output);
@@ -470,7 +470,7 @@ fn refresh_dot_with_unpushed_commit_reports_ahead_only() {
     git(work.path(), &["commit", "-m", "local only"]);
     let local_head = stdout_str(&git(work.path(), &["rev-parse", "HEAD"]));
 
-    let output = git_switch(work.path(), ".");
+    let output = perch(work.path(), ".");
 
     assert!(output.status.success(), "stderr: {}", stderr_str(&output));
     let stderr = stderr_str(&output);
@@ -491,7 +491,7 @@ fn refresh_dot_on_detached_head_errors() {
 
     git(work.path(), &["checkout", "--detach"]);
 
-    let output = git_switch(work.path(), ".");
+    let output = perch(work.path(), ".");
 
     assert!(!output.status.success());
     assert!(
@@ -668,7 +668,7 @@ fn tracked_branch_without_unique_commits_not_stale() {
     );
 }
 
-/// Adds a worktree the way `git-switch wt` does: a new branch off
+/// Adds a worktree the way `perch wt` does: a new branch off
 /// `origin/main`, tracking it.
 fn add_worktree_branch(work: &Path, parent: &Path, branch: &str) -> PathBuf {
     let path = parent.join("worktrees").join("repo").join(branch);
@@ -726,7 +726,7 @@ fn fresh_worktree_branch_is_not_stale_from_a_sibling_worktree() {
     );
 }
 
-/// `git-switch wt`'s own merge-locally workflow: a worktree branch that did real
+/// `perch wt`'s own merge-locally workflow: a worktree branch that did real
 /// work, fast-forwarded into main. It tracks `origin/main` rather than its own
 /// counterpart rather than its own, so only being *ahead* of what it tracks
 /// separates it from a branch that never held a commit.
@@ -872,7 +872,7 @@ fn worktree_add_sets_upstream_with_auto_setup_merge_off() {
     fs::create_dir_all(path.parent().unwrap()).unwrap();
 
     let _cwd = cwd_at(&work);
-    git_switch::git::worktree_add(&path, "feature", Some("origin/main")).unwrap();
+    perch::git::worktree_add(&path, "feature", Some("origin/main")).unwrap();
 
     let upstream = git(
         &work,
@@ -903,10 +903,10 @@ fn force_delete_branch_removes_branch() {
 
     let _cwd = cwd_at(work.path());
     for name in ["feat-a", "feat-b"] {
-        let outcome = git_switch::git::force_delete_branch(None, name)
+        let outcome = perch::git::force_delete_branch(None, name)
             .expect("force_delete_branch should not error");
         assert!(
-            matches!(outcome, git_switch::git::BranchDeleteOutcome::Deleted),
+            matches!(outcome, perch::git::BranchDeleteOutcome::Deleted),
             "{name} should report as deleted"
         );
     }
@@ -941,7 +941,7 @@ fn worktree_held_stale_branch_is_no_longer_reported_as_skipped() {
         &["worktree", "add", worktree_path.to_str().unwrap(), "wip"],
     );
 
-    let output = git_switch(work.path(), "main");
+    let output = perch(work.path(), "main");
 
     assert!(output.status.success(), "stderr: {}", stderr_str(&output));
 
@@ -974,16 +974,16 @@ fn worktree_held_stale_branch_is_no_longer_reported_as_skipped() {
 #[test]
 fn help_flag_prints_usage() {
     let dir = TempDir::new().unwrap();
-    let output = git_switch(dir.path(), "--help");
+    let output = perch(dir.path(), "--help");
 
     assert!(output.status.success(), "stderr: {}", stderr_str(&output));
     let out = stdout_str(&output);
     assert!(
-        out.contains("Usage: git-switch"),
+        out.contains("Usage: perch"),
         "expected usage line, got: {out}"
     );
     assert!(
-        out.contains("git-switch wt"),
+        out.contains("perch wt"),
         "expected worktree usage in help, got: {out}"
     );
 }
@@ -991,12 +991,12 @@ fn help_flag_prints_usage() {
 #[test]
 fn version_flag_prints_version() {
     let dir = TempDir::new().unwrap();
-    let output = git_switch(dir.path(), "--version");
+    let output = perch(dir.path(), "--version");
 
     assert!(output.status.success(), "stderr: {}", stderr_str(&output));
     assert_eq!(
         stdout_str(&output).trim(),
-        format!("git-switch {}", env!("CARGO_PKG_VERSION"))
+        format!("perch {}", env!("CARGO_PKG_VERSION"))
     );
 }
 
@@ -1012,7 +1012,7 @@ fn non_origin_remote_pulls_via_branch_config() {
         "upstream change",
     );
 
-    let output = git_switch(work.path(), "main");
+    let output = perch(work.path(), "main");
 
     assert!(output.status.success(), "stderr: {}", stderr_str(&output));
     assert!(
@@ -1059,7 +1059,7 @@ fn current_remote_handles_multiline_config_value() {
     );
 
     let _cwd = cwd_at(work.path());
-    let remote = git_switch::git::current_remote(Some("main"));
+    let remote = perch::git::current_remote(Some("main"));
 
     assert_eq!(remote, "upstream");
 }
@@ -1090,10 +1090,10 @@ fn rebase_replays_local_commits_onto_remote() {
     git(work.path(), &["fetch", "origin"]);
 
     let _cwd = cwd_at(work.path());
-    let outcome = git_switch::git::rebase("origin/feature").expect("rebase call failed");
+    let outcome = perch::git::rebase("origin/feature").expect("rebase call failed");
 
     assert!(
-        matches!(outcome, git_switch::git::RebaseOutcome::Clean),
+        matches!(outcome, perch::git::RebaseOutcome::Clean),
         "expected Clean rebase outcome"
     );
     assert!(
@@ -1132,10 +1132,10 @@ fn rebase_aborts_on_conflict_and_leaves_clean_tree() {
     git(work.path(), &["fetch", "origin"]);
 
     let _cwd = cwd_at(work.path());
-    let outcome = git_switch::git::rebase("origin/feature").expect("rebase call failed");
+    let outcome = perch::git::rebase("origin/feature").expect("rebase call failed");
 
     assert!(
-        matches!(outcome, git_switch::git::RebaseOutcome::Aborted),
+        matches!(outcome, perch::git::RebaseOutcome::Aborted),
         "expected Aborted rebase outcome"
     );
 
@@ -1157,7 +1157,7 @@ fn pinned_branches_includes_default_first() {
     git(work.path(), &["remote", "set-head", "origin", "main"]);
 
     let _cwd = cwd_at(work.path());
-    let pinned = git_switch::git::pinned_branches("origin");
+    let pinned = perch::git::pinned_branches("origin");
 
     assert_eq!(
         pinned.first().map(String::as_str),
@@ -1175,16 +1175,16 @@ fn pinned_branches_appends_keep_config_in_order_and_dedups() {
     // and reorder release branches to verify config order is preserved.
     git(
         work.path(),
-        &["config", "--add", "git-switch.keep", "release/v2"],
+        &["config", "--add", "perch.keep", "release/v2"],
     );
-    git(work.path(), &["config", "--add", "git-switch.keep", "main"]);
+    git(work.path(), &["config", "--add", "perch.keep", "main"]);
     git(
         work.path(),
-        &["config", "--add", "git-switch.keep", "release/v1"],
+        &["config", "--add", "perch.keep", "release/v1"],
     );
 
     let _cwd = cwd_at(work.path());
-    let pinned = git_switch::git::pinned_branches("origin");
+    let pinned = perch::git::pinned_branches("origin");
 
     let position = |name: &str| pinned.iter().position(|p| p == name);
     let main = position("main").expect("main should be present");
@@ -1207,7 +1207,7 @@ fn detached_head_can_switch_to_branch() {
 
     git(work.path(), &["checkout", "--detach", "HEAD"]);
 
-    let output = git_switch(work.path(), "main");
+    let output = perch(work.path(), "main");
 
     assert!(output.status.success(), "stderr: {}", stderr_str(&output));
 
@@ -1221,7 +1221,7 @@ fn wt_creates_worktree_for_existing_local_branch() {
 
     git(&work, &["branch", "feature"]);
 
-    let output = git_switch_args(&work, &["wt", "feature"]);
+    let output = perch_args(&work, &["wt", "feature"]);
     assert!(output.status.success(), "stderr: {}", stderr_str(&output));
 
     let expected = parent.path().join("worktrees").join("repo").join("feature");
@@ -1248,7 +1248,7 @@ fn wt_creates_worktree_for_existing_local_branch() {
 fn wt_creates_new_branch_from_default_when_branch_absent() {
     let (_bare, parent, work) = setup_with_parent();
 
-    let output = git_switch_args(&work, &["wt", "brand-new"]);
+    let output = perch_args(&work, &["wt", "brand-new"]);
     assert!(output.status.success(), "stderr: {}", stderr_str(&output));
 
     let expected = parent
@@ -1277,7 +1277,7 @@ fn wt_preserves_slashes_as_subdirs() {
 
     git(&work, &["branch", "feature/nested"]);
 
-    let output = git_switch_args(&work, &["wt", "feature/nested"]);
+    let output = perch_args(&work, &["wt", "feature/nested"]);
     assert!(output.status.success(), "stderr: {}", stderr_str(&output));
 
     let expected = parent
@@ -1304,7 +1304,7 @@ fn wt_cd_to_existing_worktree_prints_path() {
         &["worktree", "add", path.to_str().unwrap(), "feature"],
     );
 
-    let output = git_switch_args(&work, &["wt", "feature"]);
+    let output = perch_args(&work, &["wt", "feature"]);
     assert!(output.status.success(), "stderr: {}", stderr_str(&output));
 
     let printed = stdout_str(&output).trim().to_string();
@@ -1329,7 +1329,7 @@ fn wt_refuses_when_target_path_is_stale_non_worktree_directory() {
     fs::create_dir_all(&stale).unwrap();
     fs::write(stale.join("leftover.txt"), "junk").unwrap();
 
-    let output = git_switch_args(&work, &["wt", "feature"]);
+    let output = perch_args(&work, &["wt", "feature"]);
     assert!(!output.status.success());
 
     let combined = format!("{}{}", stdout_str(&output), stderr_str(&output));
@@ -1345,7 +1345,7 @@ fn wt_recreates_worktree_whose_directory_was_deleted_by_hand() {
 
     // Create a worktree, then delete its directory without telling git. The
     // registration lingers as "missing but already registered" and would block
-    // `git worktree add`; git-switch should prune it and recreate cleanly.
+    // `git worktree add`; perch should prune it and recreate cleanly.
     let path = parent.path().join("worktrees").join("repo").join("feature");
     git(
         &work,
@@ -1353,7 +1353,7 @@ fn wt_recreates_worktree_whose_directory_was_deleted_by_hand() {
     );
     fs::remove_dir_all(&path).unwrap();
 
-    let output = git_switch_args(&work, &["wt", "feature"]);
+    let output = perch_args(&work, &["wt", "feature"]);
     assert!(output.status.success(), "stderr: {}", stderr_str(&output));
     assert!(
         path.is_dir(),
@@ -1379,7 +1379,7 @@ fn wt_ls_lists_all_worktrees() {
         &["worktree", "add", path.to_str().unwrap(), "feature"],
     );
 
-    let output = git_switch_args(&work, &["wt", "ls"]);
+    let output = perch_args(&work, &["wt", "ls"]);
     assert!(output.status.success(), "stderr: {}", stderr_str(&output));
 
     let out = stdout_str(&output);
@@ -1401,7 +1401,7 @@ fn wt_rm_removes_worktree_and_deletes_branch() {
         &["worktree", "add", path.to_str().unwrap(), "feature"],
     );
 
-    let output = git_switch_args(&work, &["wt", "rm", "feature"]);
+    let output = perch_args(&work, &["wt", "rm", "feature"]);
     assert!(output.status.success(), "stderr: {}", stderr_str(&output));
 
     assert!(
@@ -1457,7 +1457,7 @@ fn wt_rm_deletes_an_untracked_merged_branch_from_an_unrelated_worktree() {
     git(&elsewhere, &["add", "other.txt"]);
     git(&elsewhere, &["commit", "-m", "other"]);
 
-    let output = git_switch_args(&elsewhere, &["wt", "rm", "feature-done"]);
+    let output = perch_args(&elsewhere, &["wt", "rm", "feature-done"]);
     assert!(output.status.success(), "stderr: {}", stderr_str(&output));
 
     let branches = git(&work, &["branch", "--format=%(refname:short)"]);
@@ -1479,8 +1479,8 @@ fn in_place_switch_hands_off_when_branch_is_held_by_worktree() {
         &["worktree", "add", path.to_str().unwrap(), "feature"],
     );
 
-    // Plain `git-switch feature` from main worktree: branch is held → handoff.
-    let output = git_switch(&work, "feature");
+    // Plain `perch feature` from main worktree: branch is held → handoff.
+    let output = perch(&work, "feature");
     assert!(output.status.success(), "stderr: {}", stderr_str(&output));
 
     let printed = stdout_str(&output).trim().to_string();
@@ -1517,7 +1517,7 @@ fn wt_rm_refuses_unmerged_branch_non_interactively() {
     let path = add_worktree(&work, &parent, "feature");
     commit_in(&path, "new.txt", "unmerged work");
 
-    let output = git_switch_args(&work, &["wt", "rm", "feature"]);
+    let output = perch_args(&work, &["wt", "rm", "feature"]);
 
     assert!(
         !output.status.success(),
@@ -1549,7 +1549,7 @@ fn wt_rm_refuses_dirty_worktree_non_interactively() {
     let path = add_worktree(&work, &parent, "feature");
     fs::write(path.join("scratch.txt"), "uncommitted\n").unwrap();
 
-    let output = git_switch_args(&work, &["wt", "rm", "feature"]);
+    let output = perch_args(&work, &["wt", "rm", "feature"]);
 
     assert!(
         !output.status.success(),
@@ -1573,7 +1573,7 @@ fn wt_rm_force_removes_dirty_worktree_and_unmerged_branch() {
     commit_in(&path, "new.txt", "unmerged work");
     fs::write(path.join("scratch.txt"), "uncommitted\n").unwrap();
 
-    let output = git_switch_args(&work, &["wt", "rm", "feature", "--force"]);
+    let output = perch_args(&work, &["wt", "rm", "feature", "--force"]);
     assert!(output.status.success(), "stderr: {}", stderr_str(&output));
 
     assert!(
@@ -1596,7 +1596,7 @@ fn wt_rm_dot_removes_the_current_worktree() {
     let (_bare, parent, work) = setup_with_parent();
     let path = add_worktree(&work, &parent, "feature");
 
-    let output = git_switch_args(&path, &["wt", "rm", "."]);
+    let output = perch_args(&path, &["wt", "rm", "."]);
     assert!(output.status.success(), "stderr: {}", stderr_str(&output));
 
     assert!(
@@ -1624,7 +1624,7 @@ fn wt_rm_dot_sees_its_own_branch_as_unmerged() {
     let path = add_worktree(&work, &parent, "feature");
     commit_in(&path, "new.txt", "unmerged work");
 
-    let output = git_switch_args(&path, &["wt", "rm", "."]);
+    let output = perch_args(&path, &["wt", "rm", "."]);
 
     assert!(
         !output.status.success(),
@@ -1646,7 +1646,7 @@ fn wt_rm_dot_force_leaves_no_branch_behind() {
     let path = add_worktree(&work, &parent, "feature");
     commit_in(&path, "new.txt", "unmerged work");
 
-    let output = git_switch_args(&path, &["wt", "rm", ".", "--force"]);
+    let output = perch_args(&path, &["wt", "rm", ".", "--force"]);
     assert!(output.status.success(), "stderr: {}", stderr_str(&output));
 
     assert!(
@@ -1669,7 +1669,7 @@ fn wt_rm_dot_in_the_main_worktree_errors() {
     // on there being nothing to remove at all.
     add_worktree(&work, &parent, "feature");
 
-    let output = git_switch_args(&work, &["wt", "rm", "."]);
+    let output = perch_args(&work, &["wt", "rm", "."]);
 
     assert!(
         !output.status.success(),
@@ -1689,7 +1689,7 @@ fn wt_rm_dot_refuses_dirty_worktree_non_interactively() {
     let path = add_worktree(&work, &parent, "feature");
     fs::write(path.join("scratch.txt"), "uncommitted\n").unwrap();
 
-    let output = git_switch_args(&path, &["wt", "rm", "."]);
+    let output = perch_args(&path, &["wt", "rm", "."]);
 
     assert!(
         !output.status.success(),
@@ -1705,7 +1705,7 @@ fn double_dash_switches_to_branch_named_like_subcommand() {
 
     git(work.path(), &["branch", "wt"]);
 
-    let output = git_switch_args(work.path(), &["--", "wt"]);
+    let output = perch_args(work.path(), &["--", "wt"]);
     assert!(output.status.success(), "stderr: {}", stderr_str(&output));
 
     let head = git(work.path(), &["branch", "--show-current"]);
@@ -1735,7 +1735,7 @@ fn wt_rm_from_inside_doomed_worktree_hands_off_to_main() {
 
     // Run `wt rm feature` *from inside* the worktree being removed: cwd would
     // vanish, so it must chdir to main and hand that path off for the wrapper.
-    let output = git_switch_args(&path, &["wt", "rm", "feature"]);
+    let output = perch_args(&path, &["wt", "rm", "feature"]);
     assert!(output.status.success(), "stderr: {}", stderr_str(&output));
     assert!(!path.exists(), "worktree dir should be removed");
 
@@ -1774,8 +1774,8 @@ fn handoff_fast_forwards_held_worktree_from_its_own_remote() {
         .to_string();
     git(&path, &["reset", "--hard", "HEAD~1"]);
 
-    // Plain `git-switch feature` from main: hands off and updates the worktree.
-    let output = git_switch(&work, "feature");
+    // Plain `perch feature` from main: hands off and updates the worktree.
+    let output = perch(&work, "feature");
     assert!(output.status.success(), "stderr: {}", stderr_str(&output));
     assert!(
         stderr_str(&output).contains("Pulled 1 commit"),
@@ -1799,7 +1799,7 @@ fn wt_rm_reports_failure_and_keeps_branch_when_worktree_is_locked() {
     // which we deliberately don't escalate to.
     git(&work, &["worktree", "lock", path.to_str().unwrap()]);
 
-    let output = git_switch_args(&work, &["wt", "rm", "feature", "--force"]);
+    let output = perch_args(&work, &["wt", "rm", "feature", "--force"]);
     // The command itself succeeds (per-worktree failures are reported, not fatal).
     assert!(output.status.success(), "stderr: {}", stderr_str(&output));
     assert!(
@@ -1832,7 +1832,7 @@ fn wt_rm_clears_missing_detached_worktree_by_dir_name() {
     );
     fs::remove_dir_all(&path).unwrap();
 
-    let output = git_switch_args(&work, &["wt", "rm", "scratch"]);
+    let output = perch_args(&work, &["wt", "rm", "scratch"]);
     assert!(output.status.success(), "stderr: {}", stderr_str(&output));
 
     let list = stdout_str(&git(&work, &["worktree", "list", "--porcelain"]));
@@ -1866,7 +1866,7 @@ fn poll_until(mut ready: impl FnMut() -> bool) -> bool {
 
 /// Kills the child when the test ends, however it ends. An assertion that fires
 /// mid-session — a `wait_for` timeout, say — unwinds with the picker still on
-/// screen, and an orphaned pty-attached git-switch would outlive the test.
+/// screen, and an orphaned pty-attached perch would outlive the test.
 struct ChildGuard(Box<dyn portable_pty::Child + Send + Sync>);
 
 impl Drop for ChildGuard {
@@ -1906,7 +1906,7 @@ fn wait_for(seen: &Mutex<Vec<u8>>, needle: &str) {
 /// `before_confirm`, confirms, and returns every byte the child wrote.
 ///
 /// `hooks` leaves worktree hooks on for the tests that configure one in the repo
-/// under test; every other caller wants them off, as [`git_switch_args`] does.
+/// under test; every other caller wants them off, as [`perch_args`] does.
 fn drive_cleanup_prompt(
     work: &Path,
     target: &str,
@@ -1921,11 +1921,11 @@ fn drive_cleanup_prompt(
     let pty = native_pty_system()
         .openpty(PtySize::default())
         .expect("failed to open pty");
-    let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_git-switch"));
+    let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_perch"));
     cmd.arg(target);
     cmd.cwd(work);
     if !hooks {
-        cmd.env("GIT_SWITCH_NO_HOOKS", "1");
+        cmd.env("PERCH_NO_HOOKS", "1");
     }
     let mut child = ChildGuard(pty.slave.spawn_command(cmd).expect("failed to spawn"));
     drop(pty.slave);
@@ -2512,7 +2512,7 @@ fn an_untouched_branch_cut_from_the_anchor_is_not_read_as_landed() {
         stale_names("origin")
     );
     assert!(
-        git_switch::git::equivalent_branches(None, "origin", &["fresh"]).is_empty(),
+        perch::git::equivalent_branches(None, "origin", &["fresh"]).is_empty(),
         "and an empty diff proves nothing, so equivalence cannot offer it either"
     );
 }
@@ -2529,12 +2529,12 @@ fn wt_hooks_report_each_creation_and_removal_once() {
 
     let log = parent.path().join("hook.log");
     let script = format!(
-        "printf '%s|%s|%s|%s|%s\\n' \"$GIT_SWITCH_EVENT\" \"$GIT_SWITCH_BRANCH\" \
-         \"$GIT_SWITCH_MAIN\" \"$GIT_SWITCH_WORKTREE\" \"$(pwd -P)\" >> '{}'",
+        "printf '%s|%s|%s|%s|%s\\n' \"$PERCH_EVENT\" \"$PERCH_BRANCH\" \
+         \"$PERCH_MAIN\" \"$PERCH_WORKTREE\" \"$(pwd -P)\" >> '{}'",
         log.display()
     );
-    git(&work, &["config", "git-switch.hook.created", &script]);
-    git(&work, &["config", "git-switch.hook.removed", &script]);
+    git(&work, &["config", "perch.hook.created", &script]);
+    git(&work, &["config", "perch.hook.removed", &script]);
 
     // An existing branch and a new one take different creation arms; both are
     // creations as far as a hook is concerned.
@@ -2544,7 +2544,7 @@ fn wt_hooks_report_each_creation_and_removal_once() {
         ["wt", "brand-new"].as_slice(),
         ["wt", "rm", "feature", "--force"].as_slice(),
     ] {
-        let output = git_switch_hooked(&work, args);
+        let output = perch_hooked(&work, args);
         assert!(
             output.status.success(),
             "`{}` failed: {}",
@@ -2588,12 +2588,12 @@ fn a_failing_wt_hook_leaves_the_worktree_and_the_handoff_intact() {
         &work,
         &[
             "config",
-            "git-switch.hook.created",
+            "perch.hook.created",
             "echo 'hook says no' >&2; exit 3",
         ],
     );
 
-    let output = git_switch_hooked(&work, &["wt", "feature"]);
+    let output = perch_hooked(&work, &["wt", "feature"]);
     assert!(
         output.status.success(),
         "a failing hook must not fail the command; stderr: {}",
@@ -2632,10 +2632,10 @@ fn a_chatty_wt_hook_cannot_corrupt_the_handoff() {
 
     git(
         &work,
-        &["config", "git-switch.hook.created", "echo /somewhere/else"],
+        &["config", "perch.hook.created", "echo /somewhere/else"],
     );
 
-    let output = git_switch_hooked(&work, &["wt", "feature"]);
+    let output = perch_hooked(&work, &["wt", "feature"]);
     assert!(output.status.success(), "stderr: {}", stderr_str(&output));
 
     let stdout = stdout_str(&output);
@@ -2659,7 +2659,7 @@ fn a_chatty_wt_hook_cannot_corrupt_the_handoff() {
 
 /// A stale branch held by a worktree takes that worktree with it, which is as
 /// much a removal as `wt rm` is — so the hook fires there too. Without it,
-/// `git-switch wt <branch>` could announce a creation and then silently destroy
+/// `perch wt <branch>` could announce a creation and then silently destroy
 /// a different worktree in the same breath. The prompt is interactive, so this
 /// drives it over a real pty.
 #[test]
@@ -2687,11 +2687,11 @@ fn a_stale_branch_taking_its_worktree_fires_the_removal_hook() {
 
     let log = parent.path().join("hook.log");
     let script = format!(
-        "printf '%s|%s|%s\\n' \"$GIT_SWITCH_EVENT\" \"$GIT_SWITCH_BRANCH\" \
-         \"$GIT_SWITCH_WORKTREE\" >> '{}'",
+        "printf '%s|%s|%s\\n' \"$PERCH_EVENT\" \"$PERCH_BRANCH\" \
+         \"$PERCH_WORKTREE\" >> '{}'",
         log.display()
     );
-    git(work.path(), &["config", "git-switch.hook.removed", &script]);
+    git(work.path(), &["config", "perch.hook.removed", &script]);
 
     drive_cleanup_prompt(work.path(), "dest", "wip", true, || {});
 

@@ -3,7 +3,7 @@
 //!
 //! [`removal`](super::removal) decides what happens; this decides how it reads.
 //! Both destruction flows — the stale-branch prompt that follows a switch, and
-//! `git-switch wt rm` — hand their [`removal::Report`] to [`removal_outcome`]
+//! `perch wt rm` — hand their [`removal::Report`] to [`removal_outcome`]
 //! and print what comes back, so the answer never depends on which command you
 //! arrived through. The *Marker* glyphs a picker row draws instead belong to
 //! [`marker`](super::marker).
