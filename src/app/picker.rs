@@ -651,6 +651,9 @@ fn render(term: &Term, view: &View, cursor: usize, filter: &str, prompt_label: &
 /// and the `*` column, each followed by a space.
 const ROW_INDENT: usize = 6;
 
+/// Columns between a name and its annotation.
+const ANNOTATION_GAP: usize = 2;
+
 /// Shortens `text` to `width` columns, keeping the head and marking the cut —
 /// a branch name reads from the left.
 fn clip_end(text: &str, width: usize) -> String {
@@ -715,14 +718,21 @@ fn format_row(row: &RenderRow, is_cursor: bool, name_column: usize, width: usize
             // exactly as `align_labels` leaves an over-wide name unpadded.
             let name = clip_end(&pick.name, body.max(1));
             let name_w = measure_text_width(&name);
+            // The column is a shared target, so it is capped against this
+            // terminal before it is spent: one name wide enough to fill the row
+            // would otherwise pad every *other* row out to the edge, dropping
+            // annotations that had room. Half the body splits the row evenly,
+            // and the outsized name overruns its own padding instead — which is
+            // already what a name longer than the column does.
+            let column = name_column.min(body / 2);
             // Padded here rather than by `align_labels`, which joins the pair
             // into one string: the name and its annotation are styled
             // separately, so they have to stay separate.
-            let pad_w = name_column
+            let pad_w = column
                 .saturating_sub(name_w)
                 .min(body.saturating_sub(name_w));
             let pad = " ".repeat(pad_w);
-            let room = body.saturating_sub(name_w + pad_w + 2);
+            let room = body.saturating_sub(name_w + pad_w + ANNOTATION_GAP);
 
             // Below a few columns there is no annotation worth reading, and a
             // bare name beats a lone ellipsis.
@@ -1486,6 +1496,21 @@ mod tests {
         let row = item_row("feature", "/very/long/path", false);
         let drawn = plain(&format_row(&row, false, 7, 14));
         assert_eq!(drawn, "      feature");
+    }
+
+    /// The alignment column is shared, so an over-wide name must pay for itself
+    /// rather than charging every other row: a single long branch used to set a
+    /// column past the terminal edge, and the short rows around it lost the
+    /// annotations they had room for.
+    #[test]
+    fn one_over_wide_name_does_not_cost_the_short_rows_their_annotations() {
+        let column = measure_text_width(&"l".repeat(100));
+        let row = item_row("feature", "/Users/someone/worktrees/repo/feature", false);
+        let drawn = plain(&format_row(&row, false, column, 80));
+        assert!(
+            drawn.ends_with("worktrees/repo/feature"),
+            "the short row should keep the annotation it has room for, got: {drawn:?}"
+        );
     }
 
     #[test]
