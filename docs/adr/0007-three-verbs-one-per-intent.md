@@ -5,7 +5,7 @@ Branches and worktrees are two modes of one job — get me onto that code — bu
 The bare verb needs no mode prompt, because git already refuses the ambiguity:
 
 ```
-fatal: 'feat' is already used by worktree at '/tmp/…/wt-feat'
+fatal: 'feature' is already used by worktree at '/private/tmp/dev/worktrees/repo/feature'
 ```
 
 A branch held by another worktree cannot be checked out here, and a branch held by nothing cannot be `cd`'d to. Whichever state `perch <name>` finds, exactly one move is legal, so asking the user to choose would offer them an option that does not exist.
