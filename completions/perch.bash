@@ -10,16 +10,11 @@ _perch_branches_except() {
   _perch_branches | grep -vxE "$1"
 }
 
-# Targets `wt rm` will accept, spelled the way `rm_matches` in src/app/wt.rs
-# reads them. Porcelain records end with a blank line, so counting terminators
-# is what lets the first record — always the main worktree — go by unprinted.
+# Targets `wt rm` will accept — asked of the binary, which reads them off the
+# same matcher the command does. `command` skips the shell wrapper: it is a
+# function here, and it would `cd` the interactive shell on a single-line answer.
 _perch_wt_targets() {
-  git worktree list --porcelain 2>/dev/null | awk '
-    /^worktree /            { path = substr($0, 10); branch = "" }
-    /^branch refs\/heads\// { branch = substr($0, 19) }
-    /^$/ && ++seen > 1      { if (branch != "") print branch
-                              else { n = split(path, parts, "/"); print parts[n] } }
-  '
+  command perch wt rm --complete 2>/dev/null
 }
 
 # `wt rm` reads its target as the first word after `rm` that isn't an option,

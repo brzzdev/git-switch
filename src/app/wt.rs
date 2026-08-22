@@ -239,6 +239,33 @@ pub fn run_rm(target: Option<&str>, force: bool) -> AppResult<()> {
     Ok(())
 }
 
+/// `wt rm --complete` — the names `wt rm` will accept, one per line, for the
+/// shell completions to offer. The three completion files each reimplemented
+/// this in awk against `git worktree list --porcelain`; asking the binary
+/// instead leaves one implementation, reachable from the integration tests.
+///
+/// It is the same two pieces of `run_rm`: the `!is_main` filter on the full
+/// worktree list — prunable ones included, since clearing a dead registration
+/// is what `wt rm` is for — and [`rm_names`], the matcher itself. `.` is
+/// deliberately absent: it is one character, and every shell already completes
+/// it as a path.
+///
+/// Two worktrees can share a basename under different parents, so names are
+/// emitted once each; `run_rm` takes the first worktree that matches either way.
+pub fn run_rm_complete() -> AppResult<()> {
+    let worktrees = git::worktree_list()?;
+    let mut seen = std::collections::HashSet::new();
+    for name in worktrees
+        .iter()
+        .filter(|w| !w.is_main)
+        .flat_map(rm_names)
+        .filter(|name| seen.insert(*name))
+    {
+        println!("{name}");
+    }
+    Ok(())
+}
+
 /// Resolves which worktrees to remove: a single named target (`.` for the one
 /// the cwd sits in), or a multi-select whose rows carry risk markers.
 fn select_for_removal(
@@ -507,10 +534,25 @@ fn rm_label(w: &git::Worktree, is_current: bool) -> String {
     label
 }
 
-/// A `wt rm <name>` target matches a worktree by branch name or by the final
+/// Every name `wt rm` accepts for one worktree: its branch, and the final
 /// component of its path — the latter lets you name a detached/missing worktree.
+/// A worktree whose directory was renamed, or whose branch nests (`feat/x` under
+/// a directory `x`), answers to both, so both are yielded.
+///
+/// This is the rule, and [`rm_matches`] and [`run_rm_complete`] are its only two
+/// readers — matching a typed name and listing the names to type. Keeping them
+/// on one function is what stops the completions from offering a narrower set
+/// than the command accepts.
+fn rm_names(w: &git::Worktree) -> impl Iterator<Item = &str> {
+    w.branch
+        .as_deref()
+        .into_iter()
+        .chain(w.path.file_name().and_then(|n| n.to_str()))
+}
+
+/// Whether a `wt rm <name>` target names this worktree.
 fn rm_matches(w: &git::Worktree, name: &str) -> bool {
-    w.branch.as_deref() == Some(name) || w.path.file_name().and_then(|n| n.to_str()) == Some(name)
+    rm_names(w).any(|n| n == name)
 }
 
 fn main_of(worktrees: &[git::Worktree]) -> AppResult<&git::Worktree> {
@@ -551,5 +593,40 @@ fn ensure_path_clear(path: &Path) -> AppResult<()> {
 fn ensure_parent(path: &Path) {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn worktree(branch: Option<&str>, path: &str) -> git::Worktree {
+        git::Worktree {
+            path: PathBuf::from(path),
+            branch: branch.map(str::to_string),
+            is_main: false,
+            prunable: false,
+        }
+    }
+
+    /// A nested branch name gives a directory named after its last segment
+    /// alone, so the two names differ and both have to answer — this is the gap
+    /// the awk in the completions had, offering only one of them.
+    #[test]
+    fn a_worktree_answers_to_its_branch_and_to_its_directory() {
+        let w = worktree(Some("feat/login"), "/tmp/worktrees/repo/feat/login");
+        assert_eq!(rm_names(&w).collect::<Vec<_>>(), ["feat/login", "login"]);
+        assert!(rm_matches(&w, "feat/login"));
+        assert!(rm_matches(&w, "login"));
+        assert!(!rm_matches(&w, "feat"));
+    }
+
+    /// A detached or missing worktree has no branch, which is exactly when the
+    /// directory name is the only handle on it.
+    #[test]
+    fn a_branchless_worktree_answers_only_to_its_directory() {
+        let w = worktree(None, "/tmp/worktrees/repo/detached");
+        assert_eq!(rm_names(&w).collect::<Vec<_>>(), ["detached"]);
+        assert!(rm_matches(&w, "detached"));
     }
 }

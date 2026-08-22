@@ -970,6 +970,47 @@ fn worktree_held_stale_branch_is_no_longer_reported_as_skipped() {
     );
 }
 
+/// The candidate list the shell completions ask for. The main worktree is never
+/// removable so it is never offered; every other one is offered under both names
+/// `wt rm` accepts, which is what the awk this replaced could not do.
+#[test]
+fn wt_rm_complete_lists_every_name_rm_accepts() {
+    let (_bare, parent, work) = setup_with_parent();
+    add_worktree_branch(&work, parent.path(), "feat/login");
+
+    // Detached: no branch, so its directory name is the only handle on it.
+    let detached = parent.path().join("worktrees").join("repo").join("spike");
+    git(
+        &work,
+        &["worktree", "add", "--detach", detached.to_str().unwrap()],
+    );
+
+    // Prunable: registered but gone from disk, which is what `wt rm` is for.
+    let gone = add_worktree_branch(&work, parent.path(), "abandoned");
+    fs::remove_dir_all(&gone).unwrap();
+
+    let output = perch_args(&work, &["wt", "rm", "--complete"]);
+
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+    let stdout = stdout_str(&output);
+    let mut names: Vec<&str> = stdout.lines().collect();
+    names.sort_unstable();
+    assert_eq!(names, ["abandoned", "feat/login", "login", "spike"]);
+}
+
+/// `--complete` is read before anything destructive, so it prints and leaves the
+/// worktree alone even though a bare `wt rm` here would offer to remove it.
+#[test]
+fn wt_rm_complete_removes_nothing() {
+    let (_bare, parent, work) = setup_with_parent();
+    let path = add_worktree_branch(&work, parent.path(), "feature");
+
+    let output = perch_args(&work, &["wt", "rm", "--complete"]);
+
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+    assert!(path.is_dir(), "worktree should survive: {}", path.display());
+}
+
 #[test]
 fn help_flag_prints_usage() {
     let dir = TempDir::new().unwrap();
