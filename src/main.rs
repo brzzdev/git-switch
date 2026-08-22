@@ -67,6 +67,15 @@ fn dispatch_wt(args: &[String]) -> perch::AppResult<()> {
         Some("remove") => Err(perch::Error::retired("remove", "rm")),
         Some("rm") => {
             let rest = &args[1..];
+            // Read before the target and the force flag: this prints what `rm`
+            // accepts and removes nothing. A flag rather than a subverb so it
+            // can never eat a branch name, and so ADR 0007's three verbs stand.
+            // Deliberately absent from `print_wt_help`: the shell completions
+            // are its only caller, and a line of usage teaching a human to type
+            // it would be advertising a surface nothing asks them to use.
+            if rest.iter().any(|a| a == "--complete") {
+                return perch::app::wt::run_rm_complete();
+            }
             let force = rest.iter().any(|a| a == "--force" || a == "-f");
             let target = rest
                 .iter()

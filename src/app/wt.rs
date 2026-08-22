@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::env;
 use std::path::{Path, PathBuf};
 
@@ -159,10 +160,7 @@ pub fn run_ls() -> AppResult<()> {
 pub fn run_rm(target: Option<&str>, force: bool) -> AppResult<()> {
     let worktrees = git::worktree_list()?;
     let main = main_of(&worktrees)?.clone();
-    // Include branchless (detached) and missing worktrees too: a worktree whose
-    // directory was deleted by hand often shows up detached, and cleaning up its
-    // dead registration is exactly what `wt rm` is for.
-    let removable: Vec<git::Worktree> = worktrees.into_iter().filter(|w| !w.is_main).collect();
+    let removable: Vec<git::Worktree> = removable(&worktrees).cloned().collect();
 
     if removable.is_empty() {
         eprintln!("No worktrees to remove.");
@@ -235,6 +233,31 @@ pub fn run_rm(target: Option<&str>, force: bool) -> AppResult<()> {
 
     if cwd_will_vanish {
         handoff_cd(&main.path);
+    }
+    Ok(())
+}
+
+/// `wt rm --complete` — the names `wt rm` will accept, one per line, for the
+/// shell completions to offer. It is [`removable`] and [`rm_names`] and nothing
+/// else, the two rules `run_rm` itself reads, so what is offered and what is
+/// accepted cannot drift apart.
+///
+/// `.` is the one accepted target left off. It is a single character, every
+/// shell already completes it as a path, and it names the worktree the cwd sits
+/// in rather than any worktree in particular — [`select_for_removal`] resolves
+/// it from the cwd, and `rm_names` never sees it.
+///
+/// Each name prints once. Most worktrees answer to one name twice over, their
+/// directory carrying their branch name; two worktrees under different parents
+/// can also share a basename, and `run_rm` takes the first one that matches.
+pub fn run_rm_complete() -> AppResult<()> {
+    let worktrees = git::worktree_list()?;
+    let mut seen = HashSet::new();
+    for name in removable(&worktrees)
+        .flat_map(rm_names)
+        .filter(|name| seen.insert(*name))
+    {
+        println!("{name}");
     }
     Ok(())
 }
@@ -507,10 +530,32 @@ fn rm_label(w: &git::Worktree, is_current: bool) -> String {
     label
 }
 
-/// A `wt rm <name>` target matches a worktree by branch name or by the final
+/// Every name `wt rm` accepts for one worktree: its branch, and the final
 /// component of its path — the latter lets you name a detached/missing worktree.
+/// A worktree whose directory was renamed, or whose branch nests (`feat/x` under
+/// a directory `x`), answers to both, so this yields both.
+///
+/// One rule, read both ways round: to match a name that was typed, and to list
+/// the names to type. It settles what a worktree answers *to*, not which
+/// worktree is meant.
+fn rm_names(w: &git::Worktree) -> impl Iterator<Item = &str> {
+    w.branch
+        .as_deref()
+        .into_iter()
+        .chain(w.path.file_name().and_then(|n| n.to_str()))
+}
+
+/// Whether a `wt rm <name>` target names this worktree.
 fn rm_matches(w: &git::Worktree, name: &str) -> bool {
-    w.branch.as_deref() == Some(name) || w.path.file_name().and_then(|n| n.to_str()) == Some(name)
+    rm_names(w).any(|n| n == name)
+}
+
+/// The worktrees `wt rm` can act on: every one but the main worktree, which git
+/// will not remove. Branchless (detached) and missing ones stay in — a worktree
+/// whose directory was deleted by hand often shows up detached, and clearing its
+/// dead registration is exactly what `wt rm` is for.
+fn removable(worktrees: &[git::Worktree]) -> impl Iterator<Item = &git::Worktree> {
+    worktrees.iter().filter(|w| !w.is_main)
 }
 
 fn main_of(worktrees: &[git::Worktree]) -> AppResult<&git::Worktree> {
@@ -551,5 +596,39 @@ fn ensure_path_clear(path: &Path) -> AppResult<()> {
 fn ensure_parent(path: &Path) {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn worktree(branch: Option<&str>, path: &str) -> git::Worktree {
+        git::Worktree {
+            path: PathBuf::from(path),
+            branch: branch.map(str::to_string),
+            is_main: false,
+            prunable: false,
+        }
+    }
+
+    /// A nested branch name gives a directory named after its last segment
+    /// alone, so the two names differ and both have to answer — this is the gap
+    /// the awk in the completions had, offering only one of them.
+    #[test]
+    fn a_worktree_answers_to_its_branch_and_to_its_directory() {
+        let w = worktree(Some("feat/login"), "/tmp/worktrees/repo/feat/login");
+        assert_eq!(rm_names(&w).collect::<Vec<_>>(), ["feat/login", "login"]);
+        assert!(rm_matches(&w, "feat/login"));
+        assert!(rm_matches(&w, "login"));
+        assert!(!rm_matches(&w, "feat"));
+    }
+
+    /// A detached or missing worktree has no branch, which is exactly when the
+    /// directory name is the only handle on it.
+    #[test]
+    fn a_branchless_worktree_answers_only_to_its_directory() {
+        let w = worktree(None, "/tmp/worktrees/repo/detached");
+        assert_eq!(rm_names(&w).collect::<Vec<_>>(), ["detached"]);
     }
 }
