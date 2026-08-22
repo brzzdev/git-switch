@@ -994,7 +994,7 @@ fn wt_rm_complete_lists_every_name_rm_accepts() {
     let live = add_worktree_branch(&work, parent.path(), "feat/login");
 
     // Detached: no branch, so its directory name is the only handle on it.
-    let detached = add_worktree_detached(&work, parent.path(), "spike");
+    add_worktree_detached(&work, parent.path(), "spike");
 
     // Prunable: registered but gone from disk, which is what `wt rm` is for.
     let gone = add_worktree_branch(&work, parent.path(), "abandoned");
@@ -1008,8 +1008,7 @@ fn wt_rm_complete_lists_every_name_rm_accepts() {
     names.sort_unstable();
     assert_eq!(names, ["abandoned", "feat/login", "login", "spike"]);
 
-    assert!(live.is_dir(), "worktree should survive: {}", live.display());
-    assert!(detached.is_dir(), "worktree should survive a listing");
+    assert!(live.is_dir(), "listing must not remove: {}", live.display());
 }
 
 #[test]

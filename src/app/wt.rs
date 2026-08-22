@@ -238,17 +238,14 @@ pub fn run_rm(target: Option<&str>, force: bool) -> AppResult<()> {
 }
 
 /// `wt rm --complete` — the names `wt rm` will accept, one per line, for the
-/// shell completions to offer. Each of the three completion files used to derive
-/// this in awk from `git worktree list --porcelain`, and each copy was narrower
-/// than the command: one name per worktree, where `rm` takes either. Asking the
-/// binary leaves one implementation, and one the integration tests can reach.
+/// shell completions to offer. It is [`removable`] and [`rm_names`] and nothing
+/// else, the two rules `run_rm` itself reads, so what is offered and what is
+/// accepted cannot drift apart.
 ///
-/// It is [`removable`] and [`rm_names`] and nothing else — the two rules `run_rm`
-/// itself reads, which is what makes the offer and the acceptance the same set.
-///
-/// `.` is deliberately absent. It is one character, every shell already completes
-/// it as a path, and it names the worktree the cwd sits in rather than any
-/// worktree in particular — so it belongs to [`select_for_removal`], not here.
+/// `.` is the one accepted target left off. It is a single character, every
+/// shell already completes it as a path, and it names the worktree the cwd sits
+/// in rather than any worktree in particular — [`select_for_removal`] resolves
+/// it from the cwd, and `rm_names` never sees it.
 ///
 /// Each name prints once. Most worktrees answer to one name twice over, their
 /// directory carrying their branch name; two worktrees under different parents
@@ -539,10 +536,8 @@ fn rm_label(w: &git::Worktree, is_current: bool) -> String {
 /// a directory `x`), answers to both, so this yields both.
 ///
 /// One rule, read both ways round: to match a name that was typed, and to list
-/// the names to type. That is what stops the completions offering a narrower set
-/// than the command accepts. It settles what a worktree answers *to* and not
-/// which worktree is meant — `.` is resolved from the cwd in
-/// [`select_for_removal`].
+/// the names to type. It settles what a worktree answers *to*, not which
+/// worktree is meant.
 fn rm_names(w: &git::Worktree) -> impl Iterator<Item = &str> {
     w.branch
         .as_deref()
@@ -559,9 +554,6 @@ fn rm_matches(w: &git::Worktree, name: &str) -> bool {
 /// will not remove. Branchless (detached) and missing ones stay in — a worktree
 /// whose directory was deleted by hand often shows up detached, and clearing its
 /// dead registration is exactly what `wt rm` is for.
-///
-/// Named once so the command and the completions cannot disagree about what is
-/// on offer, the same way [`rm_names`] settles what each one answers to.
 fn removable(worktrees: &[git::Worktree]) -> impl Iterator<Item = &git::Worktree> {
     worktrees.iter().filter(|w| !w.is_main)
 }
