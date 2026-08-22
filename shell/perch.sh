@@ -51,4 +51,13 @@ if [ -z "${PERCH_NO_SHORTCUTS:-}" ]; then
   wt() {
     perch wt "$@"
   }
+
+  # zsh completions are claimed by name at compinit time, so `_perch` cannot ask
+  # for these two without taking them from whatever else answers to them. Asking
+  # here instead ties the claim to the same condition that creates the functions.
+  # It needs compinit to have run already; sourced earlier than that, the guard
+  # skips it and `br`/`wt` go uncompleted rather than erroring out of your rc.
+  if [ -n "${ZSH_VERSION:-}" ] && command -v compdef >/dev/null 2>&1; then
+    compdef _perch br wt
+  fi
 fi
