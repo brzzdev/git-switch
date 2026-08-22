@@ -2,20 +2,15 @@
 
 # Targets `wt rm` will accept: every worktree but the main one, named the way
 # `rm_matches` reads it — by branch, or by the final path component where there
-# is no branch, which is how a detached or missing worktree is reached.
+# is no branch, which is how a detached or missing worktree is reached. The
+# porcelain format ends every record with a blank line, so counting those is
+# what lets the first record — always the main worktree — go by unprinted.
 _perch_wt_targets() {
   git worktree list --porcelain 2>/dev/null | awk '
-    function flush() {
-      if (!have) return
-      if (main) main = 0
-      else if (branch != "") print branch
-      else { n = split(path, parts, "/"); print parts[n] }
-      have = 0
-    }
-    BEGIN { main = 1 }
-    /^worktree / { flush(); path = substr($0, 10); branch = ""; have = 1 }
+    /^worktree /            { path = substr($0, 10); branch = "" }
     /^branch refs\/heads\// { branch = substr($0, 19) }
-    END { flush() }
+    /^$/ && ++seen > 1      { if (branch != "") print branch
+                              else { n = split(path, parts, "/"); print parts[n] } }
   '
 }
 
@@ -45,11 +40,11 @@ _perch() {
     *)     cmd=("${(@)words}"); pos=$CURRENT ;;
   esac
 
-  branches=(${(f)"$(git branch --format='%(refname:short)' 2>/dev/null)"})
-
   # `wt rm` reads its target as the first word after `rm` that isn't an option,
   # and takes its `--force` in either order, so a flag or a `--` leaves the slot
   # open while a bare word closes it. Words typed after a target are ignored.
+  # This arm wants worktrees rather than branches, so it comes before the
+  # `git branch` call every arm below it needs.
   if (( pos >= 4 )) && [[ "$cmd[2]" == wt && "$cmd[3]" == rm ]]; then
     local word
     for word in "${(@)cmd[4,pos-1]}"; do
@@ -60,10 +55,15 @@ _perch() {
     targets=(${(f)"$(_perch_wt_targets)"})
     targets=(${targets:#})
     _describe -t worktrees 'worktree' targets
+    return
+  fi
+
+  branches=(${(f)"$(git branch --format='%(refname:short)' 2>/dev/null)"})
+
   # `--` ends parsing, but only where the dispatcher still has a branch left to
   # read: `perch --`, `perch br --`, `perch wt --`. Past `perch wt ls`, or a
   # branch the dispatcher has already taken, the words after `--` go nowhere.
-  elif [[ "$cmd[pos-1]" == -- ]]; then
+  if [[ "$cmd[pos-1]" == -- ]]; then
     if (( pos == 3 )) || { (( pos == 4 )) && [[ "$cmd[2]" == (br|wt) ]] }; then
       _describe -t branches 'branch' branches
     fi

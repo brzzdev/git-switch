@@ -31,8 +31,6 @@ function perch
     return $rc
 end
 
-# The shortcuts call perch rather than the binary, so the cd hand-off above
-# covers them without being spelled out again.
 if test -z "$PERCH_NO_SHORTCUTS"
     function br
         perch br $argv

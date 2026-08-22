@@ -41,8 +41,6 @@ perch() {
   return $rc
 }
 
-# The shortcuts call perch() rather than the binary, so the cd hand-off above
-# covers them without being spelled out again.
 if [ -z "$PERCH_NO_SHORTCUTS" ]; then
   br() {
     perch br "$@"

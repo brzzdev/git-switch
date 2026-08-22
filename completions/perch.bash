@@ -12,62 +12,54 @@ _perch_branches_except() {
 
 # Targets `wt rm` will accept: every worktree but the main one, named the way
 # `rm_matches` reads it — by branch, or by the final path component where there
-# is no branch, which is how a detached or missing worktree is reached.
+# is no branch, which is how a detached or missing worktree is reached. The
+# porcelain format ends every record with a blank line, so counting those is
+# what lets the first record — always the main worktree — go by unprinted.
 _perch_wt_targets() {
   git worktree list --porcelain 2>/dev/null | awk '
-    function flush() {
-      if (!have) return
-      if (main) main = 0
-      else if (branch != "") print branch
-      else { n = split(path, parts, "/"); print parts[n] }
-      have = 0
-    }
-    BEGIN { main = 1 }
-    /^worktree / { flush(); path = substr($0, 10); branch = ""; have = 1 }
+    /^worktree /            { path = substr($0, 10); branch = "" }
     /^branch refs\/heads\// { branch = substr($0, 19) }
-    END { flush() }
+    /^$/ && ++seen > 1      { if (branch != "") print branch
+                              else { n = split(path, parts, "/"); print parts[n] } }
   '
 }
 
 # `wt rm` reads its target as the first word after `rm` that isn't an option,
 # and takes its `--force` in either order, so a flag or a `--` leaves the slot
 # open while a bare word closes it. Words typed after a target are ignored.
-# Reads the normalised words that _perch_completions publishes below.
+# Takes those in-between words as its arguments.
 _perch_wt_rm_wants_target() {
-  local i
-  for (( i = 3; i < _perch_cword; i++ )); do
-    [[ "${_perch_words[i]}" == -* ]] || return 1
+  local word
+  for word in "$@"; do
+    [[ "$word" == -* ]] || return 1
   done
   return 0
 }
 
-# The normalised command line, in `perch <verb> …` form whichever of the three
-# names was typed. Published as globals because bash 3.2 — still what macOS
-# ships — has no namerefs to pass an array through.
-_perch_words=()
-_perch_cword=0
-
 _perch_completions() {
   # `br` and `wt` are the shell wrapper's shorthand for `perch br` and `perch wt`,
-  # so every rule below reads the verb spelled out. One offset separates them.
-  case "${COMP_WORDS[0]##*/}" in
+  # so every rule below reads a word list with the verb spelled out. One offset
+  # is all that separates the three names.
+  local -a words
+  local cword name="${COMP_WORDS[0]##*/}"
+  case "$name" in
     br | wt)
-      _perch_words=(perch "${COMP_WORDS[0]##*/}" "${COMP_WORDS[@]:1}")
-      _perch_cword=$(( COMP_CWORD + 1 ))
+      words=(perch "$name" "${COMP_WORDS[@]:1}")
+      cword=$(( COMP_CWORD + 1 ))
       ;;
     *)
-      _perch_words=("${COMP_WORDS[@]}")
-      _perch_cword=$COMP_CWORD
+      words=("${COMP_WORDS[@]}")
+      cword=$COMP_CWORD
       ;;
   esac
 
-  local cur="${_perch_words[_perch_cword]}"
-  local prev="${_perch_words[_perch_cword-1]}"
-  local verb="${_perch_words[1]}"
-  local subverb="${_perch_words[2]}"
+  local cur="${words[cword]}"
+  local prev="${words[cword-1]}"
+  local verb="${words[1]}"
+  local subverb="${words[2]}"
 
-  if [[ "$verb" == "wt" && "$subverb" == "rm" ]] && (( _perch_cword >= 3 )); then
-    if _perch_wt_rm_wants_target; then
+  if [[ "$verb" == "wt" && "$subverb" == "rm" ]] && (( cword >= 3 )); then
+    if _perch_wt_rm_wants_target "${words[@]:3:cword-3}"; then
       COMPREPLY=($(compgen -W "$(_perch_wt_targets)" -- "$cur"))
     fi
     return
@@ -77,14 +69,14 @@ _perch_completions() {
   # read: `perch --`, `perch br --`, `perch wt --`. Past `perch wt ls`, or a
   # branch the dispatcher has already taken, the words after `--` go nowhere.
   if [[ "$prev" == "--" ]]; then
-    if (( _perch_cword == 2 )) ||
-      { (( _perch_cword == 3 )) && [[ "$verb" == "br" || "$verb" == "wt" ]]; }; then
+    if (( cword == 2 )) ||
+      { (( cword == 3 )) && [[ "$verb" == "br" || "$verb" == "wt" ]]; }; then
       COMPREPLY=($(compgen -W "$(_perch_branches)" -- "$cur"))
     fi
     return
   fi
 
-  case "$_perch_cword" in
+  case "$cword" in
     1)
       COMPREPLY=($(compgen -W "br wt $(_perch_branches_except 'br|wt')" -- "$cur"))
       ;;
