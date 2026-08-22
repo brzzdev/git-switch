@@ -985,6 +985,12 @@ fn help_flag_prints_usage() {
         out.contains("perch wt"),
         "expected worktree usage in help, got: {out}"
     );
+    // The footer is the only place the shell shortcuts are advertised, so it is
+    // how anyone learns `br`/`wt` exist and that they can be turned off.
+    assert!(
+        out.contains("PERCH_NO_SHORTCUTS"),
+        "expected the shell shortcut footer in help, got: {out}"
+    );
 }
 
 #[test]

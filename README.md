@@ -160,9 +160,28 @@ Installing from a release tarball? The same files ship in its `shell/` directory
 
 Without the wrapper, `perch wt foo` still creates / finds the worktree and prints its path — you'd just `cd` there manually.
 
+### `br` and `wt` shortcuts
+
+Sourcing the wrapper also defines `br` and `wt`, so the two verbs are reachable without typing `perch` first:
+
+```sh
+wt feature      # perch wt feature
+wt rm .         # perch wt rm .
+br main         # perch br main
+```
+
+They delegate to the `perch` function, so the `cd` hand-off works exactly the same way.
+
+[broot](https://dystroy.org/broot) also installs a `br` function, and whichever is sourced last wins. Set `PERCH_NO_SHORTCUTS` to any non-empty value *before* the `source` line to leave both names alone:
+
+```sh
+PERCH_NO_SHORTCUTS=1
+source ~/.config/perch/perch.sh
+```
+
 ## Shell Completions
 
-Tab completions are available for zsh, bash, and fish.
+Tab completions are available for zsh, bash, and fish, and cover `br` and `wt` as well as `perch`.
 
 ```sh
 just install-completions
@@ -175,6 +194,18 @@ This installs the appropriate completion script for your current shell. From a r
 | zsh | `_perch` | `~/.zsh/completions/_perch` |
 | bash | `perch.bash` | `~/.local/share/bash-completion/completions/perch` |
 | fish | `perch.fish` | `~/.config/fish/completions/perch.fish` |
+
+zsh finds all three names on the file's `#compdef` line. bash and fish autoload by command name instead, so link the installed file under `br` and `wt` too — `just install-completions` does this for you:
+
+```sh
+# bash
+ln -sf perch ~/.local/share/bash-completion/completions/br
+ln -sf perch ~/.local/share/bash-completion/completions/wt
+
+# fish
+ln -sf perch.fish ~/.config/fish/completions/br.fish
+ln -sf perch.fish ~/.config/fish/completions/wt.fish
+```
 
 For zsh, make sure `~/.zsh/completions` is in your `fpath` before `compinit`:
 

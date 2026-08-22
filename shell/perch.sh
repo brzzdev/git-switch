@@ -8,6 +8,12 @@
 # Source from your shell rc:
 #   source ~/.config/perch/perch.sh
 #
+# `br` and `wt` are defined alongside `perch` as shorthand for `perch br` and
+# `perch wt`. Set PERCH_NO_SHORTCUTS to any non-empty value before sourcing to
+# leave both names alone — broot defines its own `br`, and only one can win:
+#   PERCH_NO_SHORTCUTS=1
+#   source ~/.config/perch/perch.sh
+#
 # Behaviour:
 #   - empty stdout              → nothing to do
 #   - single-line existing dir  → cd there
@@ -34,3 +40,15 @@ perch() {
   esac
   return $rc
 }
+
+# The shortcuts call perch() rather than the binary, so the cd hand-off above
+# covers them without being spelled out again.
+if [ -z "$PERCH_NO_SHORTCUTS" ]; then
+  br() {
+    perch br "$@"
+  }
+
+  wt() {
+    perch wt "$@"
+  }
+fi

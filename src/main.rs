@@ -88,6 +88,9 @@ fn print_help() {
     println!("       perch -- <branch>      Go to a branch named br/wt");
     println!("       perch wt ls            List worktrees");
     println!("       perch wt rm [<branch>|.]");
+    println!();
+    println!("With the shell integration sourced, `br` and `wt` stand in for `perch br`");
+    println!("and `perch wt`. Set PERCH_NO_SHORTCUTS to leave both names alone.");
 }
 
 fn print_br_help() {

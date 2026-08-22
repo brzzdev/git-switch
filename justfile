@@ -13,9 +13,12 @@ install: build-release
   mkdir -p ~/.local/bin
   cp target/release/perch ~/.local/bin/perch
 
-# Install shell completions.
+# Install shell completions for perch, br, and wt.
 install-completions:
   #!/usr/bin/env sh
+  # One file per shell covers all three names. zsh reads them off the `#compdef`
+  # line, but bash and fish autoload by command name, so `br` and `wt` each need
+  # the file to exist under their own name — a symlink, so there is one copy.
   case "$(basename "$SHELL")" in \
     zsh) \
       mkdir -p ~/.zsh/completions && \
@@ -27,11 +30,15 @@ install-completions:
     bash) \
       mkdir -p ~/.local/share/bash-completion/completions && \
       cp completions/perch.bash ~/.local/share/bash-completion/completions/perch && \
-      echo "Installed bash completion." ;; \
+      ln -sf perch ~/.local/share/bash-completion/completions/br && \
+      ln -sf perch ~/.local/share/bash-completion/completions/wt && \
+      echo "Installed bash completion for perch, br, and wt." ;; \
     fish) \
       mkdir -p ~/.config/fish/completions && \
       cp completions/perch.fish ~/.config/fish/completions/perch.fish && \
-      echo "Installed fish completion." ;; \
+      ln -sf perch.fish ~/.config/fish/completions/br.fish && \
+      ln -sf perch.fish ~/.config/fish/completions/wt.fish && \
+      echo "Installed fish completion for perch, br, and wt." ;; \
     *) \
       echo "Unsupported shell: $SHELL" && exit 1 ;; \
   esac

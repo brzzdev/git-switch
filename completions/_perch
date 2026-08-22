@@ -1,7 +1,27 @@
-#compdef perch
+#compdef perch br wt
+
+# Targets `wt rm` will accept: every worktree but the main one, named the way
+# `rm_matches` reads it — by branch, or by the final path component where there
+# is no branch, which is how a detached or missing worktree is reached.
+_perch_wt_targets() {
+  git worktree list --porcelain 2>/dev/null | awk '
+    function flush() {
+      if (!have) return
+      if (main) main = 0
+      else if (branch != "") print branch
+      else { n = split(path, parts, "/"); print parts[n] }
+      have = 0
+    }
+    BEGIN { main = 1 }
+    /^worktree / { flush(); path = substr($0, 10); branch = ""; have = 1 }
+    /^branch refs\/heads\// { branch = substr($0, 19) }
+    END { flush() }
+  '
+}
 
 _perch() {
-  local -a subcommands worktree_subs verbs subverbs branches offer
+  local -a subcommands worktree_subs verbs subverbs branches offer cmd targets
+  local pos
   subcommands=(
     'br:Check a branch out here'
     'wt:Worktree commands'
@@ -17,34 +37,46 @@ _perch() {
   verbs=(br wt)
   subverbs=(ls rm list remove)
 
+  # `br` and `wt` are the shell wrapper's shorthand for `perch br` and `perch wt`,
+  # so every rule below reads a normalised word list with the verb spelled out.
+  # One offset is all that separates the three names.
+  case "$service" in
+    br|wt) cmd=(perch "$service" "${(@)words[2,-1]}"); (( pos = CURRENT + 1 )) ;;
+    *)     cmd=("${(@)words}"); pos=$CURRENT ;;
+  esac
+
   branches=(${(f)"$(git branch --format='%(refname:short)' 2>/dev/null)"})
 
   # `wt rm` reads its target as the first word after `rm` that isn't an option,
   # and takes its `--force` in either order, so a flag or a `--` leaves the slot
   # open while a bare word closes it. Words typed after a target are ignored.
-  if (( CURRENT >= 4 )) && [[ "$words[2]" == wt && "$words[3]" == rm ]]; then
+  if (( pos >= 4 )) && [[ "$cmd[2]" == wt && "$cmd[3]" == rm ]]; then
     local word
-    for word in "${(@)words[4,CURRENT-1]}"; do
+    for word in "${(@)cmd[4,pos-1]}"; do
       [[ "$word" == -* ]] || return
     done
-    _describe -t branches 'branch' branches
+    # A repo with no worktrees but the main one leaves nothing to offer, and an
+    # empty line here would complete to a blank.
+    targets=(${(f)"$(_perch_wt_targets)"})
+    targets=(${targets:#})
+    _describe -t worktrees 'worktree' targets
   # `--` ends parsing, but only where the dispatcher still has a branch left to
   # read: `perch --`, `perch br --`, `perch wt --`. Past `perch wt ls`, or a
   # branch the dispatcher has already taken, the words after `--` go nowhere.
-  elif [[ "$words[CURRENT-1]" == -- ]]; then
-    if (( CURRENT == 3 )) || { (( CURRENT == 4 )) && [[ "$words[2]" == (br|wt) ]] }; then
+  elif [[ "$cmd[pos-1]" == -- ]]; then
+    if (( pos == 3 )) || { (( pos == 4 )) && [[ "$cmd[2]" == (br|wt) ]] }; then
       _describe -t branches 'branch' branches
     fi
-  elif (( CURRENT == 2 )); then
+  elif (( pos == 2 )); then
     offer=(${branches:|verbs})
     _describe -t subcommands 'subcommand' subcommands
     _describe -t branches 'branch' offer
-  elif (( CURRENT == 3 )) && [[ "$words[2]" == wt ]]; then
+  elif (( pos == 3 )) && [[ "$cmd[2]" == wt ]]; then
     offer=(${branches:|subverbs})
     _describe -t subverbs 'worktree subverb' worktree_subs
     _describe -t branches 'branch' offer
   # `br` reads everything after it as a branch, so nothing is filtered here.
-  elif (( CURRENT == 3 )) && [[ "$words[2]" == br ]]; then
+  elif (( pos == 3 )) && [[ "$cmd[2]" == br ]]; then
     _describe -t branches 'branch' branches
   fi
 }
