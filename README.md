@@ -4,7 +4,7 @@ A fast, interactive Git branch and worktree switcher. Pick a branch, fetch & fas
 
 ## Features
 
-- **Interactive branch picker** — fuzzy-select from local branches (or pass a name directly)
+- **Interactive branch picker** — fuzzy-select from every branch, with the worktree-backed ones showing their path (or pass a name directly)
 - **Auto-stash** — dirty working tree? Changes are stashed before switching and restored after
 - **Fast-forward pull** — fetches from origin and fast-forward merges, warns if the branch has diverged
 - **Merged branch cleanup** — prompts to delete local branches that have been merged into the current branch, including ones held by a worktree (the worktree goes too)
@@ -84,12 +84,30 @@ perch .
 
 Bare `perch <branch>` never has to ask which you meant, because git will not let the same branch be checked out twice: if a worktree already holds it, going there is the only legal move; if none does, checking it out here is.
 
+With no branch named, all three verbs open the **same list** — every branch, with the worktree-backed ones showing their path, so "which of my branches has a worktree?" is answered by looking. The verb changes what Enter does, not what's on offer, and the prompt says which you're in:
+
+```
+? Switch to (type to filter):
+Pinned
+  > * main
+Local
+      feature  ~/dev/worktrees/repo/feature
+      spike
+```
+
+`perch br` draws the same rows, but greys out any branch another worktree holds — it promises a checkout *here*, and git won't allow one — saying inline where the branch went and what reaches it:
+
+```
+      feature  in ~/dev/worktrees/repo/feature — use `perch`
+```
+
 `perch .` fetches and brings the branch you're on up to date with its remote. A clean branch integrates with no prompt — fast-forwarding, or (when it has diverged, e.g. after rebasing through a web UI) rebasing your local commits onto the remote, which drops any already upstream and replays genuine new work. Only when the working tree is dirty does it stop to ask: **keep** the uncommitted work (stash, rebase, restore) or **discard** it (hard reset to the remote).
 
 ## Worktrees
 
 ```sh
-# Interactive picker: existing worktrees + branches without one; "Create new: <typed>" when filter matches nothing
+# Interactive picker: every branch, worktree-backed ones showing their path.
+# Selecting one without a worktree creates it; "Create new: <typed>" when the filter matches nothing.
 perch wt
 
 # DWIM — switch into the worktree for `feature`, or create one if it doesn't exist.

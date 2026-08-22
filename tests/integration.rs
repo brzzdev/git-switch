@@ -2112,6 +2112,152 @@ fn cleanup_prompt(work: &Path, target: &str, row: &str) -> String {
     String::from_utf8_lossy(&drive_cleanup_prompt(work, target, row, false, || {})).into_owned()
 }
 
+/// Drives the branch picker over a real pty: filters to `branch`, waits for the
+/// row to be drawn, runs `mid_prompt` while the picker is still waiting on a
+/// keystroke, then selects. Returns every byte the child wrote.
+///
+/// Separate from [`drive_cleanup_prompt`], which drives the multi-select that
+/// comes *after* a switch — this one drives the single-select that chooses it.
+fn drive_branch_picker(
+    work: &Path,
+    verb: Option<&str>,
+    branch: &str,
+    mid_prompt: impl FnOnce(),
+) -> Vec<u8> {
+    use portable_pty::{CommandBuilder, PtySize, native_pty_system};
+    use std::io::{Read, Write};
+    use std::sync::Arc;
+
+    let pty = native_pty_system()
+        .openpty(PtySize::default())
+        .expect("failed to open pty");
+    let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_perch"));
+    if let Some(verb) = verb {
+        cmd.arg(verb);
+    }
+    cmd.cwd(work);
+    cmd.env("PERCH_NO_HOOKS", "1");
+    let mut child = ChildGuard(pty.slave.spawn_command(cmd).expect("failed to spawn"));
+    drop(pty.slave);
+
+    let mut reader = pty.master.try_clone_reader().unwrap();
+    let mut writer = pty.master.take_writer().unwrap();
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let collected = Arc::clone(&seen);
+    let output = std::thread::spawn(move || {
+        let mut chunk = [0u8; 1024];
+        while let Ok(n) = reader.read(&mut chunk) {
+            if n == 0 {
+                break;
+            }
+            collected.lock().unwrap().extend_from_slice(&chunk[..n]);
+        }
+    });
+
+    // Filter to the branch, then wait for the cursor to be drawn on it — that
+    // redraw is what proves the keys landed, and it has to happen before the
+    // repo is disturbed, since the point is to move while the picker waits.
+    // Matching the row rather than the echoed filter keeps the needle clear of
+    // the styling around the prompt.
+    wait_for(&seen, branch);
+    writer.write_all(branch.as_bytes()).unwrap();
+    writer.flush().unwrap();
+    wait_for(&seen, &format!(">   {branch}"));
+
+    mid_prompt();
+
+    writer.write_all(b"\r").unwrap();
+    writer.flush().unwrap();
+
+    child.wait_bounded();
+    drop(writer);
+    drop(pty.master);
+    output.join().unwrap();
+    Arc::try_unwrap(seen).unwrap().into_inner().unwrap()
+}
+
+/// The picker's list is a snapshot, but the hand-off decision must not be one:
+/// the picker sits waiting on a keystroke, and a worktree taken on the target in
+/// that window makes the checkout this would otherwise attempt illegal. Git
+/// refuses it outright, so a stale snapshot turns a hand-off into an error.
+#[test]
+fn a_worktree_taken_while_the_picker_is_open_is_handed_off_to() {
+    let (_bare, parent, work) = setup_with_parent();
+
+    git(&work, &["branch", "target"]);
+    let held = parent.path().join("held");
+
+    let raw = drive_branch_picker(&work, None, "target", || {
+        git(
+            &work,
+            &["worktree", "add", held.to_str().unwrap(), "target"],
+        );
+    });
+    let text = String::from_utf8_lossy(&raw);
+
+    assert!(
+        text.contains("is checked out at"),
+        "should hand off to the worktree taken mid-prompt; got: {text}"
+    );
+    assert!(
+        !text.contains("already used by worktree"),
+        "and must not attempt the checkout git forbids; got: {text}"
+    );
+}
+
+/// The same window, in the verb that builds worktrees rather than entering
+/// them: `wt` would otherwise take the branch for one that still needs a
+/// worktree and run `git worktree add` over the one that now exists.
+#[test]
+fn a_worktree_taken_while_the_wt_picker_is_open_is_entered_not_rebuilt() {
+    let (_bare, parent, work) = setup_with_parent();
+
+    git(&work, &["branch", "target"]);
+    let held = parent.path().join("held");
+
+    let raw = drive_branch_picker(&work, Some("wt"), "target", || {
+        git(
+            &work,
+            &["worktree", "add", held.to_str().unwrap(), "target"],
+        );
+    });
+    let text = String::from_utf8_lossy(&raw);
+
+    assert!(
+        text.contains("switched to worktree at"),
+        "should enter the worktree taken mid-prompt; got: {text}"
+    );
+    assert!(
+        !text.contains("already used by worktree"),
+        "and must not try to build a second one; got: {text}"
+    );
+}
+
+/// The same window again, but with the branch going away rather than gaining a
+/// worktree. Re-reading state answers what the branch needs; it cannot answer
+/// what the user asked for, and a picked row that no longer resolves is not a
+/// request to create the name afresh from the default branch.
+#[test]
+fn a_branch_deleted_while_the_wt_picker_is_open_is_reported_not_recreated() {
+    let (_bare, _parent, work) = setup_with_parent();
+
+    git(&work, &["branch", "target"]);
+
+    let raw = drive_branch_picker(&work, Some("wt"), "target", || {
+        git(&work, &["branch", "-D", "target"]);
+    });
+    let text = String::from_utf8_lossy(&raw);
+
+    assert!(
+        text.contains("no longer exists"),
+        "should report the branch that went away; got: {text}"
+    );
+    assert!(
+        !text.contains("created"),
+        "and must not create a fresh branch in its place; got: {text}"
+    );
+}
+
 /// The stale-branch picker holds the terminal in raw mode, where a bare `\n`
 /// drops a line without returning to column 0. Printing the deletion outcomes
 /// before that mode is released staircases them across the screen, so this

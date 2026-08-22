@@ -48,6 +48,14 @@ pub enum Error {
     /// there was no terminal to warn on or ask in, and `--force` wasn't given.
     #[error("{0}")]
     Unconfirmed(String),
+
+    /// A branch picked from a row went away between the list being drawn and
+    /// the selection being resolved. Its own error because the alternative is
+    /// silent: with nothing left to find, the name would otherwise read as a
+    /// branch to create, and the user would be handed a fresh branch off the
+    /// default in place of the one they chose.
+    #[error("{branch} no longer exists; it was deleted after the list was drawn")]
+    Vanished { branch: String },
 }
 
 impl Error {

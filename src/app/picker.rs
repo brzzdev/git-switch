@@ -8,9 +8,11 @@
 //! keep separate models and message types: they share a shape but not a state
 //! space, and a union would be half-dead in either.
 
+use std::collections::{HashMap, HashSet};
+
 use console::{Key, Term, measure_text_width, style};
 
-use super::{CursorGuard, interactive_term};
+use super::{CursorGuard, Verb, interactive_term};
 use crate::AppResult;
 
 /// Source of key events for the interactive pickers. Abstracting input behind a
@@ -130,36 +132,143 @@ mod raw {
     }
 }
 
-#[derive(Clone, Copy)]
-pub(crate) enum Availability {
-    Local,
-    RemoteOnly,
-    Missing,
+/// Everything the git side found: which branches exist where, which are *Kept*,
+/// and which worktree *Held*s each. Only facts — grouping them under headings
+/// and deciding what each row says is [`sections`], which is pure and needs no
+/// repo on disk.
+pub(crate) struct Catalogue {
+    /// The branch the worktree we're standing in has checked out.
+    pub current: Option<String>,
+    /// Display path of the worktree holding a branch, for those a worktree does.
+    pub held: HashMap<String, String>,
+    /// Checked out locally, in the order git listed them.
+    pub local: Vec<String>,
+    /// *Kept* out of the cleanup prompt, listed whether or not they exist yet.
+    pub pinned: Vec<String>,
+    /// On the remote with no local counterpart.
+    pub remote_only: Vec<String>,
 }
 
-impl Availability {
-    fn is_missing(self) -> bool {
-        matches!(self, Availability::Missing)
-    }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum PickKind {
-    Branch,
-    Worktree,
-}
-
+/// A branch as the picker draws it: the name, whatever there is to say after
+/// it, and whether the verb in play can do anything with it.
 #[derive(Clone)]
 pub(crate) struct Pick {
     pub name: String,
     pub is_current: bool,
-    pub availability: Availability,
-    pub kind: PickKind,
+    /// Dim text after the name — where the branch is held, or why the row is
+    /// inert.
+    pub annotation: String,
+    /// Greyed and unselectable: this verb has nothing to do with the row. The
+    /// row stays on screen regardless, since hiding it only turns "why isn't
+    /// `main` in this list?" into a support question.
+    pub disabled: bool,
 }
 
 pub(crate) struct Section {
     pub heading: &'static str,
     pub items: Vec<Pick>,
+}
+
+/// Where a branch can be found, as only the *Pinned* section has to say it. A
+/// kept branch is listed whether or not it is here yet, so its row is the one
+/// that must answer the question; under *Local* and *Remote* the heading
+/// already has.
+///
+/// Deliberately not *Missing*: the glossary reserves that for a worktree whose
+/// directory is gone, and `wt rm` already draws the word for one. A branch that
+/// exists nowhere is a different fact, so it gets a different word.
+#[derive(Clone, Copy)]
+enum Availability {
+    /// Neither here nor on the remote. No verb can reach it.
+    Absent,
+    /// Nothing to add — the verb can just act on it.
+    Ready,
+    /// Only on the remote. Fetching it would do.
+    RemoteOnly,
+}
+
+impl Catalogue {
+    fn is_current(&self, name: &str) -> bool {
+        self.current.as_deref() == Some(name)
+    }
+
+    /// The worktree holding this branch, where that is somewhere other than
+    /// here. Git forbids the same branch in two worktrees and the one we're
+    /// standing in holds the current branch, so "elsewhere" is exactly "held,
+    /// and not current" — which is also why the row we're standing on is marked
+    /// `*` and not with a path.
+    fn elsewhere(&self, name: &str) -> Option<&str> {
+        if self.is_current(name) {
+            return None;
+        }
+        self.held.get(name).map(String::as_str)
+    }
+}
+
+fn row(catalogue: &Catalogue, name: &str, availability: Availability, verb: Verb) -> Pick {
+    let (annotation, disabled) = match (availability, catalogue.elsewhere(name)) {
+        (Availability::Absent, _) => ("absent".to_string(), true),
+        // `br` promises a checkout *here*, and git will not check out a branch a
+        // second worktree already holds. So this is the one row a verb differs
+        // over — everywhere else git leaves exactly one move legal.
+        (_, Some(path)) if verb == Verb::Here => (format!("in {path} — use `perch`"), true),
+        (_, Some(path)) => (path.to_string(), false),
+        (Availability::RemoteOnly, None) => ("☁".to_string(), false),
+        (Availability::Ready, None) => (String::new(), false),
+    };
+    Pick {
+        name: name.to_string(),
+        is_current: catalogue.is_current(name),
+        annotation,
+        disabled,
+    }
+}
+
+/// The whole list, for any verb: every branch once, under the heading it
+/// belongs to. Headings with nothing under them are dropped, so a repo with
+/// nothing kept shows no *Pinned*.
+pub(crate) fn sections(catalogue: &Catalogue, verb: Verb) -> Vec<Section> {
+    let local: HashSet<&str> = catalogue.local.iter().map(String::as_str).collect();
+    let remote: HashSet<&str> = catalogue.remote_only.iter().map(String::as_str).collect();
+    let pinned: HashSet<&str> = catalogue.pinned.iter().map(String::as_str).collect();
+
+    // A kept branch is drawn under *Pinned* and never again below, so the two
+    // lower sections skip anything already up there.
+    let unpinned = |names: &[String], availability| -> Vec<Pick> {
+        names
+            .iter()
+            .filter(|name| !pinned.contains(name.as_str()))
+            .map(|name| row(catalogue, name, availability, verb))
+            .collect()
+    };
+
+    let pinned_rows = catalogue
+        .pinned
+        .iter()
+        .map(|name| {
+            let availability = if local.contains(name.as_str()) {
+                Availability::Ready
+            } else if remote.contains(name.as_str()) {
+                Availability::RemoteOnly
+            } else {
+                Availability::Absent
+            };
+            row(catalogue, name, availability, verb)
+        })
+        .collect();
+
+    [
+        ("Pinned", pinned_rows),
+        ("Local", unpinned(&catalogue.local, Availability::Ready)),
+        (
+            "Remote",
+            unpinned(&catalogue.remote_only, Availability::Ready),
+        ),
+    ]
+    .into_iter()
+    .filter(|(_, items)| !items.is_empty())
+    .map(|(heading, items)| Section { heading, items })
+    .collect()
 }
 
 enum RowKind {
@@ -176,10 +285,14 @@ struct RenderRow {
 struct View {
     rows: Vec<RenderRow>,
     selectable: Vec<usize>,
+    /// Width to pad names to so annotations share a column. Derived per view
+    /// rather than per section, since filtering changes which rows are on
+    /// screen and a column that only lined up within a section wouldn't be one.
+    name_column: usize,
 }
 
 pub(crate) enum Selection {
-    Existing { name: String, kind: PickKind },
+    Existing(String),
     Create(String),
 }
 
@@ -227,7 +340,7 @@ fn build_view(sections: &[Section], filter: &str, opts: PickerOptions) -> View {
         });
         for pick in matching {
             let idx = rows.len();
-            let is_selectable = !pick.availability.is_missing();
+            let is_selectable = !pick.disabled;
             rows.push(RenderRow {
                 kind: RowKind::Item(pick.clone()),
                 section_idx: sec_idx,
@@ -247,16 +360,22 @@ fn build_view(sections: &[Section], filter: &str, opts: PickerOptions) -> View {
         selectable.push(idx);
     }
 
-    View { rows, selectable }
+    let name_column = annotation_column(rows.iter().filter_map(|r| match &r.kind {
+        RowKind::Item(p) => Some((p.name.as_str(), p.annotation.as_str())),
+        _ => None,
+    }));
+
+    View {
+        rows,
+        selectable,
+        name_column,
+    }
 }
 
 fn cursor_selection(view: &View, cursor: usize) -> Option<Selection> {
     let &row_idx = view.selectable.get(cursor)?;
     match &view.rows[row_idx].kind {
-        RowKind::Item(p) => Some(Selection::Existing {
-            name: p.name.clone(),
-            kind: p.kind,
-        }),
+        RowKind::Item(p) => Some(Selection::Existing(p.name.clone())),
         RowKind::CreateNew(name) => Some(Selection::Create(name.clone())),
         RowKind::Heading(_) => None,
     }
@@ -351,7 +470,7 @@ impl<'a> PickModel<'a> {
     /// nothing to follow, so the cursor returns to the top.
     fn refilter(&mut self) {
         let preserved = match cursor_selection(&self.view, self.cursor) {
-            Some(Selection::Existing { name, .. }) => Some(name),
+            Some(Selection::Existing(name)) => Some(name),
             _ => None,
         };
         self.view = build_view(self.sections, &self.filter, self.opts);
@@ -513,14 +632,14 @@ fn render(term: &Term, view: &View, cursor: usize, filter: &str, prompt_label: &
         && let Some(h) = cursor_heading_row
         && let RowKind::Heading(text) = &view.rows[h].kind
     {
-        let line = style(text).bold().dim().to_string();
+        let line = style(clip_end(text, width)).bold().dim().to_string();
         render_line(&line);
         drawn += visual_rows(&line, width);
     }
 
     let end = (scroll + content_h).min(total_rows);
     for r in scroll..end {
-        let line = format_row(&view.rows[r], r == cursor_row);
+        let line = format_row(&view.rows[r], r == cursor_row, view.name_column, width);
         render_line(&line);
         drawn += visual_rows(&line, width);
     }
@@ -528,49 +647,146 @@ fn render(term: &Term, view: &View, cursor: usize, filter: &str, prompt_label: &
     drawn
 }
 
-fn format_row(row: &RenderRow, is_cursor: bool) -> String {
+/// Columns every item row spends before the name: two of indent, the cursor,
+/// and the `*` column, each followed by a space.
+const ROW_INDENT: usize = 6;
+
+/// Columns between a name and its annotation.
+const ANNOTATION_GAP: usize = 2;
+
+/// Shortens `text` to `width` columns, keeping the head and marking the cut —
+/// a branch name reads from the left.
+fn clip_end(text: &str, width: usize) -> String {
+    if measure_text_width(text) <= width {
+        return text.to_string();
+    }
+    let mut out = String::new();
+    // The ellipsis has to fit too, so it is spent before anything else.
+    let mut used = 1;
+    for c in text.chars() {
+        let w = measure_text_width(&c.to_string());
+        if used + w > width {
+            break;
+        }
+        out.push(c);
+        used += w;
+    }
+    out.push('…');
+    out
+}
+
+/// Shortens `text` to `width` columns, keeping the *tail* — a worktree path is
+/// identified by where it ends, and so is the hint on a disabled row.
+fn clip_start(text: &str, width: usize) -> String {
+    if measure_text_width(text) <= width {
+        return text.to_string();
+    }
+    let mut tail = Vec::new();
+    let mut used = 1;
+    for c in text.chars().rev() {
+        let w = measure_text_width(&c.to_string());
+        if used + w > width {
+            break;
+        }
+        tail.push(c);
+        used += w;
+    }
+    let mut out = String::from("…");
+    out.extend(tail.into_iter().rev());
+    out
+}
+
+/// Renders a row, clipped to fit `width` in one terminal line.
+///
+/// Fitting is not cosmetic: [`render`] budgets its viewport in logical rows, so
+/// a row that wrapped would spend more of the screen than it was allotted, push
+/// the prompt off the top, and strand output where `clear_last_lines` can't
+/// reach it. Annotations are worktree paths, which are long, so this is the
+/// ordinary case rather than an edge one.
+fn format_row(row: &RenderRow, is_cursor: bool, name_column: usize, width: usize) -> String {
+    let cursor = if is_cursor { ">" } else { " " };
     match &row.kind {
-        RowKind::Heading(text) => style(text).bold().dim().to_string(),
+        RowKind::Heading(text) => style(clip_end(text, width)).bold().dim().to_string(),
         RowKind::Item(pick) => {
-            let cursor = if is_cursor { ">" } else { " " };
-            let name_with_mark = if pick.is_current {
-                format!("* {}", pick.name)
-            } else {
-                pick.name.clone()
+            // The `*` reserves its column on every row, so names line up and
+            // stepping down the list doesn't shuffle them sideways.
+            let mark = if pick.is_current { "*" } else { " " };
+            let body = width.saturating_sub(ROW_INDENT);
+
+            // Only the terminal clips a name; `name_column` is a padding target
+            // that a longer name simply overruns, pushing its annotation right,
+            // exactly as `align_labels` leaves an over-wide name unpadded.
+            let name = clip_end(&pick.name, body.max(1));
+            let name_w = measure_text_width(&name);
+            // The column is a shared target, so it is capped against this
+            // terminal before it is spent: one name wide enough to fill the row
+            // would otherwise pad every *other* row out to the edge, dropping
+            // annotations that had room. Half the body splits the row evenly,
+            // and the outsized name overruns its own padding instead — which is
+            // already what a name longer than the column does.
+            let column = name_column.min(body / 2);
+            // Padded here rather than by `align_labels`, which joins the pair
+            // into one string: the name and its annotation are styled
+            // separately, so they have to stay separate.
+            let pad_w = column
+                .saturating_sub(name_w)
+                .min(body.saturating_sub(name_w));
+            let pad = " ".repeat(pad_w);
+            let room = body.saturating_sub(name_w + pad_w + ANNOTATION_GAP);
+
+            // Below a few columns there is no annotation worth reading, and a
+            // bare name beats a lone ellipsis.
+            let line = match pick.annotation.as_str() {
+                "" => format!("  {cursor} {mark} {name}"),
+                _ if room < 2 => format!("  {cursor} {mark} {name}"),
+                annotation if pick.disabled => {
+                    // A disabled row is dimmed whole below, so dimming the
+                    // annotation here as well would only double the escapes.
+                    format!(
+                        "  {cursor} {mark} {name}{pad}  {}",
+                        clip_start(annotation, room)
+                    )
+                }
+                annotation => format!(
+                    "  {cursor} {mark} {name}{pad}  {}",
+                    style(clip_start(annotation, room)).dim()
+                ),
             };
-            let suffix = match pick.availability {
-                Availability::Local => "",
-                Availability::RemoteOnly => " ☁",
-                Availability::Missing => " (missing)",
-            };
-            let line = format!("  {cursor} {name_with_mark}{suffix}");
-            if pick.availability.is_missing() {
+            if pick.disabled {
                 style(line).dim().to_string()
             } else {
                 line
             }
         }
         RowKind::CreateNew(name) => {
-            let cursor = if is_cursor { ">" } else { " " };
+            let label = clip_end(
+                &format!("Create new: {name}"),
+                width.saturating_sub(ROW_INDENT),
+            );
             format!(
                 "  {cursor} {} {}",
                 style("+").green().bold(),
-                style(format!("Create new: {name}")).italic()
+                style(label).italic()
             )
         }
     }
+}
+
+/// The width names are padded to so annotations share a column. Only rows that
+/// actually carry an annotation drive it — a list with none needs no column, and
+/// padding for an absent one is just trailing whitespace.
+fn annotation_column<'a>(rows: impl Iterator<Item = (&'a str, &'a str)>) -> usize {
+    rows.filter(|(_, annotation)| !annotation.is_empty())
+        .map(|(name, _)| measure_text_width(name))
+        .max()
+        .unwrap_or(0)
 }
 
 /// Pads (name, annotation) pairs so annotations line up in a column. Rows
 /// without an annotation are left bare, so an unannotated list gains no
 /// trailing whitespace.
 pub(crate) fn align_labels(rows: &[(String, String)]) -> Vec<String> {
-    let width = rows
-        .iter()
-        .filter(|(_, a)| !a.is_empty())
-        .map(|(name, _)| measure_text_width(name))
-        .max()
-        .unwrap_or(0);
+    let width = annotation_column(rows.iter().map(|(n, a)| (n.as_str(), a.as_str())));
 
     rows.iter()
         .map(|(name, annotation)| {
@@ -781,11 +997,51 @@ mod tests {
                 .map(|n| Pick {
                     name: (*n).to_string(),
                     is_current: false,
-                    availability: Availability::Local,
-                    kind: PickKind::Branch,
+                    annotation: String::new(),
+                    disabled: false,
                 })
                 .collect(),
         }
+    }
+
+    fn names(names: &[&str]) -> Vec<String> {
+        names.iter().map(|n| (*n).to_string()).collect()
+    }
+
+    /// A catalogue with nothing in it, to be filled in by the struct-update
+    /// syntax so each test states only the facts it is about.
+    fn catalogue() -> Catalogue {
+        Catalogue {
+            current: None,
+            held: HashMap::new(),
+            local: Vec::new(),
+            pinned: Vec::new(),
+            remote_only: Vec::new(),
+        }
+    }
+
+    fn held(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+        pairs
+            .iter()
+            .map(|(b, p)| ((*b).to_string(), (*p).to_string()))
+            .collect()
+    }
+
+    /// The whole list as the user reads it: headings, then one line per row
+    /// carrying its marker and, where it is inert, `(disabled)`.
+    fn listing(catalogue: &Catalogue, verb: Verb) -> Vec<String> {
+        sections(catalogue, verb)
+            .iter()
+            .flat_map(|s| {
+                std::iter::once(s.heading.to_string()).chain(s.items.iter().map(|p| {
+                    let mark = if p.is_current { "*" } else { " " };
+                    let inert = if p.disabled { " (disabled)" } else { "" };
+                    format!("{mark} {} {}{inert}", p.name, p.annotation)
+                        .trim_end()
+                        .to_string()
+                }))
+            })
+            .collect()
     }
 
     /// Keys for typing a literal string into the filter.
@@ -809,7 +1065,7 @@ mod tests {
 
     fn picked_name(sel: Option<Selection>) -> Option<String> {
         match sel {
-            Some(Selection::Existing { name, .. }) => Some(name),
+            Some(Selection::Existing(name)) => Some(name),
             _ => None,
         }
     }
@@ -1056,6 +1312,213 @@ mod tests {
     fn multi_select_escape_returns_empty() {
         let got = run_multi_select(&["a", "b"], &[true, true], vec![Key::Escape]);
         assert!(got.is_empty());
+    }
+
+    /// One list, whichever verb is picking: every branch is on it, in the same
+    /// order, with the worktree-backed ones carrying their path. Only what
+    /// selecting a row *does* differs, and `br` is the only verb where that
+    /// leaves a row with nothing to do.
+    #[test]
+    fn every_verb_draws_the_same_list() {
+        let catalogue = Catalogue {
+            current: Some("main".to_string()),
+            held: held(&[("feature", "~/wt/repo/feature")]),
+            local: names(&["main", "feature", "spike"]),
+            pinned: names(&["main"]),
+            remote_only: names(&["colleagues-work"]),
+        };
+
+        let listed = [
+            "Pinned",
+            "* main",
+            "Local",
+            "  feature ~/wt/repo/feature",
+            "  spike",
+            "Remote",
+            "  colleagues-work",
+        ];
+        assert_eq!(listing(&catalogue, Verb::Go), listed);
+        assert_eq!(listing(&catalogue, Verb::Worktree), listed);
+        assert_eq!(
+            listing(&catalogue, Verb::Here),
+            [
+                "Pinned",
+                "* main",
+                "Local",
+                "  feature in ~/wt/repo/feature — use `perch` (disabled)",
+                "  spike",
+                "Remote",
+                "  colleagues-work",
+            ],
+        );
+    }
+
+    /// The worktree we're standing in holds the current branch, so annotating it
+    /// would put a path on every list's `*` row saying only "you are here" — and
+    /// under `br` would grey out the one row that is always checkoutable.
+    #[test]
+    fn the_branch_we_are_on_is_marked_but_never_pathed() {
+        let catalogue = Catalogue {
+            current: Some("main".to_string()),
+            held: held(&[("main", "~/repo")]),
+            local: names(&["main"]),
+            ..catalogue()
+        };
+        assert_eq!(listing(&catalogue, Verb::Go), ["Local", "* main"]);
+        assert_eq!(listing(&catalogue, Verb::Here), ["Local", "* main"]);
+    }
+
+    /// A kept branch is listed whether or not it is here yet: `☁` where fetching
+    /// it would do, and inert where it exists nowhere at all.
+    #[test]
+    fn a_kept_branch_says_where_it_can_be_found() {
+        let catalogue = Catalogue {
+            local: names(&["here"]),
+            pinned: names(&["here", "develop", "release"]),
+            remote_only: names(&["develop"]),
+            ..catalogue()
+        };
+        assert_eq!(
+            listing(&catalogue, Verb::Go),
+            [
+                "Pinned",
+                "  here",
+                "  develop ☁",
+                "  release absent (disabled)",
+            ],
+            "a kept branch is drawn whether it is local, remote-only, or nowhere at all",
+        );
+    }
+
+    /// A kept branch is drawn under *Pinned* and never again below, so the
+    /// lower sections skip whatever is already up there.
+    #[test]
+    fn a_kept_branch_is_listed_once() {
+        let catalogue = Catalogue {
+            local: names(&["main", "spike"]),
+            pinned: names(&["main"]),
+            remote_only: names(&["develop"]),
+            ..catalogue()
+        };
+        assert_eq!(
+            listing(&catalogue, Verb::Go),
+            [
+                "Pinned",
+                "  main",
+                "Local",
+                "  spike",
+                "Remote",
+                "  develop",
+            ],
+        );
+    }
+
+    /// A heading with nothing under it is not a heading.
+    #[test]
+    fn empty_headings_are_dropped() {
+        let catalogue = Catalogue {
+            local: names(&["only"]),
+            ..catalogue()
+        };
+        assert_eq!(listing(&catalogue, Verb::Go), ["Local", "  only"]);
+    }
+
+    /// A greyed row is on screen but out of reach, so the cursor steps over it
+    /// exactly as it steps over a heading.
+    #[test]
+    fn a_disabled_row_cannot_be_selected() {
+        let catalogue = Catalogue {
+            held: held(&[("feature", "~/wt/repo/feature")]),
+            local: names(&["feature", "spike"]),
+            ..catalogue()
+        };
+        let sections = sections(&catalogue, Verb::Here);
+        let sel = run_pick(&sections, SELECT_OPTS, vec![Key::Enter]);
+        assert_eq!(picked_name(sel).as_deref(), Some("spike"));
+    }
+
+    /// Strips styling so a row asserts as the user sees it.
+    fn plain(s: &str) -> String {
+        console::strip_ansi_codes(s).into_owned()
+    }
+
+    fn item_row(name: &str, annotation: &str, disabled: bool) -> RenderRow {
+        RenderRow {
+            kind: RowKind::Item(Pick {
+                name: name.to_string(),
+                is_current: false,
+                annotation: annotation.to_string(),
+                disabled,
+            }),
+            section_idx: 0,
+        }
+    }
+
+    /// The viewport budgets one terminal line per row, so a row that wrapped
+    /// would spend screen it was never allotted — pushing the prompt off the
+    /// top and stranding output `clear_last_lines` can't reach.
+    #[test]
+    fn a_row_never_exceeds_the_terminal_width() {
+        let long = "/Users/someone/Developer/Personal/worktrees/repo/feature";
+        for width in [10, 20, 40, 80] {
+            for disabled in [false, true] {
+                let row = item_row("feature", long, disabled);
+                let drawn = plain(&format_row(&row, true, 7, width));
+                assert!(
+                    measure_text_width(&drawn) <= width,
+                    "{width}-column row overflowed (disabled={disabled}): {drawn:?}"
+                );
+            }
+        }
+    }
+
+    /// A path is identified by where it ends, so the tail is what survives.
+    #[test]
+    fn a_clipped_annotation_keeps_its_tail() {
+        let row = item_row(
+            "feature",
+            "/very/long/path/to/worktrees/repo/feature",
+            false,
+        );
+        let drawn = plain(&format_row(&row, false, 7, 40));
+        assert!(
+            drawn.ends_with("worktrees/repo/feature"),
+            "should keep the identifying tail, got: {drawn:?}"
+        );
+        assert!(drawn.contains('…'), "and mark the cut, got: {drawn:?}");
+    }
+
+    /// A branch name reads from the left, and it outranks its annotation: with
+    /// too little room for both, the annotation goes rather than being cut to a
+    /// lone ellipsis.
+    #[test]
+    fn a_narrow_row_keeps_the_name_and_drops_the_annotation() {
+        let row = item_row("feature", "/very/long/path", false);
+        let drawn = plain(&format_row(&row, false, 7, 14));
+        assert_eq!(drawn, "      feature");
+    }
+
+    /// The alignment column is shared, so an over-wide name must pay for itself
+    /// rather than charging every other row: a single long branch used to set a
+    /// column past the terminal edge, and the short rows around it lost the
+    /// annotations they had room for.
+    #[test]
+    fn one_over_wide_name_does_not_cost_the_short_rows_their_annotations() {
+        let column = measure_text_width(&"l".repeat(100));
+        let row = item_row("feature", "/Users/someone/worktrees/repo/feature", false);
+        let drawn = plain(&format_row(&row, false, column, 80));
+        assert!(
+            drawn.ends_with("worktrees/repo/feature"),
+            "the short row should keep the annotation it has room for, got: {drawn:?}"
+        );
+    }
+
+    #[test]
+    fn clipping_marks_the_cut_at_the_end_it_took_from() {
+        assert_eq!(clip_end("abcdefgh", 4), "abc…");
+        assert_eq!(clip_start("abcdefgh", 4), "…fgh");
+        assert_eq!(clip_end("short", 10), "short", "untouched where it fits");
+        assert_eq!(clip_start("short", 10), "short");
     }
 
     #[test]

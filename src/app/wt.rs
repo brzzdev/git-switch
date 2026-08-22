@@ -1,17 +1,13 @@
-use std::collections::HashSet;
 use std::env;
 use std::path::{Path, PathBuf};
 
 use console::{measure_text_width, style};
 use indicatif::ProgressBar;
 
-use super::picker::{
-    Availability, Pick, PickKind, PickerOptions, Section, Selection, align_labels,
-    interactive_keys, multi_select, pick,
-};
+use super::picker::{PickerOptions, Selection, align_labels, interactive_keys, multi_select, pick};
 use super::{
-    CursorGuard, Risk, build_sections, confirm, display_path, fetch_and_ff, handoff_cd, hook,
-    marker, prompt_delete_stale_branches, removal, report_update, reporting,
+    CursorGuard, Risk, Verb, build_catalogue, confirm, display_path, fetch_and_ff, handoff_cd,
+    hook, marker, picker, prompt_delete_stale_branches, removal, report_update, reporting,
 };
 use crate::{AppResult, Error, git};
 
@@ -21,25 +17,43 @@ enum Action {
     CreateNewBranch(String),
 }
 
+/// Whether the branch behind a name has to exist, which the fresh state alone
+/// can't say — it reports what is there, not what was asked for. A name typed
+/// at the shell, or into the filter behind "Create new", claims nothing, and
+/// creating it is the point. A picked row claims the branch was there when the
+/// *Catalogue* was drawn, so a branch that has gone since leaves nothing to
+/// fall back to that the user chose.
+#[derive(Clone, Copy, PartialEq)]
+enum Existence {
+    MayCreate,
+    MustExist,
+}
+
 pub fn run(target: Option<&str>) -> AppResult<()> {
-    // Drop worktrees whose directory was deleted by hand: they can't be entered,
-    // so treat their branch as one to (re)create. `worktree_add`/`checkout` prune
-    // the stale registration when it gets in the way.
-    let worktrees: Vec<git::Worktree> = git::worktree_list()?
-        .into_iter()
-        .filter(|w| !w.prunable)
-        .collect();
-    let main = main_of(&worktrees)?;
+    // A worktree whose directory was deleted by hand can't be entered, so its
+    // branch is one to (re)create. `worktree_add`/`checkout` prune the stale
+    // registration when it gets in the way.
+    let listed = super::live_worktrees()?;
     let current_branch = git::current_branch()?;
     let remote = git::current_remote(current_branch.as_deref());
 
-    let action = match target {
-        Some(name) => resolve_target(name, &worktrees, &remote)?,
-        None => match select(&worktrees, current_branch.as_deref(), &remote)? {
-            Some(a) => a,
-            None => return Ok(()),
-        },
+    let (branch, existence) = if let Some(name) = target {
+        (name.to_string(), Existence::MayCreate)
+    } else {
+        let Some(picked) = select(&listed, current_branch.as_deref(), &remote)? else {
+            return Ok(());
+        };
+        picked
     };
+
+    // Read the worktrees again before deciding what the branch needs: the list
+    // above was drawn before the picker opened, and it then sat waiting on a
+    // keystroke. A worktree taken on the branch in the meantime would send this
+    // into `worktree add`, which git refuses; one removed would hand the shell a
+    // path that is no longer there.
+    let worktrees = super::live_worktrees()?;
+    let main = main_of(&worktrees)?;
+    let action = resolve_target(&branch, existence, &worktrees, &remote)?;
 
     // The branch comes back alongside the path so the stale prompt can leave the
     // worktree we're about to enter alone.
@@ -384,12 +398,19 @@ fn create_worktree(
     Ok(path)
 }
 
+/// Which branch the user picked, by name, and what picking it claimed. Deciding
+/// what that branch *needs* is deliberately not done here: the answer depends on
+/// which worktrees exist, and this returns while the snapshot behind the list is
+/// going stale. The name and the claim are the two parts of the answer that
+/// can't go stale, because they are the user's, not git's — [`resolve_target`]
+/// re-reads everything else.
 fn select(
     worktrees: &[git::Worktree],
     current_branch: Option<&str>,
     remote: &str,
-) -> AppResult<Option<Action>> {
-    let sections = build_wt_sections(worktrees, current_branch, remote)?;
+) -> AppResult<Option<(String, Existence)>> {
+    let catalogue = build_catalogue(current_branch, remote, worktrees)?;
+    let sections = picker::sections(&catalogue, Verb::Worktree);
     // Non-interactive (piped/CI): we can't prompt, so report nothing to open
     // rather than blocking on key input.
     let Some(keys) = interactive_keys() else {
@@ -399,60 +420,27 @@ fn select(
         current_branch,
         &sections,
         PickerOptions {
-            prompt: "Worktree",
+            prompt: Verb::Worktree.prompt(),
             allow_create_from_filter: true,
         },
         keys,
     )?;
-    let action = match selection {
-        None => return Ok(None),
-        Some(Selection::Existing {
-            name,
-            kind: PickKind::Worktree,
-        }) => git::worktree_for_branch(worktrees, &name)
-            .map(Action::CdToExisting)
-            .unwrap_or(Action::CreateForBranch(name)),
-        Some(Selection::Existing {
-            name,
-            kind: PickKind::Branch,
-        }) => Action::CreateForBranch(name),
-        Some(Selection::Create(name)) => Action::CreateNewBranch(name),
-    };
-    Ok(Some(action))
+    Ok(selection.map(|s| match s {
+        Selection::Create(name) => (name, Existence::MayCreate),
+        Selection::Existing(name) => (name, Existence::MustExist),
+    }))
 }
 
-fn build_wt_sections(
+/// What the branch needs, decided against state read after the pick. Falling
+/// through every lookup means no branch by that name exists anywhere, which is
+/// a new branch when the name was typed and an error when it was picked: the
+/// row said the branch was there, so its absence is news, not an instruction.
+fn resolve_target(
+    name: &str,
+    existence: Existence,
     worktrees: &[git::Worktree],
-    current_branch: Option<&str>,
     remote: &str,
-) -> AppResult<Vec<Section>> {
-    let held: HashSet<String> = worktrees.iter().filter_map(|w| w.branch.clone()).collect();
-
-    let mut wt_picks: Vec<Pick> = worktrees
-        .iter()
-        .filter_map(|w| {
-            w.branch.as_ref().map(|b| Pick {
-                name: b.clone(),
-                is_current: current_branch == Some(b.as_str()),
-                availability: Availability::Local,
-                kind: PickKind::Worktree,
-            })
-        })
-        .collect();
-    wt_picks.sort_by(|a, b| a.name.cmp(&b.name));
-
-    let mut sections = Vec::new();
-    if !wt_picks.is_empty() {
-        sections.push(Section {
-            heading: "Worktrees",
-            items: wt_picks,
-        });
-    }
-    sections.extend(build_sections(current_branch, remote, &held)?);
-    Ok(sections)
-}
-
-fn resolve_target(name: &str, worktrees: &[git::Worktree], remote: &str) -> AppResult<Action> {
+) -> AppResult<Action> {
     if let Some(wt) = git::worktree_for_branch(worktrees, name) {
         return Ok(Action::CdToExisting(wt));
     }
@@ -463,6 +451,11 @@ fn resolve_target(name: &str, worktrees: &[git::Worktree], remote: &str) -> AppR
     let remote_only = git::remote_only_branches(&locals, remote).unwrap_or_default();
     if remote_only.iter().any(|b| b == name) {
         return Ok(Action::CreateForBranch(name.to_string()));
+    }
+    if existence == Existence::MustExist {
+        return Err(Error::Vanished {
+            branch: name.to_string(),
+        });
     }
     Ok(Action::CreateNewBranch(name.to_string()))
 }
