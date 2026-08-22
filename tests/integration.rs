@@ -687,6 +687,19 @@ fn add_worktree_branch(work: &Path, parent: &Path, branch: &str) -> PathBuf {
     path
 }
 
+/// Adds a worktree with no branch of its own, the state a worktree reports once
+/// its directory has been deleted by hand — and the one case where its directory
+/// name is the only handle `wt rm` has on it.
+fn add_worktree_detached(work: &Path, parent: &Path, name: &str) -> PathBuf {
+    let path = parent.join("worktrees").join("repo").join(name);
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    git(
+        work,
+        &["worktree", "add", "--detach", path.to_str().unwrap()],
+    );
+    path
+}
+
 /// A branch created off `origin/main` and never committed to has its tip *equal*
 /// to main's, which the old `tip == HEAD` rule read as "fast-forward merged".
 #[test]
@@ -972,18 +985,16 @@ fn worktree_held_stale_branch_is_no_longer_reported_as_skipped() {
 
 /// The candidate list the shell completions ask for. The main worktree is never
 /// removable so it is never offered; every other one is offered under both names
-/// `wt rm` accepts, which is what the awk this replaced could not do.
+/// `wt rm` accepts, which is what the awk this replaced could not do. `--complete`
+/// is also read before anything destructive, so the worktrees are all still there
+/// afterwards even though a bare `wt rm` here would offer to remove them.
 #[test]
 fn wt_rm_complete_lists_every_name_rm_accepts() {
     let (_bare, parent, work) = setup_with_parent();
-    add_worktree_branch(&work, parent.path(), "feat/login");
+    let live = add_worktree_branch(&work, parent.path(), "feat/login");
 
     // Detached: no branch, so its directory name is the only handle on it.
-    let detached = parent.path().join("worktrees").join("repo").join("spike");
-    git(
-        &work,
-        &["worktree", "add", "--detach", detached.to_str().unwrap()],
-    );
+    let detached = add_worktree_detached(&work, parent.path(), "spike");
 
     // Prunable: registered but gone from disk, which is what `wt rm` is for.
     let gone = add_worktree_branch(&work, parent.path(), "abandoned");
@@ -996,19 +1007,9 @@ fn wt_rm_complete_lists_every_name_rm_accepts() {
     let mut names: Vec<&str> = stdout.lines().collect();
     names.sort_unstable();
     assert_eq!(names, ["abandoned", "feat/login", "login", "spike"]);
-}
 
-/// `--complete` is read before anything destructive, so it prints and leaves the
-/// worktree alone even though a bare `wt rm` here would offer to remove it.
-#[test]
-fn wt_rm_complete_removes_nothing() {
-    let (_bare, parent, work) = setup_with_parent();
-    let path = add_worktree_branch(&work, parent.path(), "feature");
-
-    let output = perch_args(&work, &["wt", "rm", "--complete"]);
-
-    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
-    assert!(path.is_dir(), "worktree should survive: {}", path.display());
+    assert!(live.is_dir(), "worktree should survive: {}", live.display());
+    assert!(detached.is_dir(), "worktree should survive a listing");
 }
 
 #[test]
@@ -2012,11 +2013,7 @@ fn wt_rm_clears_missing_detached_worktree_by_dir_name() {
     // A detached worktree whose directory was deleted by hand: it reports no
     // branch and lingers as a "prunable" registration. `wt rm` must still be
     // able to target it (by directory name) and clear the dead entry.
-    let path = parent.path().join("worktrees").join("repo").join("scratch");
-    git(
-        &work,
-        &["worktree", "add", "--detach", path.to_str().unwrap()],
-    );
+    let path = add_worktree_detached(&work, parent.path(), "scratch");
     fs::remove_dir_all(&path).unwrap();
 
     let output = perch_args(&work, &["wt", "rm", "scratch"]);

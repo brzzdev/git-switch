@@ -67,11 +67,9 @@ fn dispatch_wt(args: &[String]) -> perch::AppResult<()> {
         Some("remove") => Err(perch::Error::retired("remove", "rm")),
         Some("rm") => {
             let rest = &args[1..];
-            // The shell completions ask what `rm` accepts rather than deriving
-            // it themselves. Spelled as a flag rather than a subverb so it can
-            // never eat a branch name — and so it stays out of the three verbs
-            // ADR 0007 settled on. Read before anything else, since it prints
-            // and removes nothing.
+            // Read before the target and the force flag: this prints what `rm`
+            // accepts and removes nothing. A flag rather than a subverb so it
+            // can never eat a branch name, and so ADR 0007's three verbs stand.
             if rest.iter().any(|a| a == "--complete") {
                 return perch::app::wt::run_rm_complete();
             }
