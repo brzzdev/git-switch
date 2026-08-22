@@ -41,51 +41,31 @@ fn interactive_term() -> Option<Term> {
     term.is_term().then_some(term)
 }
 
-/// Which of three intents a command carries. A verb decides what happens to a
-/// *Held* branch and nothing else, since git leaves exactly one move legal in
-/// every other case — so it also decides which picker rows are inert, and never
-/// which are listed. See [ADR
-/// 0007](../docs/adr/0007-three-verbs-one-per-intent.md).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Verb {
-    /// Bare `perch <name>` — hand off to the worktree holding the branch.
-    Go,
-    /// `perch br <name>` — refuse, naming the path and the verb that reaches it.
-    Here,
-    /// `perch wt <name>` — give the branch a worktree of its own.
-    Worktree,
+spelled! {
+    /// Which of three intents a command carries. A verb decides what happens to
+    /// a *Held* branch and nothing else, since git leaves exactly one move legal
+    /// in every other case — so it also decides which picker rows are inert, and
+    /// never which are listed. See [ADR
+    /// 0007](../docs/adr/0007-three-verbs-one-per-intent.md).
+    ///
+    /// The words beside the variants are the whole of what the dispatcher reads
+    /// as a verb, and so the whole of what the completions subtract.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum Verb {
+        /// Bare `perch <name>` — hand off to the worktree holding the branch.
+        /// No word of its own: being typed is not how you reach it, which is
+        /// why a branch named `br` or `wt` needs the `--` escape and one named
+        /// anything else does not.
+        Go,
+        /// `perch br <name>` — refuse, naming the path and the verb that
+        /// reaches it.
+        Here = "br",
+        /// `perch wt <name>` — give the branch a worktree of its own.
+        Worktree = "wt",
+    }
 }
 
 impl Verb {
-    /// The only line here the compiler can't hold to the variants. A verb left
-    /// out of it never parses, so `perch <that word>` reaches a branch of that
-    /// name instead of the verb — which the dispatcher's own tests catch long
-    /// before a completion could.
-    const ALL: [Self; 3] = [Self::Go, Self::Here, Self::Worktree];
-
-    /// The word that selects this verb on the command line. *Go* has none: it
-    /// is what a bare `perch` already means. Exhaustive on purpose — a fourth
-    /// verb has to say here whether it is spelled, and everything that reads a
-    /// spelling reads it from this: the dispatcher, the `--` escape in
-    /// [`go_there_argument`], and the completions' subtraction.
-    fn spelling(self) -> Option<&'static str> {
-        match self {
-            Verb::Go => None,
-            Verb::Here => Some("br"),
-            Verb::Worktree => Some("wt"),
-        }
-    }
-
-    /// The verb `word` selects, where it selects one. Never answers *Go*, which
-    /// has no spelling — so a word this rejects is a branch name, which is the
-    /// whole of what *Go* means.
-    #[must_use]
-    pub fn parse(word: &str) -> Option<Self> {
-        Self::ALL
-            .into_iter()
-            .find(|verb| verb.spelling() == Some(word))
-    }
-
     /// The picker's prompt. All three verbs draw the same list, so the prompt is
     /// the only thing on screen saying what selecting a row will do.
     pub(crate) fn prompt(self) -> &'static str {
@@ -1035,24 +1015,15 @@ mod tests {
         assert_eq!(shell_quote("it's"), r"'it'\''s'");
     }
 
-    /// `ALL` is the one line `spelling`'s exhaustive match can't hold to the
-    /// variants, and everything downstream — the dispatcher, the `--` escape,
-    /// the completions' subtraction — reads the spellings through it. So pin
-    /// the round trip: every spelled verb has to come back from its own word.
+    /// The words now live on the variants themselves, so completeness is the
+    /// declaration's job rather than a test's. What is left worth pinning is the
+    /// mapping, and that an ordinary name is left alone — which is what sends a
+    /// bare `perch <name>` to a branch instead of a verb.
     #[test]
-    fn every_spelled_verb_parses_back_from_its_word() {
-        for verb in Verb::ALL {
-            let Some(word) = verb.spelling() else {
-                continue;
-            };
-            assert_eq!(Verb::parse(word), Some(verb), "{word} should parse back");
-        }
+    fn a_verb_parses_from_the_word_that_selects_it() {
+        assert_eq!(Verb::parse("br"), Some(Verb::Here));
+        assert_eq!(Verb::parse("wt"), Some(Verb::Worktree));
         assert_eq!(Verb::parse("feature"), None);
-        assert_eq!(
-            Verb::Go.spelling(),
-            None,
-            "a bare `perch` is what Go means, so it has no word to be typed as"
-        );
     }
 
     #[test]

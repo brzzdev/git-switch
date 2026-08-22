@@ -7,13 +7,11 @@
 //! `wt rm`, branch names everywhere else — and each subtracts the words its own
 //! `match` arm takes first.
 //!
-//! That subtraction is `Verb::spelling` and `wt::Subverb::spelling`, the same
-//! reading the dispatcher parses through, rather than a list restated in each
-//! completion file. Both are exhaustive matches, so a new verb has to be given
-//! a word there, and the arm it needs in `main.rs` is a compile error until it
-//! has one. The one step neither the compiler nor a test can force is adding it
-//! to `ALL` beside them — miss that and the verb simply never parses, which the
-//! dispatcher notices long before a completion does.
+//! That subtraction reads the words declared on `Verb` and `wt::Subverb`
+//! themselves, the same ones the dispatcher parses through, rather than a list
+//! restated in each completion file. The `spelled!` macro makes the word part
+//! of the variant declaration, so there is no separate list of words for a new
+//! verb to be missing from.
 //!
 //! What the completion files still hold is the positional logic — which is
 //! genuinely per-shell — and the verbs and subverbs themselves, each of which
