@@ -170,7 +170,7 @@ wt rm .         # perch wt rm .
 br main         # perch br main
 ```
 
-They delegate to the `perch` function, so the `cd` hand-off works exactly the same way.
+They call the `perch` function rather than the binary, so the `cd` hand-off comes with them.
 
 [broot](https://dystroy.org/broot) also installs a `br` function, and whichever is sourced last wins. Set `PERCH_NO_SHORTCUTS` to any non-empty value *before* the `source` line to leave both names alone:
 
