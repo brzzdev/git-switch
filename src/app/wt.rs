@@ -17,16 +17,16 @@ enum Action {
     CreateNewBranch(String),
 }
 
-/// What the user's choice claims about the branch behind it, which the fresh
-/// state alone can't say. A picked row claims the branch existed when the list
-/// was drawn, so a branch that has gone since takes the intent with it — there
-/// is nothing to fall back to that the user asked for. A typed name claims
-/// nothing, whether typed at the shell or into the filter behind "Create new",
-/// and creating it is the point.
+/// Whether the branch behind a name has to exist, which the fresh state alone
+/// can't say — it reports what is there, not what was asked for. A name typed
+/// at the shell, or into the filter behind "Create new", claims nothing, and
+/// creating it is the point. A picked row claims the branch was there when the
+/// *Catalogue* was drawn, so a branch that has gone since leaves nothing to
+/// fall back to that the user chose.
 #[derive(Clone, Copy, PartialEq)]
-enum Intent {
-    ByName,
-    Existing,
+enum Existence {
+    MayCreate,
+    MustExist,
 }
 
 pub fn run(target: Option<&str>) -> AppResult<()> {
@@ -37,8 +37,8 @@ pub fn run(target: Option<&str>) -> AppResult<()> {
     let current_branch = git::current_branch()?;
     let remote = git::current_remote(current_branch.as_deref());
 
-    let (branch, intent) = if let Some(name) = target {
-        (name.to_string(), Intent::ByName)
+    let (branch, existence) = if let Some(name) = target {
+        (name.to_string(), Existence::MayCreate)
     } else {
         let Some(picked) = select(&listed, current_branch.as_deref(), &remote)? else {
             return Ok(());
@@ -53,7 +53,7 @@ pub fn run(target: Option<&str>) -> AppResult<()> {
     // path that is no longer there.
     let worktrees = super::live_worktrees()?;
     let main = main_of(&worktrees)?;
-    let action = resolve_target(&branch, intent, &worktrees, &remote)?;
+    let action = resolve_target(&branch, existence, &worktrees, &remote)?;
 
     // The branch comes back alongside the path so the stale prompt can leave the
     // worktree we're about to enter alone.
@@ -408,7 +408,7 @@ fn select(
     worktrees: &[git::Worktree],
     current_branch: Option<&str>,
     remote: &str,
-) -> AppResult<Option<(String, Intent)>> {
+) -> AppResult<Option<(String, Existence)>> {
     let catalogue = build_catalogue(current_branch, remote, worktrees)?;
     let sections = picker::sections(&catalogue, Verb::Worktree);
     // Non-interactive (piped/CI): we can't prompt, so report nothing to open
@@ -426,8 +426,8 @@ fn select(
         keys,
     )?;
     Ok(selection.map(|s| match s {
-        Selection::Create(name) => (name, Intent::ByName),
-        Selection::Existing(name) => (name, Intent::Existing),
+        Selection::Create(name) => (name, Existence::MayCreate),
+        Selection::Existing(name) => (name, Existence::MustExist),
     }))
 }
 
@@ -437,7 +437,7 @@ fn select(
 /// row said the branch was there, so its absence is news, not an instruction.
 fn resolve_target(
     name: &str,
-    intent: Intent,
+    existence: Existence,
     worktrees: &[git::Worktree],
     remote: &str,
 ) -> AppResult<Action> {
@@ -452,7 +452,7 @@ fn resolve_target(
     if remote_only.iter().any(|b| b == name) {
         return Ok(Action::CreateForBranch(name.to_string()));
     }
-    if intent == Intent::Existing {
+    if existence == Existence::MustExist {
         return Err(Error::Vanished {
             branch: name.to_string(),
         });
