@@ -1011,6 +1011,62 @@ fn wt_rm_complete_lists_every_name_rm_accepts() {
     assert!(live.is_dir(), "listing must not remove: {}", live.display());
 }
 
+/// The branches offered where a branch name goes, one position at a time. Each
+/// position subtracts what its own dispatcher arm eats and nothing more, so a
+/// word eaten after `wt` is still offered at the top level and a *Verb* is still
+/// offered after `br` — collision is positional, and completing a name the
+/// dispatcher there would swallow is what this guards against.
+#[test]
+fn complete_drops_only_the_words_that_position_eats() {
+    let (_bare, work) = setup();
+    for branch in ["br", "wt", "ls", "rm", "list", "remove", "feat/x"] {
+        git(work.path(), &["branch", branch]);
+    }
+
+    let offered = |args: &[&str]| {
+        let output = perch_args(work.path(), args);
+        assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+        let mut names: Vec<String> = stdout_str(&output).lines().map(String::from).collect();
+        names.sort();
+        names
+    };
+
+    assert_eq!(
+        offered(&["--complete"]),
+        ["feat/x", "list", "ls", "main", "remove", "rm"],
+        "a bare `perch` reads `br` and `wt` as verbs"
+    );
+    assert_eq!(
+        offered(&["br", "--complete"]),
+        ["br", "feat/x", "list", "ls", "main", "remove", "rm", "wt"],
+        "`br` reads everything after it as a branch"
+    );
+    assert_eq!(
+        offered(&["wt", "--complete"]),
+        ["br", "feat/x", "main", "wt"],
+        "`wt` reads the two subverbs and the two retired spellings"
+    );
+}
+
+/// The gap this replaced `git branch` to close: a branch that exists only on the
+/// remote is in the picker and is accepted as a named target, so it has to be
+/// offered too. `git branch` cannot see one.
+#[test]
+fn complete_offers_a_branch_that_exists_only_on_the_remote() {
+    let (_bare, work) = setup();
+    git(work.path(), &["branch", "published"]);
+    git(work.path(), &["push", "origin", "published"]);
+    git(work.path(), &["branch", "-D", "published"]);
+
+    let output = perch_args(work.path(), &["--complete"]);
+
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+    let stdout = stdout_str(&output);
+    let mut names: Vec<&str> = stdout.lines().collect();
+    names.sort_unstable();
+    assert_eq!(names, ["main", "published"]);
+}
+
 #[test]
 fn help_flag_prints_usage() {
     let dir = TempDir::new().unwrap();

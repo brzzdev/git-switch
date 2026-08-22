@@ -192,7 +192,7 @@ It covers the completions too, so nothing offers branch names for someone else's
 
 ## Shell Completions
 
-Tab completions are available for zsh, bash, and fish, and cover `br` and `wt` as well as `perch`.
+Tab completions are available for zsh, bash, and fish, and cover `br` and `wt` as well as `perch`. They offer every branch the command would accept in that position — including branches that exist only on the remote, which the picker lists and a bare `perch <name>` will check out.
 
 ```sh
 just install-completions

@@ -1,13 +1,10 @@
+# Branches the dispatcher will read as a branch name at the position given —
+# asked of the binary, which subtracts the words its own match arm eats first.
+# It reads remote-only branches as well, which `git branch` here could not.
+# `command` skips the shell wrapper: it is a function here, and it would `cd`
+# the interactive shell on a single-line answer.
 _perch_branches() {
-  git branch --format='%(refname:short)' 2>/dev/null
-}
-
-# The dispatcher reads some words as commands before it reads them as branch
-# names, and `--` is the only way to reach a branch spelled like one. Offering
-# such a name where it would be eaten completes into a command that misfires,
-# so drop it there. Keep these patterns in step with `dispatch`/`dispatch_wt`.
-_perch_branches_except() {
-  _perch_branches | grep -vxE "$1"
+  command perch "$@" --complete 2>/dev/null
 }
 
 # Targets `wt rm` will accept — asked of the binary, which reads them off the
@@ -71,22 +68,24 @@ _perch_completions() {
   if [[ "$prev" == "--" ]]; then
     if (( pos == 2 )) ||
       { (( pos == 3 )) && [[ "$verb" == "br" || "$verb" == "wt" ]]; }; then
-      COMPREPLY=($(compgen -W "$(_perch_branches)" -- "$cur"))
+      # `br` eats no word of its own, so its list is the unfiltered one — which
+      # is exactly what a `--` buys.
+      COMPREPLY=($(compgen -W "$(_perch_branches br)" -- "$cur"))
     fi
     return
   fi
 
   case "$pos" in
     1)
-      COMPREPLY=($(compgen -W "br wt $(_perch_branches_except 'br|wt')" -- "$cur"))
+      COMPREPLY=($(compgen -W "br wt $(_perch_branches)" -- "$cur"))
       ;;
     # Only the two verbs read a second word. `perch <branch>` has taken its
     # target by here, and the dispatcher ignores whatever follows it.
     2)
       if [[ "$verb" == "wt" ]]; then
-        COMPREPLY=($(compgen -W "ls rm $(_perch_branches_except 'ls|rm|list|remove')" -- "$cur"))
+        COMPREPLY=($(compgen -W "ls rm $(_perch_branches wt)" -- "$cur"))
       elif [[ "$verb" == "br" ]]; then
-        COMPREPLY=($(compgen -W "$(_perch_branches)" -- "$cur"))
+        COMPREPLY=($(compgen -W "$(_perch_branches br)" -- "$cur"))
       fi
       ;;
   esac

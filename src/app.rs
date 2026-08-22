@@ -5,6 +5,7 @@ use indicatif::ProgressBar;
 
 use crate::{AppResult, Error, git};
 
+pub mod complete;
 pub(crate) mod hook;
 pub(crate) mod marker;
 pub(crate) mod picker;
@@ -845,13 +846,13 @@ fn delete_stale_row(
 ///
 /// A branch named after a verb is read as that verb, and `perch wt` opens the
 /// worktree picker rather than going anywhere — so those names need the `--`
-/// escape hatch. Keep this list in step with `dispatch` in `main.rs`, which is
-/// where the verbs are defined.
+/// escape hatch. Which names those are is [`complete::TopWord`], the same table
+/// `dispatch` parses through and the completions subtract.
 pub(crate) fn go_there_argument(branch: &str) -> String {
     let quoted = shell_quote(branch);
-    match branch {
-        "br" | "wt" => format!("-- {quoted}"),
-        _ => quoted,
+    match complete::TopWord::parse(branch) {
+        Some(_) => format!("-- {quoted}"),
+        None => quoted,
     }
 }
 
