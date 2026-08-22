@@ -8,6 +8,35 @@ _perch_offers() {
   command perch "$@" --complete 2>/dev/null
 }
 
+# Fills COMPREPLY from the newline-separated candidates on stdin, keeping the
+# ones $cur is a prefix of.
+#
+# Git permits `$`, backticks and `${IFS}` in a ref name, so a branch can be
+# named `$(…)`. Whoever can push to a repo you fetch chooses that name, and it
+# reaches here as an ordinary candidate, so this has to stay literal text at two
+# separate moments:
+#
+# Reading it. Deliberately not `compgen -W`, which expands its word list —
+# command substitution included — before matching against it, so merely
+# offering such a branch ran it. Reading line by line evaluates nothing. Lines
+# are the unit rather than words because a worktree directory may hold spaces
+# where a branch never can, and `IFS=` keeps them intact.
+#
+# Inserting it. `printf %q` because bash puts a match on the command line
+# exactly as given, leaving the quoting to whoever wrote the completion — so an
+# unescaped candidate is a command substitution again the moment Enter follows
+# TAB. zsh and fish escape on insertion themselves, which is why only this file
+# has to. Ordinary names come back unchanged, and matching stays against the raw
+# `$cur`, which is what the user actually typed.
+_perch_reply() {
+  local cur=$1 candidate
+  while IFS= read -r candidate; do
+    if [[ -n "$candidate" && "$candidate" == "$cur"* ]]; then
+      COMPREPLY+=("$(printf '%q' "$candidate")")
+    fi
+  done
+}
+
 # `wt rm` reads its target as the first word after `rm` that isn't an option,
 # and takes its `--force` in either order, so a flag or a `--` leaves the slot
 # open while a bare word closes it. Words typed after a target are ignored.
@@ -47,11 +76,8 @@ _perch_completions() {
 
   if [[ "$verb" == "wt" && "$subverb" == "rm" ]] && (( pos >= 3 )); then
     if _perch_wt_rm_wants_target "${cmdline[@]:3:pos-3}"; then
-      # A worktree directory may hold spaces where a branch never can, so both
-      # the wordlist and the result have to split on newlines alone — otherwise
-      # `scratch space` arrives as two candidates and neither one matches.
-      local IFS=$'\n'
-      COMPREPLY=($(compgen -W "$(_perch_offers wt rm)" -- "$cur"))
+      COMPREPLY=()
+      _perch_reply "$cur" < <(_perch_offers wt rm)
     fi
     return
   fi
@@ -64,22 +90,25 @@ _perch_completions() {
       { (( pos == 3 )) && [[ "$verb" == "br" || "$verb" == "wt" ]]; }; then
       # The `--` is the position: it eats nothing at any of the three levels,
       # so one question answers for all of them.
-      COMPREPLY=($(compgen -W "$(_perch_offers --)" -- "$cur"))
+      COMPREPLY=()
+      _perch_reply "$cur" < <(_perch_offers --)
     fi
     return
   fi
 
   case "$pos" in
     1)
-      COMPREPLY=($(compgen -W "br wt $(_perch_offers)" -- "$cur"))
+      COMPREPLY=()
+      _perch_reply "$cur" < <(printf '%s\n' br wt; _perch_offers)
       ;;
     # Only the two verbs read a second word. `perch <branch>` has taken its
     # target by here, and the dispatcher ignores whatever follows it.
     2)
+      COMPREPLY=()
       if [[ "$verb" == "wt" ]]; then
-        COMPREPLY=($(compgen -W "ls rm $(_perch_offers wt)" -- "$cur"))
+        _perch_reply "$cur" < <(printf '%s\n' ls rm; _perch_offers wt)
       elif [[ "$verb" == "br" ]]; then
-        COMPREPLY=($(compgen -W "$(_perch_offers br)" -- "$cur"))
+        _perch_reply "$cur" < <(_perch_offers br)
       fi
       ;;
   esac
