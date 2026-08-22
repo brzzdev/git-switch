@@ -175,8 +175,15 @@ They call the `perch` function rather than the binary, so the `cd` hand-off come
 [broot](https://dystroy.org/broot) also installs a `br` function, and whichever is sourced last wins. Set `PERCH_NO_SHORTCUTS` to any non-empty value *before* the `source` line to leave both names alone:
 
 ```sh
+# zsh and bash
 PERCH_NO_SHORTCUTS=1
 source ~/.config/perch/perch.sh
+```
+
+```fish
+# fish
+set -gx PERCH_NO_SHORTCUTS 1
+source ~/.config/perch/perch.fish
 ```
 
 ## Shell Completions

@@ -10,11 +10,9 @@ function __perch_branches_except
     __perch_branches | string match --invert --regex "^($argv[1])\$"
 end
 
-# Targets `wt rm` will accept: every worktree but the main one, named the way
-# `rm_matches` reads it — by branch, or by the final path component where there
-# is no branch, which is how a detached or missing worktree is reached. The
-# porcelain format ends every record with a blank line, so counting those is
-# what lets the first record — always the main worktree — go by unprinted.
+# Targets `wt rm` will accept, spelled the way `rm_matches` in src/app/wt.rs
+# reads them. Porcelain records end with a blank line, so counting terminators
+# is what lets the first record — always the main worktree — go by unprinted.
 function __perch_wt_targets
     git worktree list --porcelain 2>/dev/null | awk '
       /^worktree /            { path = substr($0, 10); branch = "" }

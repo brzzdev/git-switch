@@ -10,11 +10,9 @@ _perch_branches_except() {
   _perch_branches | grep -vxE "$1"
 }
 
-# Targets `wt rm` will accept: every worktree but the main one, named the way
-# `rm_matches` reads it — by branch, or by the final path component where there
-# is no branch, which is how a detached or missing worktree is reached. The
-# porcelain format ends every record with a blank line, so counting those is
-# what lets the first record — always the main worktree — go by unprinted.
+# Targets `wt rm` will accept, spelled the way `rm_matches` in src/app/wt.rs
+# reads them. Porcelain records end with a blank line, so counting terminators
+# is what lets the first record — always the main worktree — go by unprinted.
 _perch_wt_targets() {
   git worktree list --porcelain 2>/dev/null | awk '
     /^worktree /            { path = substr($0, 10); branch = "" }
@@ -40,26 +38,26 @@ _perch_completions() {
   # `br` and `wt` are the shell wrapper's shorthand for `perch br` and `perch wt`,
   # so every rule below reads a word list with the verb spelled out. One offset
   # is all that separates the three names.
-  local -a words
-  local cword name="${COMP_WORDS[0]##*/}"
+  local -a cmdline
+  local pos name="${COMP_WORDS[0]##*/}"
   case "$name" in
     br | wt)
-      words=(perch "$name" "${COMP_WORDS[@]:1}")
-      cword=$(( COMP_CWORD + 1 ))
+      cmdline=(perch "$name" "${COMP_WORDS[@]:1}")
+      pos=$(( COMP_CWORD + 1 ))
       ;;
     *)
-      words=("${COMP_WORDS[@]}")
-      cword=$COMP_CWORD
+      cmdline=("${COMP_WORDS[@]}")
+      pos=$COMP_CWORD
       ;;
   esac
 
-  local cur="${words[cword]}"
-  local prev="${words[cword-1]}"
-  local verb="${words[1]}"
-  local subverb="${words[2]}"
+  local cur="${cmdline[pos]}"
+  local prev="${cmdline[pos-1]}"
+  local verb="${cmdline[1]}"
+  local subverb="${cmdline[2]}"
 
-  if [[ "$verb" == "wt" && "$subverb" == "rm" ]] && (( cword >= 3 )); then
-    if _perch_wt_rm_wants_target "${words[@]:3:cword-3}"; then
+  if [[ "$verb" == "wt" && "$subverb" == "rm" ]] && (( pos >= 3 )); then
+    if _perch_wt_rm_wants_target "${cmdline[@]:3:pos-3}"; then
       COMPREPLY=($(compgen -W "$(_perch_wt_targets)" -- "$cur"))
     fi
     return
@@ -69,14 +67,14 @@ _perch_completions() {
   # read: `perch --`, `perch br --`, `perch wt --`. Past `perch wt ls`, or a
   # branch the dispatcher has already taken, the words after `--` go nowhere.
   if [[ "$prev" == "--" ]]; then
-    if (( cword == 2 )) ||
-      { (( cword == 3 )) && [[ "$verb" == "br" || "$verb" == "wt" ]]; }; then
+    if (( pos == 2 )) ||
+      { (( pos == 3 )) && [[ "$verb" == "br" || "$verb" == "wt" ]]; }; then
       COMPREPLY=($(compgen -W "$(_perch_branches)" -- "$cur"))
     fi
     return
   fi
 
-  case "$cword" in
+  case "$pos" in
     1)
       COMPREPLY=($(compgen -W "br wt $(_perch_branches_except 'br|wt')" -- "$cur"))
       ;;
