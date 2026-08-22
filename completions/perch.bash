@@ -42,6 +42,9 @@ _perch_completions() {
   local pos name="${COMP_WORDS[0]##*/}"
   case "$name" in
     br | wt)
+      # The registration below was made when this file loaded, and a name can be
+      # taken back after that. Re-read it here, where completion actually runs.
+      _perch_owns "$name" || return
       cmdline=(perch "$name" "${COMP_WORDS[@]:1}")
       pos=$(( COMP_CWORD + 1 ))
       ;;

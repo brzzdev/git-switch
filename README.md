@@ -222,7 +222,9 @@ Plain `ln -s`, not `ln -sf`: if one of those names is already taken, the link sh
 
 zsh needs no links — it claims completions by name at `compinit` time, and `_perch` deliberately claims only `perch`.
 
-Completing `br` and `wt` needs the [shell integration](#br-and-wt-shortcuts) as well, in every shell. Perch completes a shortcut only while that name still resolves to the function its wrapper defined — checked when the completion runs, not remembered from earlier. Install the completions alone and only `perch` completes, which is the honest answer, since without the wrapper the shortcuts don't exist. Source something after perch that takes `br` for itself, and perch stands down for `br` while keeping `wt`.
+Completing `br` and `wt` needs the [shell integration](#br-and-wt-shortcuts) as well, in every shell. Perch completes a shortcut only while that name still resolves to the function its wrapper defined, and it stands down per name — take `br` for something else and `wt` is unaffected. Install the completions alone and only `perch` completes, which is the honest answer, since without the wrapper the shortcuts don't exist.
+
+zsh and bash re-read that on every completion. fish decides as its completion file loads, which is the first time you complete one of the three names — so a `br` claimed *after* that, later in the same session, is the one case fish keeps answering for. `complete -e -c br` clears it. fish's `--wraps` is what lets one set of rules serve all three names, and it offers no hook to re-check per keystroke.
 
 For zsh, make sure `~/.zsh/completions` is in your `fpath` before `compinit`:
 
