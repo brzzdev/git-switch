@@ -30,6 +30,15 @@ _perch() {
   verbs=(br wt)
   subverbs=(ls rm list remove)
 
+  # `br` and `wt` only exist where the wrapper defined them, so the opt-out that
+  # suppresses the functions has to suppress their completions too — otherwise
+  # broot's `br` survives and gets branch names offered for it. compinit bakes
+  # the `#compdef` line into its dump, so this is the runtime half of that: it
+  # offers nothing for the shortcut names rather than unbinding them.
+  if [[ -n "${PERCH_NO_SHORTCUTS:-}" && "$service" != perch ]]; then
+    return 1
+  fi
+
   # `br` and `wt` are the shell wrapper's shorthand for `perch br` and `perch wt`,
   # so every rule below reads a normalised word list with the verb spelled out.
   # One offset is all that separates the three names.

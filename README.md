@@ -186,6 +186,8 @@ set -gx PERCH_NO_SHORTCUTS 1
 source ~/.config/perch/perch.fish
 ```
 
+It covers the completions too, so nothing offers branch names for someone else's `br`. Set it before `compinit` in zsh, since that is when the completion files are read. `just install-completions` never takes a name it doesn't already own either — where a `br` or `wt` completion file is already there, it says so and leaves it.
+
 ## Shell Completions
 
 Tab completions are available for zsh, bash, and fish, and cover `br` and `wt` as well as `perch`.

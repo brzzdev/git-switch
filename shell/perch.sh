@@ -41,7 +41,9 @@ perch() {
   return $rc
 }
 
-if [ -z "$PERCH_NO_SHORTCUTS" ]; then
+# `:-` rather than a bare expansion: an rc running under `set -u` would abort
+# here on the far more common case of the variable never having been set.
+if [ -z "${PERCH_NO_SHORTCUTS:-}" ]; then
   br() {
     perch br "$@"
   }

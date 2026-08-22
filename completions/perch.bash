@@ -58,6 +58,10 @@ _perch_completions() {
 
   if [[ "$verb" == "wt" && "$subverb" == "rm" ]] && (( pos >= 3 )); then
     if _perch_wt_rm_wants_target "${cmdline[@]:3:pos-3}"; then
+      # A worktree directory may hold spaces where a branch never can, so both
+      # the wordlist and the result have to split on newlines alone — otherwise
+      # `scratch space` arrives as two candidates and neither one matches.
+      local IFS=$'\n'
       COMPREPLY=($(compgen -W "$(_perch_wt_targets)" -- "$cur"))
     fi
     return
@@ -90,4 +94,11 @@ _perch_completions() {
   esac
 }
 
-complete -F _perch_completions perch br wt
+complete -F _perch_completions perch
+
+# `br` and `wt` only exist where the wrapper defined them, so the opt-out that
+# suppresses the functions has to suppress their completions too — otherwise
+# broot's `br` survives and gets branch names offered for it.
+if [ -z "${PERCH_NO_SHORTCUTS:-}" ]; then
+  complete -F _perch_completions br wt
+fi

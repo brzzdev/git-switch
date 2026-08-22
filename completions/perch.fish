@@ -73,6 +73,10 @@ complete -c perch -f -n '__perch_wt_rm_wants_target' -a '(__perch_wt_targets)'
 
 # `br` and `wt` are the shell wrapper's shorthand for `perch br` and `perch wt`.
 # `--wraps` takes a command prefix, so every rule above applies to them at the
-# right offset without being restated.
-complete -c br --wraps 'perch br'
-complete -c wt --wraps 'perch wt'
+# right offset without being restated. They only exist where the wrapper defined
+# them, so the opt-out that suppresses the functions suppresses these too —
+# otherwise broot's `br` survives and gets branch names offered for it.
+if test -z "$PERCH_NO_SHORTCUTS"
+    complete -c br --wraps 'perch br'
+    complete -c wt --wraps 'perch wt'
+end

@@ -19,6 +19,20 @@ install-completions:
   # One file per shell covers all three names. zsh reads them off the `#compdef`
   # line, but bash and fish autoload by command name, so `br` and `wt` each need
   # the file to exist under their own name — a symlink, so there is one copy.
+  #
+  # A name we don't already own belongs to someone else — broot ships its own
+  # `br` — so leave it be and say so rather than silently taking the name over.
+  link_shortcut() {
+    if [ -L "$2" ] && [ "$(readlink "$2")" = "$1" ]; then
+      return 0
+    fi
+    if [ -e "$2" ] || [ -L "$2" ]; then
+      echo "warning: $2 already exists and isn't ours — leaving it alone;" >&2
+      echo "         perch will not complete \`$(basename "$2" .fish)\`." >&2
+      return 0
+    fi
+    ln -s "$1" "$2"
+  }
   case "$(basename "$SHELL")" in \
     zsh) \
       mkdir -p ~/.zsh/completions && \
@@ -30,15 +44,15 @@ install-completions:
     bash) \
       mkdir -p ~/.local/share/bash-completion/completions && \
       cp completions/perch.bash ~/.local/share/bash-completion/completions/perch && \
-      ln -sf perch ~/.local/share/bash-completion/completions/br && \
-      ln -sf perch ~/.local/share/bash-completion/completions/wt && \
-      echo "Installed bash completion for perch, br, and wt." ;; \
+      link_shortcut perch ~/.local/share/bash-completion/completions/br && \
+      link_shortcut perch ~/.local/share/bash-completion/completions/wt && \
+      echo "Installed bash completion." ;; \
     fish) \
       mkdir -p ~/.config/fish/completions && \
       cp completions/perch.fish ~/.config/fish/completions/perch.fish && \
-      ln -sf perch.fish ~/.config/fish/completions/br.fish && \
-      ln -sf perch.fish ~/.config/fish/completions/wt.fish && \
-      echo "Installed fish completion for perch, br, and wt." ;; \
+      link_shortcut perch.fish ~/.config/fish/completions/br.fish && \
+      link_shortcut perch.fish ~/.config/fish/completions/wt.fish && \
+      echo "Installed fish completion." ;; \
     *) \
       echo "Unsupported shell: $SHELL" && exit 1 ;; \
   esac
