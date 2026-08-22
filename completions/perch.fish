@@ -73,10 +73,12 @@ complete -c perch -f -n '__perch_wt_rm_wants_target' -a '(__perch_wt_targets)'
 
 # `br` and `wt` are the shell wrapper's shorthand for `perch br` and `perch wt`.
 # `--wraps` takes a command prefix, so every rule above applies to them at the
-# right offset without being restated. They only exist where the wrapper defined
-# them, so the opt-out that suppresses the functions suppresses these too —
-# otherwise broot's `br` survives and gets branch names offered for it.
-if test -z "$PERCH_NO_SHORTCUTS"
+# right offset without being restated. Claim the two names only on the wrapper's
+# say-so: the completions can be installed without it ever being sourced, and a
+# `br` belonging to broot would otherwise be handed perch's branches. An unset
+# opt-out is not evidence — it says the user didn't decline the shortcuts, not
+# that anything defined them.
+if test -n "$PERCH_SHELL_INTEGRATION"
     complete -c br --wraps 'perch br'
     complete -c wt --wraps 'perch wt'
 end

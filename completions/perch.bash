@@ -96,9 +96,11 @@ _perch_completions() {
 
 complete -F _perch_completions perch
 
-# `br` and `wt` only exist where the wrapper defined them, so the opt-out that
-# suppresses the functions has to suppress their completions too — otherwise
-# broot's `br` survives and gets branch names offered for it.
-if [ -z "${PERCH_NO_SHORTCUTS:-}" ]; then
+# Claim `br` and `wt` only on the wrapper's say-so. The completions can be
+# installed without the wrapper ever being sourced, and this file is autoloaded
+# by name — so a `br` belonging to broot would otherwise be handed perch's
+# branches. An unset opt-out is not evidence: it says the user didn't decline
+# the shortcuts, not that anything defined them.
+if [ -n "${PERCH_SHELL_INTEGRATION:-}" ]; then
   complete -F _perch_completions br wt
 fi

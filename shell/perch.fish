@@ -39,4 +39,10 @@ if test -z "$PERCH_NO_SHORTCUTS"
     function wt
         perch wt $argv
     end
+
+    # Set where the functions are defined and nowhere else, so a completion file
+    # loading later can tell that these two names are ours. Without it the only
+    # evidence available is the opt-out being unset, which says nothing about
+    # whether this file was ever sourced.
+    set -g PERCH_SHELL_INTEGRATION 1
 end

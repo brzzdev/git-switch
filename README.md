@@ -220,7 +220,9 @@ ln -s perch.fish ~/.config/fish/completions/wt.fish
 
 Plain `ln -s`, not `ln -sf`: if one of those names is already taken, the link should fail rather than replace whatever owns it. `install-completions` behaves the same way and tells you which name it left alone.
 
-zsh needs no links — it claims completions by name at `compinit` time, and `_perch` deliberately claims only `perch`. The wrapper asks for `br` and `wt` when it defines them, which is what keeps the opt-out honest.
+zsh needs no links — it claims completions by name at `compinit` time, and `_perch` deliberately claims only `perch`.
+
+Completing `br` and `wt` needs the [shell integration](#br-and-wt-shortcuts) as well, in every shell: the wrapper is the only thing that knows those two names are perch's, so it is what asks for their completions. Install the completions alone and only `perch` completes — which is the honest answer, since without the wrapper the shortcuts don't exist.
 
 For zsh, make sure `~/.zsh/completions` is in your `fpath` before `compinit`:
 
