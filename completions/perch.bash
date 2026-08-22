@@ -1,17 +1,11 @@
-# Branches the dispatcher will read as a branch name at the position given —
-# asked of the binary, which subtracts the words its own match arm eats first.
-# It reads remote-only branches as well, which `git branch` here could not.
-# `command` skips the shell wrapper: it is a function here, and it would `cd`
-# the interactive shell on a single-line answer.
-_perch_branches() {
+# What the command will accept at the position given — asked of the binary,
+# which answers for the position it is handed: worktree names after `wt rm`,
+# and everywhere else the branches, minus the words its own match arm eats
+# first. It sees remote-only branches, which the `git branch` this replaced
+# could not. `command` skips the shell wrapper: it is a function here, and it
+# would `cd` the interactive shell on a single-line answer.
+_perch_offers() {
   command perch "$@" --complete 2>/dev/null
-}
-
-# Targets `wt rm` will accept — asked of the binary, which reads them off the
-# same matcher the command does. `command` skips the shell wrapper: it is a
-# function here, and it would `cd` the interactive shell on a single-line answer.
-_perch_wt_targets() {
-  command perch wt rm --complete 2>/dev/null
 }
 
 # `wt rm` reads its target as the first word after `rm` that isn't an option,
@@ -57,7 +51,7 @@ _perch_completions() {
       # the wordlist and the result have to split on newlines alone — otherwise
       # `scratch space` arrives as two candidates and neither one matches.
       local IFS=$'\n'
-      COMPREPLY=($(compgen -W "$(_perch_wt_targets)" -- "$cur"))
+      COMPREPLY=($(compgen -W "$(_perch_offers wt rm)" -- "$cur"))
     fi
     return
   fi
@@ -68,24 +62,24 @@ _perch_completions() {
   if [[ "$prev" == "--" ]]; then
     if (( pos == 2 )) ||
       { (( pos == 3 )) && [[ "$verb" == "br" || "$verb" == "wt" ]]; }; then
-      # `br` eats no word of its own, so its list is the unfiltered one — which
-      # is exactly what a `--` buys.
-      COMPREPLY=($(compgen -W "$(_perch_branches br)" -- "$cur"))
+      # The `--` is the position: it eats nothing at any of the three levels,
+      # so one question answers for all of them.
+      COMPREPLY=($(compgen -W "$(_perch_offers --)" -- "$cur"))
     fi
     return
   fi
 
   case "$pos" in
     1)
-      COMPREPLY=($(compgen -W "br wt $(_perch_branches)" -- "$cur"))
+      COMPREPLY=($(compgen -W "br wt $(_perch_offers)" -- "$cur"))
       ;;
     # Only the two verbs read a second word. `perch <branch>` has taken its
     # target by here, and the dispatcher ignores whatever follows it.
     2)
       if [[ "$verb" == "wt" ]]; then
-        COMPREPLY=($(compgen -W "ls rm $(_perch_branches wt)" -- "$cur"))
+        COMPREPLY=($(compgen -W "ls rm $(_perch_offers wt)" -- "$cur"))
       elif [[ "$verb" == "br" ]]; then
-        COMPREPLY=($(compgen -W "$(_perch_branches br)" -- "$cur"))
+        COMPREPLY=($(compgen -W "$(_perch_offers br)" -- "$cur"))
       fi
       ;;
   esac

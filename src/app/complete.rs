@@ -2,122 +2,81 @@
 //!
 //! The dispatcher decides which words it reads as commands before it reads one
 //! as a branch, so it is the only thing that can say which branches are
-//! reachable at which position. Each `--complete` flag names a position, and
-//! prints the branches that position will accept — the whole branch set, minus
-//! the words its own `match` arm eats first.
+//! reachable at which position. Every position on the command line answers
+//! `--complete` with what it would accept there — worktree names after
+//! `wt rm`, branch names everywhere else — and each subtracts the words its own
+//! `match` arm takes first.
 //!
-//! The subtraction is a table here rather than a list in each completion file,
-//! and `dispatch` parses through that same table: a new verb gets a variant, the
-//! exhaustive `match` in `main.rs` demands an arm for it, and the completions
-//! drop it without being touched.
-
-use std::collections::HashSet;
+//! That subtraction is [`Verb::spelling`] and [`wt::Subverb::spelling`], the
+//! same reading the dispatcher parses through, rather than a list restated in
+//! each completion file. Both are exhaustive, so a new verb has to be given a
+//! word, and the arm it needs in `main.rs` is a compile error until it has one.
+//!
+//! What the completion files still hold is the positional logic — which is
+//! genuinely per-shell — and the verbs and subverbs themselves, each of which
+//! carries a description there that no list of words here could supply.
 
 use crate::{AppResult, git};
 
-/// A word `dispatch` reads as a verb before it reads it as a branch name.
-/// `perch -- <name>` is the way past it to a branch spelled the same.
-#[derive(Clone, Copy)]
-pub enum TopWord {
-    Br,
-    Wt,
-}
+use super::{Verb, wt};
 
-impl TopWord {
-    const TABLE: [(&'static str, Self); 2] = [("br", Self::Br), ("wt", Self::Wt)];
-
-    #[must_use]
-    pub fn parse(word: &str) -> Option<Self> {
-        parse(&Self::TABLE, word)
-    }
-}
-
-/// A word `dispatch_wt` reads as a *Subverb* before it reads it as a branch
-/// name. `list` and `remove` are the spellings retired at 2.0.0: they are eaten
-/// to be refused, which counts here for the same reason `ls` does — a name
-/// completion offers there reaches an error rather than a branch.
-#[derive(Clone, Copy)]
-pub enum WtWord {
-    List,
-    Ls,
-    Remove,
-    Rm,
-}
-
-impl WtWord {
-    const TABLE: [(&'static str, Self); 4] = [
-        ("list", Self::List),
-        ("ls", Self::Ls),
-        ("remove", Self::Remove),
-        ("rm", Self::Rm),
-    ];
-
-    #[must_use]
-    pub fn parse(word: &str) -> Option<Self> {
-        parse(&Self::TABLE, word)
-    }
-}
-
-fn parse<T: Copy>(table: &[(&'static str, T)], word: &str) -> Option<T> {
-    table
-        .iter()
-        .find(|(spelling, _)| *spelling == word)
-        .map(|(_, value)| *value)
-}
-
-fn spellings<T>(table: &[(&'static str, T)]) -> HashSet<&'static str> {
-    table.iter().map(|(spelling, _)| *spelling).collect()
-}
-
-/// Where on the command line the next word would be read as a branch name. One
-/// per dispatcher that has such a position — which is all three, since every
-/// one of them falls through to a branch.
+/// Where on the command line the next word would be read as a branch name,
+/// which is the whole of what decides the words eaten before it.
 #[derive(Clone, Copy)]
 pub enum Position {
     /// `perch <branch>`, where a *Verb* is read first.
-    Top,
-    /// `perch br <branch>`, where nothing is.
+    Bare,
+    /// `perch br <branch>`. `br` has no *Subverb*s, so nothing is.
     Br,
     /// `perch wt <branch>`, where a *Subverb* is read first.
     Wt,
+    /// `perch -- <branch>`, and the same after either verb — `--` has ended
+    /// parsing, so nothing is read first.
+    ///
+    /// Its own position rather than a borrow of [`Position::Br`], which today
+    /// eats nothing either: `--` exists precisely to reach a word some position
+    /// would otherwise eat, so answering it with a verb's list would silently
+    /// start filtering the escape hatch the day that verb gained a subverb.
+    Escaped,
 }
 
 impl Position {
-    /// The words this position's dispatcher takes for itself.
-    fn eaten(self) -> HashSet<&'static str> {
+    /// Whether the dispatcher at this position takes `word` for itself.
+    fn eats(self, word: &str) -> bool {
         match self {
-            Position::Top => spellings(&TopWord::TABLE),
-            // `br` reads everything after it as a branch, so its list is the
-            // unfiltered one — which is also what a `--` buys at any level.
-            Position::Br => HashSet::new(),
-            Position::Wt => spellings(&WtWord::TABLE),
+            Position::Bare => Verb::parse(word).is_some(),
+            Position::Br | Position::Escaped => false,
+            Position::Wt => wt::Subverb::parse(word).is_some(),
         }
     }
 }
 
-/// `perch [br|wt] --complete` — the branches reachable as the next word at
+/// `perch [br|wt] [--] --complete` — the branches reachable as the next word at
 /// `position`, one per line, for the shell completions to offer.
 ///
-/// The set is `local_branches` plus `remote_only_branches`, the same two reads
-/// [`build_catalogue`](super::build_catalogue) makes, so what the picker lists
-/// and what a named target resolves against is what TAB offers. The `git branch`
-/// the completion files used to run saw only the first of the two, which left a
-/// remote-only branch accepted on the command line but never completed.
+/// The set is [`reachable_branches`](super::reachable_branches), the same read
+/// the *Catalogue* is built from, so what the picker lists and what a named
+/// target resolves against is what TAB offers. The `git branch` the completion
+/// files used to run saw only the local half, which left a remote-only branch
+/// accepted on the command line but never completed.
 ///
-/// The verbs and subverbs themselves are left to the completion files, each of
-/// which carries a description for them; this answers for branch names alone.
-/// A repo with no branches prints nothing and succeeds — there is nothing to
-/// complete, which is not an error the way it is for the picker.
+/// A repo with no branches prints nothing and succeeds, where the picker raises
+/// [`Error::NoBranches`](crate::Error::NoBranches) over the same empty read:
+/// nothing to complete is an ordinary answer to a TAB, and a completion has
+/// nowhere to show an error anyway.
 pub fn run(position: Position) -> AppResult<()> {
     let remote = git::current_remote(git::current_branch()?.as_deref());
-    let local = git::local_branches()?;
-    let remote_only = git::remote_only_branches(&local, &remote).unwrap_or_default();
+    let (local, remote_only) = super::reachable_branches(&remote)?;
 
-    let eaten = position.eaten();
+    // One `write` for the lot: `println!` flushes a line at a time, which in a
+    // repo with thousands of refs is thousands of syscalls on a keypress.
+    let mut out = String::new();
     for branch in local.iter().chain(&remote_only) {
-        if !eaten.contains(branch.as_str()) {
-            println!("{branch}");
+        if !position.eats(branch) {
+            out.push_str(branch);
+            out.push('\n');
         }
     }
+    print!("{out}");
     Ok(())
 }

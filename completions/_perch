@@ -5,28 +5,24 @@
 # ships its own `br` — and no runtime check can hand the name back afterwards.
 # The wrapper registers them instead, under the same opt-out that creates them.
 
-# Targets `wt rm` will accept — asked of the binary, which reads them off the
-# same matcher the command does. `command` skips the shell wrapper: it is a
-# function here, and it would `cd` the interactive shell on a single-line answer.
-_perch_wt_targets() {
-  command perch wt rm --complete 2>/dev/null
-}
-
-# Offers the branches the dispatcher will read as a branch name at the position
-# given — asked of the binary, which subtracts the words its own match arm eats
-# first. It reads remote-only branches as well, which the `git branch` this
-# replaced could not. `command` as above.
-_perch_branches() {
-  local -a branches
-  branches=(${(f)"$(command perch "$@" --complete 2>/dev/null)"})
-  # A repo with nothing to offer leaves one empty line, which would otherwise
-  # complete to a blank.
-  branches=(${branches:#})
-  _describe -t branches 'branch' branches
+# Offers what the command will accept at the position given, under `tag`/`label`
+# — asked of the binary, which answers for the position it is handed: worktree
+# names after `wt rm`, and everywhere else the branches, minus the words its own
+# match arm eats first. It sees remote-only branches, which the `git branch` this
+# replaced could not. `command` skips the shell wrapper: it is a function here,
+# and it would `cd` the interactive shell on a single-line answer.
+_perch_offers() {
+  local tag=$1 label=$2
+  shift 2
+  local -a offered
+  offered=(${(f)"$(command perch "$@" --complete 2>/dev/null)"})
+  # Nothing to offer leaves one empty line, which would complete to a blank.
+  offered=(${offered:#})
+  _describe -t "$tag" "$label" offered
 }
 
 _perch() {
-  local -a subcommands worktree_subs cmdline targets
+  local -a subcommands worktree_subs cmdline
   local pos
   subcommands=(
     'br:Check a branch out here'
@@ -61,11 +57,7 @@ _perch() {
     for word in "${(@)cmdline[4,pos-1]}"; do
       [[ "$word" == -* ]] || return
     done
-    # A repo with no worktrees but the main one leaves nothing to offer, and an
-    # empty line here would complete to a blank.
-    targets=(${(f)"$(_perch_wt_targets)"})
-    targets=(${targets:#})
-    _describe -t worktrees 'worktree' targets
+    _perch_offers worktrees 'worktree' wt rm
     return
   fi
 
@@ -74,19 +66,19 @@ _perch() {
   # branch the dispatcher has already taken, the words after `--` go nowhere.
   if [[ "$cmdline[pos-1]" == -- ]]; then
     if (( pos == 3 )) || { (( pos == 4 )) && [[ "$cmdline[2]" == (br|wt) ]] }; then
-      # `br` eats no word of its own, so its list is the unfiltered one — which
-      # is exactly what a `--` buys.
-      _perch_branches br
+      # The `--` is the position: it eats nothing at any of the three levels, so
+      # one question answers for all of them.
+      _perch_offers branches 'branch' --
     fi
   elif (( pos == 2 )); then
     _describe -t subcommands 'subcommand' subcommands
-    _perch_branches
+    _perch_offers branches 'branch'
   elif (( pos == 3 )) && [[ "$cmdline[2]" == wt ]]; then
     _describe -t subverbs 'worktree subverb' worktree_subs
-    _perch_branches wt
+    _perch_offers branches 'branch' wt
   # `br` reads everything after it as a branch, so nothing is filtered here.
   elif (( pos == 3 )) && [[ "$cmdline[2]" == br ]]; then
-    _perch_branches br
+    _perch_offers branches 'branch' br
   fi
 }
 

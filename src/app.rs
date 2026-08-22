@@ -47,7 +47,7 @@ fn interactive_term() -> Option<Term> {
 /// which are listed. See [ADR
 /// 0007](../docs/adr/0007-three-verbs-one-per-intent.md).
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Verb {
+pub enum Verb {
     /// Bare `perch <name>` — hand off to the worktree holding the branch.
     Go,
     /// `perch br <name>` — refuse, naming the path and the verb that reaches it.
@@ -57,6 +57,30 @@ pub(crate) enum Verb {
 }
 
 impl Verb {
+    const ALL: [Self; 3] = [Self::Go, Self::Here, Self::Worktree];
+
+    /// The word that selects this verb on the command line. *Go* has none: it
+    /// is what a bare `perch` already means. Exhaustive on purpose — a fourth
+    /// verb has to say here whether it is spelled, and everything that reads
+    /// the spellings reads them from this.
+    fn spelling(self) -> Option<&'static str> {
+        match self {
+            Verb::Go => None,
+            Verb::Here => Some("br"),
+            Verb::Worktree => Some("wt"),
+        }
+    }
+
+    /// The verb `word` selects, where it selects one. Never answers *Go*, which
+    /// has no spelling — so a word this rejects is a branch name, which is the
+    /// whole of what *Go* means.
+    #[must_use]
+    pub fn parse(word: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|verb| verb.spelling() == Some(word))
+    }
+
     /// The picker's prompt. All three verbs draw the same list, so the prompt is
     /// the only thing on screen saying what selecting a row will do.
     pub(crate) fn prompt(self) -> &'static str {
@@ -530,6 +554,20 @@ fn select_branch(
     }))
 }
 
+/// Every branch a *Verb* can reach: the locals, and the ones that exist only on
+/// `remote`. Returned as the two halves rather than one list, since the picker
+/// draws them as separate sections. A remote it cannot read degrades to the
+/// locals alone — a completion or a picker missing the remote half is worth
+/// more than neither.
+///
+/// The single read behind the *Catalogue* and the completions both, so what the
+/// picker lists is what TAB offers and what a named target resolves against.
+pub(crate) fn reachable_branches(remote: &str) -> AppResult<(Vec<String>, Vec<String>)> {
+    let local = git::local_branches()?;
+    let remote_only = git::remote_only_branches(&local, remote).unwrap_or_default();
+    Ok((local, remote_only))
+}
+
 /// Reads every branch the repo offers and pairs each with the worktree holding
 /// it, if any. This is the whole of the git side of the list — grouping it into
 /// sections and deciding what each row says belongs to [`picker::sections`],
@@ -539,8 +577,7 @@ pub(crate) fn build_catalogue(
     remote: &str,
     worktrees: &[git::Worktree],
 ) -> AppResult<Catalogue> {
-    let local = git::local_branches()?;
-    let remote_only = git::remote_only_branches(&local, remote).unwrap_or_default();
+    let (local, remote_only) = reachable_branches(remote)?;
 
     if local.is_empty() && remote_only.is_empty() {
         return Err(Error::NoBranches);
@@ -846,13 +883,14 @@ fn delete_stale_row(
 ///
 /// A branch named after a verb is read as that verb, and `perch wt` opens the
 /// worktree picker rather than going anywhere — so those names need the `--`
-/// escape hatch. Which names those are is [`complete::TopWord`], the same table
-/// `dispatch` parses through and the completions subtract.
+/// escape hatch. Which names those are is [`Verb::parse`], the same reading the
+/// dispatcher does and the completions subtract.
 pub(crate) fn go_there_argument(branch: &str) -> String {
     let quoted = shell_quote(branch);
-    match complete::TopWord::parse(branch) {
-        Some(_) => format!("-- {quoted}"),
-        None => quoted,
+    if Verb::parse(branch).is_some() {
+        format!("-- {quoted}")
+    } else {
+        quoted
     }
 }
 

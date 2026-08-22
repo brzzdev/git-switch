@@ -1046,6 +1046,15 @@ fn complete_drops_only_the_words_that_position_eats() {
         ["br", "feat/x", "main", "wt"],
         "`wt` reads the two subverbs and the two retired spellings"
     );
+
+    // `--` is what you type to reach a name some position would eat, so it has
+    // to answer with every branch — at whichever level it was typed. Git
+    // refuses a branch whose name begins with `-`, so reading `--complete`
+    // here costs no name that was ever reachable.
+    let everything = ["br", "feat/x", "list", "ls", "main", "remove", "rm", "wt"];
+    assert_eq!(offered(&["--", "--complete"]), everything);
+    assert_eq!(offered(&["br", "--", "--complete"]), everything);
+    assert_eq!(offered(&["wt", "--", "--complete"]), everything);
 }
 
 /// The gap this replaced `git branch` to close: a branch that exists only on the

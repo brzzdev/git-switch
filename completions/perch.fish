@@ -1,17 +1,11 @@
-# Branches the dispatcher will read as a branch name at the position given —
-# asked of the binary, which subtracts the words its own match arm eats first.
-# It reads remote-only branches as well, which `git branch` here could not.
-# `command` skips the shell wrapper: it is a function here, and it would `cd`
-# the interactive shell on a single-line answer.
-function __perch_branches
+# What the command will accept at the position given — asked of the binary,
+# which answers for the position it is handed: worktree names after `wt rm`,
+# and everywhere else the branches, minus the words its own match arm eats
+# first. It sees remote-only branches, which the `git branch` this replaced
+# could not. `command` skips the shell wrapper: it is a function here, and it
+# would `cd` the interactive shell on a single-line answer.
+function __perch_offers
     command perch $argv --complete 2>/dev/null
-end
-
-# Targets `wt rm` will accept — asked of the binary, which reads them off the
-# same matcher the command does. `command` skips the shell wrapper: it is a
-# function here, and it would `cd` the interactive shell on a single-line answer.
-function __perch_wt_targets
-    command perch wt rm --complete 2>/dev/null
 end
 
 # True where `--` has just been typed and the dispatcher still has a branch left
@@ -40,29 +34,30 @@ function __perch_wt_rm_wants_target
 end
 
 # Top-level: subcommands + the branches reachable without `--`.
-complete -c perch -f -n '__fish_is_nth_token 1' -a '(__perch_branches)'
+complete -c perch -f -n '__fish_is_nth_token 1' -a '(__perch_offers)'
 complete -c perch -f -n '__fish_is_nth_token 1' -a 'br' -d 'Check a branch out here'
 complete -c perch -f -n '__fish_is_nth_token 1' -a 'wt' -d 'Worktree commands'
 
-# After a `--` that still has a branch to escape: branches, unfiltered — `br`
-# eats no word of its own, so its list is that one. `wt rm --` is the one escaped
-# route this misses, and its own rule below takes it.
-complete -c perch -f -n '__perch_after_double_dash' -a '(__perch_branches br)'
+# After a `--` that still has a branch to escape: branches, unfiltered. The `--`
+# is the position, and it eats nothing at any of the three levels, so one
+# question answers for all of them. `wt rm --` is the one escaped route this
+# misses, and its own rule below takes it.
+complete -c perch -f -n '__perch_after_double_dash' -a '(__perch_offers --)'
 
 # After `br`: branches. Unlike bash and zsh, fish has no fall-through case, so
 # every verb needs its own rule or the second token completes to nothing. `br`
 # has no subverbs, so nothing is filtered — `perch br wt` reaches a branch `wt`.
-complete -c perch -f -n '__fish_seen_subcommand_from br; and __fish_is_nth_token 2' -a '(__perch_branches br)'
+complete -c perch -f -n '__fish_seen_subcommand_from br; and __fish_is_nth_token 2' -a '(__perch_offers br)'
 
 # After `wt`: subverbs + the branches reachable without `--`. `__fish_is_nth_token`
 # looks past a `--`, so without the guard `perch wt -- ` would offer the subverbs
 # on top of the branches the rule above already gave it — and `--` is precisely
 # how you say you meant the branch.
 complete -c perch -f -n '__fish_seen_subcommand_from wt; and __fish_is_nth_token 2; and not __perch_after_double_dash' -a 'ls rm'
-complete -c perch -f -n '__fish_seen_subcommand_from wt; and __fish_is_nth_token 2; and not __perch_after_double_dash' -a '(__perch_branches wt)'
+complete -c perch -f -n '__fish_seen_subcommand_from wt; and __fish_is_nth_token 2; and not __perch_after_double_dash' -a '(__perch_offers wt)'
 
 # After `wt rm`: the worktrees, until one has been taken.
-complete -c perch -f -n '__perch_wt_rm_wants_target' -a '(__perch_wt_targets)'
+complete -c perch -f -n '__perch_wt_rm_wants_target' -a '(__perch_offers wt rm)'
 
 # `br` and `wt` are the shell wrapper's shorthand for `perch br` and `perch wt`.
 # `--wraps` takes a command prefix, so every rule above applies to them at the
