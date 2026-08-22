@@ -52,12 +52,6 @@ if [ -z "${PERCH_NO_SHORTCUTS:-}" ]; then
     perch wt "$@"
   }
 
-  # Set where the functions are defined and nowhere else, so a completion file
-  # loading later can tell that these two names are ours. Without it the only
-  # evidence available is the opt-out being unset, which says nothing about
-  # whether this file was ever sourced.
-  PERCH_SHELL_INTEGRATION=1
-
   # zsh completions are claimed by name at compinit time, so `_perch` cannot ask
   # for these two without taking them from whatever else answers to them. Asking
   # here instead ties the claim to the same condition that creates the functions.

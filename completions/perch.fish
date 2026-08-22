@@ -73,12 +73,22 @@ complete -c perch -f -n '__perch_wt_rm_wants_target' -a '(__perch_wt_targets)'
 
 # `br` and `wt` are the shell wrapper's shorthand for `perch br` and `perch wt`.
 # `--wraps` takes a command prefix, so every rule above applies to them at the
-# right offset without being restated. Claim the two names only on the wrapper's
-# say-so: the completions can be installed without it ever being sourced, and a
-# `br` belonging to broot would otherwise be handed perch's branches. An unset
-# opt-out is not evidence — it says the user didn't decline the shortcuts, not
-# that anything defined them.
-if test -n "$PERCH_SHELL_INTEGRATION"
+# right offset without being restated.
+#
+# Claim a shortcut name only while it is still ours. Nothing about perch's own
+# state can answer that: the completions install without the wrapper, and a `br`
+# the wrapper did define can be replaced afterwards by anything sourced later —
+# broot ships one. So ask fish what the name resolves to *now*. This file is
+# autoloaded on first use, well after config has finished, so the answer here is
+# the current one. The body line is matched whole: a stale `--wraps` annotation
+# left on someone else's function mentions `perch br` in its signature.
+function __perch_owns
+    functions $argv[1] 2>/dev/null | string match -qr "^\s*perch $argv[1] \\\$argv\s*\$"
+end
+
+if __perch_owns br
     complete -c br --wraps 'perch br'
+end
+if __perch_owns wt
     complete -c wt --wraps 'perch wt'
 end

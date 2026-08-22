@@ -35,6 +35,14 @@ _perch() {
   verbs=(br wt)
   subverbs=(ls rm list remove)
 
+  # The wrapper asks for these two names as it defines them, but anything sourced
+  # later can take one back — broot ships its own `br`. compdef records the claim
+  # and would keep it, so re-read the name here, where completion actually runs
+  # and the answer cannot be stale.
+  if [[ "$service" != perch && "$functions[$service]" != *"perch $service \"\$@\""* ]]; then
+    return 1
+  fi
+
   # `br` and `wt` are the shell wrapper's shorthand for `perch br` and `perch wt`,
   # so every rule below reads a normalised word list with the verb spelled out.
   # One offset is all that separates the three names.

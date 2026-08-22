@@ -96,11 +96,22 @@ _perch_completions() {
 
 complete -F _perch_completions perch
 
-# Claim `br` and `wt` only on the wrapper's say-so. The completions can be
-# installed without the wrapper ever being sourced, and this file is autoloaded
-# by name — so a `br` belonging to broot would otherwise be handed perch's
-# branches. An unset opt-out is not evidence: it says the user didn't decline
-# the shortcuts, not that anything defined them.
-if [ -n "${PERCH_SHELL_INTEGRATION:-}" ]; then
-  complete -F _perch_completions br wt
-fi
+# Claim a shortcut name only while it is still ours. Nothing about perch's own
+# state can answer that: the completions install without the wrapper, and a
+# `br` the wrapper did define can be replaced afterwards by anything sourced
+# later — broot ships one. So ask the shell what the name resolves to *now*.
+# This file is autoloaded on first use, well after any rc has finished, so the
+# answer here is the current one.
+_perch_owns() {
+  case "$(declare -f "$1" 2>/dev/null)" in
+    *"perch $1 \"\$@\""*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+for _perch_shortcut in br wt; do
+  if _perch_owns "$_perch_shortcut"; then
+    complete -F _perch_completions "$_perch_shortcut"
+  fi
+done
+unset _perch_shortcut

@@ -222,7 +222,7 @@ Plain `ln -s`, not `ln -sf`: if one of those names is already taken, the link sh
 
 zsh needs no links — it claims completions by name at `compinit` time, and `_perch` deliberately claims only `perch`.
 
-Completing `br` and `wt` needs the [shell integration](#br-and-wt-shortcuts) as well, in every shell: the wrapper is the only thing that knows those two names are perch's, so it is what asks for their completions. Install the completions alone and only `perch` completes — which is the honest answer, since without the wrapper the shortcuts don't exist.
+Completing `br` and `wt` needs the [shell integration](#br-and-wt-shortcuts) as well, in every shell. Perch completes a shortcut only while that name still resolves to the function its wrapper defined — checked when the completion runs, not remembered from earlier. Install the completions alone and only `perch` completes, which is the honest answer, since without the wrapper the shortcuts don't exist. Source something after perch that takes `br` for itself, and perch stands down for `br` while keeping `wt`.
 
 For zsh, make sure `~/.zsh/completions` is in your `fpath` before `compinit`:
 
