@@ -8,6 +8,12 @@
 # Source from your shell rc:
 #   source ~/.config/perch/perch.sh
 #
+# `br` and `wt` are defined alongside `perch` as shorthand for `perch br` and
+# `perch wt`. Set PERCH_NO_SHORTCUTS to any non-empty value before sourcing to
+# leave both names alone — broot defines its own `br`, and only one can win:
+#   PERCH_NO_SHORTCUTS=1
+#   source ~/.config/perch/perch.sh
+#
 # Behaviour:
 #   - empty stdout              → nothing to do
 #   - single-line existing dir  → cd there
@@ -34,3 +40,24 @@ perch() {
   esac
   return $rc
 }
+
+# `:-` rather than a bare expansion: an rc running under `set -u` would abort
+# here on the far more common case of the variable never having been set.
+if [ -z "${PERCH_NO_SHORTCUTS:-}" ]; then
+  br() {
+    perch br "$@"
+  }
+
+  wt() {
+    perch wt "$@"
+  }
+
+  # zsh completions are claimed by name at compinit time, so `_perch` cannot ask
+  # for these two without taking them from whatever else answers to them. Asking
+  # here instead ties the claim to the same condition that creates the functions.
+  # It needs compinit to have run already; sourced earlier than that, the guard
+  # skips it and `br`/`wt` go uncompleted rather than erroring out of your rc.
+  if [ -n "${ZSH_VERSION:-}" ] && command -v compdef >/dev/null 2>&1; then
+    compdef _perch br wt
+  fi
+fi

@@ -1,7 +1,25 @@
 #compdef perch
+#
+# `br` and `wt` are deliberately absent here. compinit bakes this line into its
+# dump, so naming them would claim both from whatever else defines them — broot
+# ships its own `br` — and no runtime check can hand the name back afterwards.
+# The wrapper registers them instead, under the same opt-out that creates them.
+
+# Targets `wt rm` will accept, spelled the way `rm_matches` in src/app/wt.rs
+# reads them. Porcelain records end with a blank line, so counting terminators
+# is what lets the first record — always the main worktree — go by unprinted.
+_perch_wt_targets() {
+  git worktree list --porcelain 2>/dev/null | awk '
+    /^worktree /            { path = substr($0, 10); branch = "" }
+    /^branch refs\/heads\// { branch = substr($0, 19) }
+    /^$/ && ++seen > 1      { if (branch != "") print branch
+                              else { n = split(path, parts, "/"); print parts[n] } }
+  '
+}
 
 _perch() {
-  local -a subcommands worktree_subs verbs subverbs branches offer
+  local -a subcommands worktree_subs verbs subverbs branches offer cmdline targets
+  local pos
   subcommands=(
     'br:Check a branch out here'
     'wt:Worktree commands'
@@ -17,34 +35,59 @@ _perch() {
   verbs=(br wt)
   subverbs=(ls rm list remove)
 
-  branches=(${(f)"$(git branch --format='%(refname:short)' 2>/dev/null)"})
+  # The wrapper asks for these two names as it defines them, but anything sourced
+  # later can take one back — broot ships its own `br`. compdef records the claim
+  # and would keep it, so re-read the name here, where completion actually runs
+  # and the answer cannot be stale.
+  if [[ "$service" != perch && "$functions[$service]" != *"perch $service \"\$@\""* ]]; then
+    return 1
+  fi
+
+  # `br` and `wt` are the shell wrapper's shorthand for `perch br` and `perch wt`,
+  # so every rule below reads a normalised word list with the verb spelled out.
+  # One offset is all that separates the three names.
+  case "$service" in
+    br|wt) cmdline=(perch "$service" "${(@)words[2,-1]}"); (( pos = CURRENT + 1 )) ;;
+    *)     cmdline=("${(@)words}"); pos=$CURRENT ;;
+  esac
 
   # `wt rm` reads its target as the first word after `rm` that isn't an option,
   # and takes its `--force` in either order, so a flag or a `--` leaves the slot
   # open while a bare word closes it. Words typed after a target are ignored.
-  if (( CURRENT >= 4 )) && [[ "$words[2]" == wt && "$words[3]" == rm ]]; then
+  # This arm wants worktrees rather than branches, so it comes before the
+  # `git branch` call every arm below it needs.
+  if (( pos >= 4 )) && [[ "$cmdline[2]" == wt && "$cmdline[3]" == rm ]]; then
     local word
-    for word in "${(@)words[4,CURRENT-1]}"; do
+    for word in "${(@)cmdline[4,pos-1]}"; do
       [[ "$word" == -* ]] || return
     done
-    _describe -t branches 'branch' branches
+    # A repo with no worktrees but the main one leaves nothing to offer, and an
+    # empty line here would complete to a blank.
+    targets=(${(f)"$(_perch_wt_targets)"})
+    targets=(${targets:#})
+    _describe -t worktrees 'worktree' targets
+    return
+  fi
+
+  branches=(${(f)"$(git branch --format='%(refname:short)' 2>/dev/null)"})
+
   # `--` ends parsing, but only where the dispatcher still has a branch left to
   # read: `perch --`, `perch br --`, `perch wt --`. Past `perch wt ls`, or a
   # branch the dispatcher has already taken, the words after `--` go nowhere.
-  elif [[ "$words[CURRENT-1]" == -- ]]; then
-    if (( CURRENT == 3 )) || { (( CURRENT == 4 )) && [[ "$words[2]" == (br|wt) ]] }; then
+  if [[ "$cmdline[pos-1]" == -- ]]; then
+    if (( pos == 3 )) || { (( pos == 4 )) && [[ "$cmdline[2]" == (br|wt) ]] }; then
       _describe -t branches 'branch' branches
     fi
-  elif (( CURRENT == 2 )); then
+  elif (( pos == 2 )); then
     offer=(${branches:|verbs})
     _describe -t subcommands 'subcommand' subcommands
     _describe -t branches 'branch' offer
-  elif (( CURRENT == 3 )) && [[ "$words[2]" == wt ]]; then
+  elif (( pos == 3 )) && [[ "$cmdline[2]" == wt ]]; then
     offer=(${branches:|subverbs})
     _describe -t subverbs 'worktree subverb' worktree_subs
     _describe -t branches 'branch' offer
   # `br` reads everything after it as a branch, so nothing is filtered here.
-  elif (( CURRENT == 3 )) && [[ "$words[2]" == br ]]; then
+  elif (( pos == 3 )) && [[ "$cmdline[2]" == br ]]; then
     _describe -t branches 'branch' branches
   fi
 }

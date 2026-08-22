@@ -158,11 +158,41 @@ just install-shell-integration
 
 Installing from a release tarball? The same files ship in its `shell/` directory — copy them to `~/.config/perch/` and source the one for your shell (`perch.sh` for zsh and bash, `perch.fish` for fish).
 
+On zsh, put the `source` line **after** `compinit`. The wrapper registers the `br` and `wt` completions as it defines those functions, and `compinit` has to have run for it to do so — source it earlier and the two shortcuts work but don't complete.
+
 Without the wrapper, `perch wt foo` still creates / finds the worktree and prints its path — you'd just `cd` there manually.
+
+### `br` and `wt` shortcuts
+
+Sourcing the wrapper also defines `br` and `wt`, so the two verbs are reachable without typing `perch` first:
+
+```sh
+wt feature      # perch wt feature
+wt rm .         # perch wt rm .
+br main         # perch br main
+```
+
+They call the `perch` function rather than the binary, so the `cd` hand-off comes with them.
+
+[broot](https://dystroy.org/broot) also installs a `br` function, and whichever is sourced last wins. Set `PERCH_NO_SHORTCUTS` to any non-empty value *before* the `source` line to leave both names alone:
+
+```sh
+# zsh and bash
+PERCH_NO_SHORTCUTS=1
+source ~/.config/perch/perch.sh
+```
+
+```fish
+# fish
+set -gx PERCH_NO_SHORTCUTS 1
+source ~/.config/perch/perch.fish
+```
+
+It covers the completions too, so nothing offers branch names for someone else's `br` — perch never claims either name unless it also defines it. `just install-completions` won't take a name it doesn't already own either: where a `br` or `wt` completion file is already there, it says so and leaves it.
 
 ## Shell Completions
 
-Tab completions are available for zsh, bash, and fish.
+Tab completions are available for zsh, bash, and fish, and cover `br` and `wt` as well as `perch`.
 
 ```sh
 just install-completions
@@ -175,6 +205,26 @@ This installs the appropriate completion script for your current shell. From a r
 | zsh | `_perch` | `~/.zsh/completions/_perch` |
 | bash | `perch.bash` | `~/.local/share/bash-completion/completions/perch` |
 | fish | `perch.fish` | `~/.config/fish/completions/perch.fish` |
+
+bash and fish autoload completions by command name, so `br` and `wt` need the installed file to exist under their own names too — `just install-completions` does this for you:
+
+```sh
+# bash
+ln -s perch ~/.local/share/bash-completion/completions/br
+ln -s perch ~/.local/share/bash-completion/completions/wt
+
+# fish
+ln -s perch.fish ~/.config/fish/completions/br.fish
+ln -s perch.fish ~/.config/fish/completions/wt.fish
+```
+
+Plain `ln -s`, not `ln -sf`: if one of those names is already taken, the link should fail rather than replace whatever owns it. `install-completions` behaves the same way and tells you which name it left alone.
+
+zsh needs no links — it claims completions by name at `compinit` time, and `_perch` deliberately claims only `perch`.
+
+Completing `br` and `wt` needs the [shell integration](#br-and-wt-shortcuts) as well, in every shell. Perch completes a shortcut only while that name still resolves to the function its wrapper defined, and it stands down per name — take `br` for something else and `wt` is unaffected. Install the completions alone and only `perch` completes, which is the honest answer, since without the wrapper the shortcuts don't exist.
+
+zsh and bash re-read that on every completion. fish decides as its completion file loads, which is the first time you complete one of the three names — so a `br` claimed *after* that, later in the same session, is the one case fish keeps answering for. `complete -e -c br` clears it. fish's `--wraps` is what lets one set of rules serve all three names, and it offers no hook to re-check per keystroke.
 
 For zsh, make sure `~/.zsh/completions` is in your `fpath` before `compinit`:
 
