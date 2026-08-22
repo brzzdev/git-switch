@@ -46,7 +46,7 @@ fn interactive_term() -> Option<Term> {
 /// every other case — so it also decides which picker rows are inert, and never
 /// which are listed. See [ADR
 /// 0007](../docs/adr/0007-three-verbs-one-per-intent.md).
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Verb {
     /// Bare `perch <name>` — hand off to the worktree holding the branch.
     Go,
@@ -57,12 +57,17 @@ pub enum Verb {
 }
 
 impl Verb {
+    /// The only line here the compiler can't hold to the variants. A verb left
+    /// out of it never parses, so `perch <that word>` reaches a branch of that
+    /// name instead of the verb — which the dispatcher's own tests catch long
+    /// before a completion could.
     const ALL: [Self; 3] = [Self::Go, Self::Here, Self::Worktree];
 
     /// The word that selects this verb on the command line. *Go* has none: it
     /// is what a bare `perch` already means. Exhaustive on purpose — a fourth
-    /// verb has to say here whether it is spelled, and everything that reads
-    /// the spellings reads them from this.
+    /// verb has to say here whether it is spelled, and everything that reads a
+    /// spelling reads it from this: the dispatcher, the `--` escape in
+    /// [`go_there_argument`], and the completions' subtraction.
     fn spelling(self) -> Option<&'static str> {
         match self {
             Verb::Go => None,
@@ -1028,6 +1033,26 @@ mod tests {
     #[test]
     fn shell_quote_handles_a_quote_in_the_name() {
         assert_eq!(shell_quote("it's"), r"'it'\''s'");
+    }
+
+    /// `ALL` is the one line `spelling`'s exhaustive match can't hold to the
+    /// variants, and everything downstream — the dispatcher, the `--` escape,
+    /// the completions' subtraction — reads the spellings through it. So pin
+    /// the round trip: every spelled verb has to come back from its own word.
+    #[test]
+    fn every_spelled_verb_parses_back_from_its_word() {
+        for verb in Verb::ALL {
+            let Some(word) = verb.spelling() else {
+                continue;
+            };
+            assert_eq!(Verb::parse(word), Some(verb), "{word} should parse back");
+        }
+        assert_eq!(Verb::parse("feature"), None);
+        assert_eq!(
+            Verb::Go.spelling(),
+            None,
+            "a bare `perch` is what Go means, so it has no word to be typed as"
+        );
     }
 
     #[test]

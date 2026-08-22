@@ -25,11 +25,14 @@ pub enum Subverb {
 }
 
 impl Subverb {
+    /// As with `Verb::ALL`, the one line here the compiler can't hold to the
+    /// variants: a subverb left out of it never parses, and `wt` builds a
+    /// branch by that name instead of refusing it.
     const ALL: [Self; 4] = [Self::List, Self::Ls, Self::Remove, Self::Rm];
 
-    /// Exhaustive for the same reason [`Verb::spelling`](super::Verb) is: a new
-    /// subverb has to be given its word here, and the completions subtract what
-    /// this says rather than a list of their own.
+    /// Exhaustive for the same reason `Verb::spelling` is: a new subverb has to
+    /// be given its word here, and the completions subtract what this says
+    /// rather than a list of their own.
     fn spelling(self) -> &'static str {
         match self {
             Subverb::List => "list",
@@ -39,6 +42,8 @@ impl Subverb {
         }
     }
 
+    /// The subverb `word` names, where it names one. A word this rejects is a
+    /// branch `wt` will give a worktree to.
     #[must_use]
     pub fn parse(word: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|sub| sub.spelling() == word)

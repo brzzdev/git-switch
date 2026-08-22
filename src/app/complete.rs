@@ -7,10 +7,13 @@
 //! `wt rm`, branch names everywhere else — and each subtracts the words its own
 //! `match` arm takes first.
 //!
-//! That subtraction is [`Verb::spelling`] and [`wt::Subverb::spelling`], the
-//! same reading the dispatcher parses through, rather than a list restated in
-//! each completion file. Both are exhaustive, so a new verb has to be given a
-//! word, and the arm it needs in `main.rs` is a compile error until it has one.
+//! That subtraction is `Verb::spelling` and `wt::Subverb::spelling`, the same
+//! reading the dispatcher parses through, rather than a list restated in each
+//! completion file. Both are exhaustive matches, so a new verb has to be given
+//! a word there, and the arm it needs in `main.rs` is a compile error until it
+//! has one. The one step neither the compiler nor a test can force is adding it
+//! to `ALL` beside them — miss that and the verb simply never parses, which the
+//! dispatcher notices long before a completion does.
 //!
 //! What the completion files still hold is the positional logic — which is
 //! genuinely per-shell — and the verbs and subverbs themselves, each of which
@@ -54,11 +57,11 @@ impl Position {
 /// `perch [br|wt] [--] --complete` — the branches reachable as the next word at
 /// `position`, one per line, for the shell completions to offer.
 ///
-/// The set is [`reachable_branches`](super::reachable_branches), the same read
-/// the *Catalogue* is built from, so what the picker lists and what a named
-/// target resolves against is what TAB offers. The `git branch` the completion
-/// files used to run saw only the local half, which left a remote-only branch
-/// accepted on the command line but never completed.
+/// The set is `reachable_branches`, the same read the *Catalogue* is built
+/// from, so what the picker lists and what a named target resolves against is
+/// what TAB offers. The `git branch` the completion files used to run saw only
+/// the local half, which left a remote-only branch accepted on the command line
+/// but never completed.
 ///
 /// A repo with no branches prints nothing and succeeds, where the picker raises
 /// [`Error::NoBranches`](crate::Error::NoBranches) over the same empty read:
