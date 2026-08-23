@@ -26,13 +26,23 @@ _perch_offers() {
 # exactly as given, leaving the quoting to whoever wrote the completion — so an
 # unescaped candidate is a command substitution again the moment Enter follows
 # TAB. zsh and fish escape on insertion themselves, which is why only this file
-# has to. Ordinary names come back unchanged, and matching stays against the raw
-# `$cur`, which is what the user actually typed.
+# has to. Ordinary names come back unchanged.
+#
+# What escaping costs is that the word on the command line stops being the name.
+# Where several candidates share a prefix, bash inserts that prefix and TAB
+# again arrives with `$cur` in escaped spelling — `feat\&` for `feat&one` and
+# `feat&two` — which no raw name starts with, so a second TAB would answer
+# nothing and completion would dead-end where it should narrow. `$cur` is
+# therefore matched against both spellings: the raw one the user types, and the
+# escaped one the previous TAB left behind. Both are comparisons, evaluating
+# nothing.
 _perch_reply() {
-  local cur=$1 candidate
+  local cur=$1 candidate escaped
   while IFS= read -r candidate; do
-    if [[ -n "$candidate" && "$candidate" == "$cur"* ]]; then
-      COMPREPLY+=("$(printf '%q' "$candidate")")
+    [[ -n "$candidate" ]] || continue
+    escaped=$(printf '%q' "$candidate")
+    if [[ "$candidate" == "$cur"* || "$escaped" == "$cur"* ]]; then
+      COMPREPLY+=("$escaped")
     fi
   done
 }

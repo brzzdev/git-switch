@@ -1121,6 +1121,46 @@ fn a_branch_named_like_a_command_substitution_does_not_run_on_tab() {
     );
 }
 
+/// Escaping candidates for insertion costs the word on the command line its
+/// identity with the name. Where several share a prefix, bash inserts that
+/// prefix and the next TAB arrives with `$cur` in escaped spelling — `feat\&`
+/// for `feat&one` and `feat&two` — which no raw name starts with. Matching only
+/// the raw spelling would answer nothing there, dead-ending completion at the
+/// point it should be narrowing. Drives the second TAB: the word is what the
+/// first one left behind.
+#[test]
+fn a_second_tab_still_narrows_after_the_first_inserted_an_escaped_prefix() {
+    let (_bare, work) = setup();
+    git(work.path(), &["branch", "feat&one"]);
+    git(work.path(), &["branch", "feat&two"]);
+
+    let bin = Path::new(env!("CARGO_BIN_EXE_perch")).parent().unwrap();
+    let script = format!(
+        "PATH=\"{bin}\":$PATH\n\
+         source \"{completions}\"\n\
+         COMP_WORDS=(perch 'feat\\&'); COMP_CWORD=1; COMPREPLY=()\n\
+         _perch_completions\n\
+         printf '%s\\n' \"${{COMPREPLY[@]}}\"\n",
+        bin = bin.display(),
+        completions = concat!(env!("CARGO_MANIFEST_DIR"), "/completions/perch.bash"),
+    );
+    let output = Command::new("bash")
+        .args(["-c", &script])
+        .current_dir(work.path())
+        .env("PERCH_NO_HOOKS", "1")
+        .output()
+        .expect("failed to run bash");
+
+    let stdout = stdout_str(&output);
+    let mut names: Vec<&str> = stdout.lines().filter(|l| !l.is_empty()).collect();
+    names.sort_unstable();
+    assert_eq!(
+        names,
+        [r"feat\&one", r"feat\&two"],
+        "both branches should still be offered, and still escaped; got: {stdout}"
+    );
+}
+
 /// The gap this replaced `git branch` to close: a branch that exists only on the
 /// remote is in the picker and is accepted as a named target, so it has to be
 /// offered too. `git branch` cannot see one.
