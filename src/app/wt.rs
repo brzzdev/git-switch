@@ -12,6 +12,21 @@ use super::{
 };
 use crate::{AppResult, Error, git};
 
+spelled! {
+    /// A word `perch wt` reads as a *Subverb* before it reads it as a branch
+    /// name. `list` and `remove` are the spellings retired at 2.0.0: they are
+    /// eaten in order to be refused, which counts here for the same reason `ls`
+    /// does — a name offered where one of these sits reaches an error rather
+    /// than a branch.
+    #[derive(Clone, Copy)]
+    pub enum Subverb {
+        List = "list",
+        Ls = "ls",
+        Remove = "remove",
+        Rm = "rm",
+    }
+}
+
 enum Action {
     CdToExisting(git::Worktree),
     CreateForBranch(String),

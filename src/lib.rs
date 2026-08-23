@@ -1,3 +1,48 @@
+/// Declares an enum together with the word that selects each variant on the
+/// command line, generating `parse` from that same list.
+///
+/// What this buys is that there is no *second list* to keep in step: the words
+/// sit on the variants, so what the dispatcher parses and what the completions
+/// subtract come from the declaration itself. The hand-kept array it replaces
+/// could be left missing a variant while everything still compiled — the
+/// dispatcher's own match was satisfied by the arm alone, and a test that
+/// iterated the array could not see the gap — and the word would then be eaten
+/// as a verb but offered as a branch, which is the drift [#96] set out to
+/// remove.
+///
+/// It is not a proof: a variant written bare simply has no word, and nothing
+/// here objects. That is deliberate, because some variants have none — as
+/// [`Verb::Go`](app::Verb::Go) hasn't, being what a bare `perch` already means.
+/// What catches a word left off by mistake is the same exhaustive `match` that
+/// caught it before.
+///
+/// [#96]: https://github.com/brzzdev/perch/issues/96
+macro_rules! spelled {
+    (
+        $(#[$enum_meta:meta])*
+        $vis:vis enum $name:ident {
+            $($(#[$variant_meta:meta])* $variant:ident $(= $word:literal)?),+ $(,)?
+        }
+    ) => {
+        $(#[$enum_meta])*
+        $vis enum $name {
+            $($(#[$variant_meta])* $variant,)+
+        }
+
+        impl $name {
+            /// The variant `word` selects, where it selects one. A word this
+            /// rejects is a branch name.
+            #[must_use]
+            pub fn parse(word: &str) -> Option<Self> {
+                match word {
+                    $($($word => Some(Self::$variant),)?)+
+                    _ => None,
+                }
+            }
+        }
+    };
+}
+
 pub mod app;
 pub mod git;
 

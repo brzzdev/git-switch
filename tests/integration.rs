@@ -1011,6 +1011,175 @@ fn wt_rm_complete_lists_every_name_rm_accepts() {
     assert!(live.is_dir(), "listing must not remove: {}", live.display());
 }
 
+/// The branches offered where a branch name goes, one position at a time. Each
+/// position subtracts what its own dispatcher arm eats and nothing more, so a
+/// word eaten after `wt` is still offered at the top level and a *Verb* is still
+/// offered after `br` — collision is positional, and completing a name the
+/// dispatcher there would swallow is what this guards against.
+#[test]
+fn complete_drops_only_the_words_that_position_eats() {
+    let (_bare, work) = setup();
+    for branch in ["br", "wt", "ls", "rm", "list", "remove", "feat/x"] {
+        git(work.path(), &["branch", branch]);
+    }
+
+    let offered = |args: &[&str]| {
+        let output = perch_args(work.path(), args);
+        assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+        let mut names: Vec<String> = stdout_str(&output).lines().map(String::from).collect();
+        names.sort();
+        names
+    };
+
+    assert_eq!(
+        offered(&["--complete"]),
+        ["feat/x", "list", "ls", "main", "remove", "rm"],
+        "a bare `perch` reads `br` and `wt` as verbs"
+    );
+    assert_eq!(
+        offered(&["br", "--complete"]),
+        ["br", "feat/x", "list", "ls", "main", "remove", "rm", "wt"],
+        "`br` reads everything after it as a branch"
+    );
+    assert_eq!(
+        offered(&["wt", "--complete"]),
+        ["br", "feat/x", "main", "wt"],
+        "`wt` reads the two subverbs and the two retired spellings"
+    );
+
+    // `--` is what you type to reach a name some position would eat, so it has
+    // to answer with every branch — at whichever level it was typed. Git
+    // refuses a branch whose name begins with `-`, so reading `--complete`
+    // here costs no name that was ever reachable.
+    let everything = ["br", "feat/x", "list", "ls", "main", "remove", "rm", "wt"];
+    assert_eq!(offered(&["--", "--complete"]), everything);
+    assert_eq!(offered(&["br", "--", "--complete"]), everything);
+    assert_eq!(offered(&["wt", "--", "--complete"]), everything);
+}
+
+/// Regression, in both halves. Git permits `$`, backticks and `${IFS}` in a ref
+/// name, so a branch can be called `$(…)` — and once remote-only branches were
+/// offered, that name came from whoever can push to a repo you fetch rather than
+/// from you.
+///
+/// Offering it must not run it: `compgen -W` expanded its word list before
+/// matching, so the payload fired on TAB. Nor must inserting it: bash puts a
+/// match on the command line verbatim, so an unescaped candidate fires on the
+/// Enter that follows. The payload would write a file, so its absence covers the
+/// first; the candidate coming back escaped covers the second.
+///
+/// Drives the completion the way bash does: source the file, set the words, call
+/// the function.
+#[test]
+fn a_branch_named_like_a_command_substitution_does_not_run_on_tab() {
+    let (_bare, work) = setup();
+    let payload = work.path().join("pwned");
+    // Relative, and no space: a ref name may hold neither a space nor a path
+    // component starting with `.`, which a temp directory's does. `${IFS}`
+    // supplies the space, and bash runs below with the repo as its cwd.
+    git(work.path(), &["branch", "$(touch${IFS}pwned)"]);
+
+    let bin = Path::new(env!("CARGO_BIN_EXE_perch")).parent().unwrap();
+    // Both paths quoted: a checkout directory may hold a space, and an
+    // unsourced completion file would leave COMPREPLY empty and the assertions
+    // below passing for the wrong reason.
+    let script = format!(
+        "PATH=\"{bin}\":$PATH\n\
+         source \"{completions}\"\n\
+         COMP_WORDS=(perch ''); COMP_CWORD=1; COMPREPLY=()\n\
+         _perch_completions\n\
+         printf '%s\\n' \"${{COMPREPLY[@]}}\"\n",
+        bin = bin.display(),
+        completions = concat!(env!("CARGO_MANIFEST_DIR"), "/completions/perch.bash"),
+    );
+    let output = Command::new("bash")
+        .args(["-c", &script])
+        .current_dir(work.path())
+        .env("PERCH_NO_HOOKS", "1")
+        .output()
+        .expect("failed to run bash");
+
+    let stdout = stdout_str(&output);
+    assert!(
+        !payload.exists(),
+        "offering a branch must not execute its name; stdout: {stdout}"
+    );
+    // The completion still has to work, or every assertion here is vacuous.
+    assert!(
+        stdout.lines().any(|l| l == "main"),
+        "expected `main` among the candidates, got: {stdout}"
+    );
+    // Offered, but as text a shell reads literally — the raw spelling on the
+    // command line would run on Enter.
+    let offered = stdout
+        .lines()
+        .find(|l| l.contains("touch"))
+        .unwrap_or_else(|| panic!("the branch should still be offered, got: {stdout}"));
+    assert!(
+        offered.contains('\\'),
+        "the candidate should be escaped for insertion, got: {offered}"
+    );
+}
+
+/// Escaping candidates for insertion costs the word on the command line its
+/// identity with the name. Where several share a prefix, bash inserts that
+/// prefix and the next TAB arrives with `$cur` in escaped spelling — `feat\&`
+/// for `feat&one` and `feat&two` — which no raw name starts with. Matching only
+/// the raw spelling would answer nothing there, dead-ending completion at the
+/// point it should be narrowing. Drives the second TAB: the word is what the
+/// first one left behind.
+#[test]
+fn a_second_tab_still_narrows_after_the_first_inserted_an_escaped_prefix() {
+    let (_bare, work) = setup();
+    git(work.path(), &["branch", "feat&one"]);
+    git(work.path(), &["branch", "feat&two"]);
+
+    let bin = Path::new(env!("CARGO_BIN_EXE_perch")).parent().unwrap();
+    let script = format!(
+        "PATH=\"{bin}\":$PATH\n\
+         source \"{completions}\"\n\
+         COMP_WORDS=(perch 'feat\\&'); COMP_CWORD=1; COMPREPLY=()\n\
+         _perch_completions\n\
+         printf '%s\\n' \"${{COMPREPLY[@]}}\"\n",
+        bin = bin.display(),
+        completions = concat!(env!("CARGO_MANIFEST_DIR"), "/completions/perch.bash"),
+    );
+    let output = Command::new("bash")
+        .args(["-c", &script])
+        .current_dir(work.path())
+        .env("PERCH_NO_HOOKS", "1")
+        .output()
+        .expect("failed to run bash");
+
+    let stdout = stdout_str(&output);
+    let mut names: Vec<&str> = stdout.lines().filter(|l| !l.is_empty()).collect();
+    names.sort_unstable();
+    assert_eq!(
+        names,
+        [r"feat\&one", r"feat\&two"],
+        "both branches should still be offered, and still escaped; got: {stdout}"
+    );
+}
+
+/// The gap this replaced `git branch` to close: a branch that exists only on the
+/// remote is in the picker and is accepted as a named target, so it has to be
+/// offered too. `git branch` cannot see one.
+#[test]
+fn complete_offers_a_branch_that_exists_only_on_the_remote() {
+    let (_bare, work) = setup();
+    git(work.path(), &["branch", "published"]);
+    git(work.path(), &["push", "origin", "published"]);
+    git(work.path(), &["branch", "-D", "published"]);
+
+    let output = perch_args(work.path(), &["--complete"]);
+
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+    let stdout = stdout_str(&output);
+    let mut names: Vec<&str> = stdout.lines().collect();
+    names.sort_unstable();
+    assert_eq!(names, ["main", "published"]);
+}
+
 #[test]
 fn help_flag_prints_usage() {
     let dir = TempDir::new().unwrap();

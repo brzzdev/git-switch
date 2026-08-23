@@ -5,6 +5,7 @@ use indicatif::ProgressBar;
 
 use crate::{AppResult, Error, git};
 
+pub mod complete;
 pub(crate) mod hook;
 pub(crate) mod marker;
 pub(crate) mod picker;
@@ -40,19 +41,28 @@ fn interactive_term() -> Option<Term> {
     term.is_term().then_some(term)
 }
 
-/// Which of three intents a command carries. A verb decides what happens to a
-/// *Held* branch and nothing else, since git leaves exactly one move legal in
-/// every other case — so it also decides which picker rows are inert, and never
-/// which are listed. See [ADR
-/// 0007](../docs/adr/0007-three-verbs-one-per-intent.md).
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Verb {
-    /// Bare `perch <name>` — hand off to the worktree holding the branch.
-    Go,
-    /// `perch br <name>` — refuse, naming the path and the verb that reaches it.
-    Here,
-    /// `perch wt <name>` — give the branch a worktree of its own.
-    Worktree,
+spelled! {
+    /// Which of three intents a command carries. A verb decides what happens to
+    /// a *Held* branch and nothing else, since git leaves exactly one move legal
+    /// in every other case — so it also decides which picker rows are inert, and
+    /// never which are listed. See [ADR
+    /// 0007](../docs/adr/0007-three-verbs-one-per-intent.md).
+    ///
+    /// The words beside the variants are the whole of what the dispatcher reads
+    /// as a verb, and so the whole of what the completions subtract.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum Verb {
+        /// Bare `perch <name>` — hand off to the worktree holding the branch.
+        /// No word of its own: being typed is not how you reach it, which is
+        /// why a branch named `br` or `wt` needs the `--` escape and one named
+        /// anything else does not.
+        Go,
+        /// `perch br <name>` — refuse, naming the path and the verb that
+        /// reaches it.
+        Here = "br",
+        /// `perch wt <name>` — give the branch a worktree of its own.
+        Worktree = "wt",
+    }
 }
 
 impl Verb {
@@ -529,6 +539,20 @@ fn select_branch(
     }))
 }
 
+/// Every branch a *Verb* can reach: the locals, and the ones that exist only on
+/// `remote`. Returned as the two halves rather than one list, since the picker
+/// draws them as separate sections. A remote it cannot read degrades to the
+/// locals alone — a completion or a picker missing the remote half is worth
+/// more than neither.
+///
+/// The single read behind the *Catalogue* and the completions both, so what the
+/// picker lists is what TAB offers and what a named target resolves against.
+pub(crate) fn reachable_branches(remote: &str) -> AppResult<(Vec<String>, Vec<String>)> {
+    let local = git::local_branches()?;
+    let remote_only = git::remote_only_branches(&local, remote).unwrap_or_default();
+    Ok((local, remote_only))
+}
+
 /// Reads every branch the repo offers and pairs each with the worktree holding
 /// it, if any. This is the whole of the git side of the list — grouping it into
 /// sections and deciding what each row says belongs to [`picker::sections`],
@@ -538,8 +562,7 @@ pub(crate) fn build_catalogue(
     remote: &str,
     worktrees: &[git::Worktree],
 ) -> AppResult<Catalogue> {
-    let local = git::local_branches()?;
-    let remote_only = git::remote_only_branches(&local, remote).unwrap_or_default();
+    let (local, remote_only) = reachable_branches(remote)?;
 
     if local.is_empty() && remote_only.is_empty() {
         return Err(Error::NoBranches);
@@ -845,13 +868,14 @@ fn delete_stale_row(
 ///
 /// A branch named after a verb is read as that verb, and `perch wt` opens the
 /// worktree picker rather than going anywhere — so those names need the `--`
-/// escape hatch. Keep this list in step with `dispatch` in `main.rs`, which is
-/// where the verbs are defined.
+/// escape hatch. Which names those are is [`Verb::parse`], the same reading the
+/// dispatcher does and the completions subtract.
 pub(crate) fn go_there_argument(branch: &str) -> String {
     let quoted = shell_quote(branch);
-    match branch {
-        "br" | "wt" => format!("-- {quoted}"),
-        _ => quoted,
+    if Verb::parse(branch).is_some() {
+        format!("-- {quoted}")
+    } else {
+        quoted
     }
 }
 
@@ -989,6 +1013,17 @@ mod tests {
     #[test]
     fn shell_quote_handles_a_quote_in_the_name() {
         assert_eq!(shell_quote("it's"), r"'it'\''s'");
+    }
+
+    /// The words now live on the variants themselves, so completeness is the
+    /// declaration's job rather than a test's. What is left worth pinning is the
+    /// mapping, and that an ordinary name is left alone — which is what sends a
+    /// bare `perch <name>` to a branch instead of a verb.
+    #[test]
+    fn a_verb_parses_from_the_word_that_selects_it() {
+        assert_eq!(Verb::parse("br"), Some(Verb::Here));
+        assert_eq!(Verb::parse("wt"), Some(Verb::Worktree));
+        assert_eq!(Verb::parse("feature"), None);
     }
 
     #[test]

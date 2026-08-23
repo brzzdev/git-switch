@@ -1,20 +1,50 @@
-_perch_branches() {
-  git branch --format='%(refname:short)' 2>/dev/null
+# What the command will accept at the position given — asked of the binary,
+# which answers for the position it is handed: worktree names after `wt rm`,
+# and everywhere else the branches, minus the words its own match arm eats
+# first. It sees remote-only branches, which the `git branch` this replaced
+# could not. `command` skips the shell wrapper: it is a function here, and it
+# would `cd` the interactive shell on a single-line answer.
+_perch_offers() {
+  command perch "$@" --complete 2>/dev/null
 }
 
-# The dispatcher reads some words as commands before it reads them as branch
-# names, and `--` is the only way to reach a branch spelled like one. Offering
-# such a name where it would be eaten completes into a command that misfires,
-# so drop it there. Keep these patterns in step with `dispatch`/`dispatch_wt`.
-_perch_branches_except() {
-  _perch_branches | grep -vxE "$1"
-}
-
-# Targets `wt rm` will accept — asked of the binary, which reads them off the
-# same matcher the command does. `command` skips the shell wrapper: it is a
-# function here, and it would `cd` the interactive shell on a single-line answer.
-_perch_wt_targets() {
-  command perch wt rm --complete 2>/dev/null
+# Fills COMPREPLY from the newline-separated candidates on stdin, keeping the
+# ones $cur is a prefix of.
+#
+# Git permits `$`, backticks and `${IFS}` in a ref name, so a branch can be
+# named `$(…)`. Whoever can push to a repo you fetch chooses that name, and it
+# reaches here as an ordinary candidate, so this has to stay literal text at two
+# separate moments:
+#
+# Reading it. Deliberately not `compgen -W`, which expands its word list —
+# command substitution included — before matching against it, so merely
+# offering such a branch ran it. Reading line by line evaluates nothing. Lines
+# are the unit rather than words because a worktree directory may hold spaces
+# where a branch never can, and `IFS=` keeps them intact.
+#
+# Inserting it. `printf %q` because bash puts a match on the command line
+# exactly as given, leaving the quoting to whoever wrote the completion — so an
+# unescaped candidate is a command substitution again the moment Enter follows
+# TAB. zsh and fish escape on insertion themselves, which is why only this file
+# has to. Ordinary names come back unchanged.
+#
+# What escaping costs is that the word on the command line stops being the name.
+# Where several candidates share a prefix, bash inserts that prefix and TAB
+# again arrives with `$cur` in escaped spelling — `feat\&` for `feat&one` and
+# `feat&two` — which no raw name starts with, so a second TAB would answer
+# nothing and completion would dead-end where it should narrow. `$cur` is
+# therefore matched against both spellings: the raw one the user types, and the
+# escaped one the previous TAB left behind. Both are comparisons, evaluating
+# nothing.
+_perch_reply() {
+  local cur=$1 candidate escaped
+  while IFS= read -r candidate; do
+    [[ -n "$candidate" ]] || continue
+    escaped=$(printf '%q' "$candidate")
+    if [[ "$candidate" == "$cur"* || "$escaped" == "$cur"* ]]; then
+      COMPREPLY+=("$escaped")
+    fi
+  done
 }
 
 # `wt rm` reads its target as the first word after `rm` that isn't an option,
@@ -56,11 +86,8 @@ _perch_completions() {
 
   if [[ "$verb" == "wt" && "$subverb" == "rm" ]] && (( pos >= 3 )); then
     if _perch_wt_rm_wants_target "${cmdline[@]:3:pos-3}"; then
-      # A worktree directory may hold spaces where a branch never can, so both
-      # the wordlist and the result have to split on newlines alone — otherwise
-      # `scratch space` arrives as two candidates and neither one matches.
-      local IFS=$'\n'
-      COMPREPLY=($(compgen -W "$(_perch_wt_targets)" -- "$cur"))
+      COMPREPLY=()
+      _perch_reply "$cur" < <(_perch_offers wt rm)
     fi
     return
   fi
@@ -71,22 +98,27 @@ _perch_completions() {
   if [[ "$prev" == "--" ]]; then
     if (( pos == 2 )) ||
       { (( pos == 3 )) && [[ "$verb" == "br" || "$verb" == "wt" ]]; }; then
-      COMPREPLY=($(compgen -W "$(_perch_branches)" -- "$cur"))
+      # The `--` is the position: it eats nothing at any of the three levels,
+      # so one question answers for all of them.
+      COMPREPLY=()
+      _perch_reply "$cur" < <(_perch_offers --)
     fi
     return
   fi
 
   case "$pos" in
     1)
-      COMPREPLY=($(compgen -W "br wt $(_perch_branches_except 'br|wt')" -- "$cur"))
+      COMPREPLY=()
+      _perch_reply "$cur" < <(printf '%s\n' br wt; _perch_offers)
       ;;
     # Only the two verbs read a second word. `perch <branch>` has taken its
     # target by here, and the dispatcher ignores whatever follows it.
     2)
+      COMPREPLY=()
       if [[ "$verb" == "wt" ]]; then
-        COMPREPLY=($(compgen -W "ls rm $(_perch_branches_except 'ls|rm|list|remove')" -- "$cur"))
+        _perch_reply "$cur" < <(printf '%s\n' ls rm; _perch_offers wt)
       elif [[ "$verb" == "br" ]]; then
-        COMPREPLY=($(compgen -W "$(_perch_branches)" -- "$cur"))
+        _perch_reply "$cur" < <(_perch_offers br)
       fi
       ;;
   esac
