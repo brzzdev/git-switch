@@ -16,6 +16,7 @@ function __perch_after_double_dash
     test "$tokens[-1]" = "--"; or return 1
     test (count $tokens) -eq 2; and return 0
     test (count $tokens) -eq 3; and contains -- $tokens[2] br wt
+    test (count $tokens) -eq 4; and test "$tokens[2]" = wt; and test "$tokens[3]" = --no-switch
 end
 
 # True while `wt rm` still wants a target. It reads that target as the first word
@@ -56,7 +57,6 @@ complete -c perch -f -n '__fish_seen_subcommand_from br; and __fish_is_nth_token
 complete -c perch -f -n '__fish_seen_subcommand_from wt; and __fish_is_nth_token 2; and not __perch_after_double_dash' -a 'ls rm'
 complete -c perch -f -n '__fish_seen_subcommand_from wt; and __fish_is_nth_token 2; and not __perch_after_double_dash' -a '(__perch_offers wt)'
 complete -c perch -l no-switch -d 'Create or find the worktree without switching to it' -n '__fish_seen_subcommand_from wt; and not __fish_seen_subcommand_from ls rm'
-complete -c perch -f -n '__fish_seen_subcommand_from wt; and __fish_seen_argument -l no-switch; and not __fish_seen_subcommand_from ls rm' -a '(__perch_offers wt --no-switch)'
 
 # After `wt rm`: the worktrees, until one has been taken.
 complete -c perch -f -n '__perch_wt_rm_wants_target' -a '(__perch_offers wt rm)'

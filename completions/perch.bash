@@ -97,7 +97,8 @@ _perch_completions() {
   # branch the dispatcher has already taken, the words after `--` go nowhere.
   if [[ "$prev" == "--" ]]; then
     if (( pos == 2 )) ||
-      { (( pos == 3 )) && [[ "$verb" == "br" || "$verb" == "wt" ]]; }; then
+      { (( pos == 3 )) && [[ "$verb" == "br" || "$verb" == "wt" ]]; } ||
+      { (( pos == 4 )) && [[ "$verb" == "wt" && "$subverb" == "--no-switch" ]]; }; then
       # The `--` is the position: it eats nothing at any of the three levels,
       # so one question answers for all of them.
       COMPREPLY=()

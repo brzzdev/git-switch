@@ -1060,6 +1060,10 @@ fn complete_drops_only_the_words_that_position_eats() {
     assert_eq!(offered(&["--", "--complete"]), everything);
     assert_eq!(offered(&["br", "--", "--complete"]), everything);
     assert_eq!(offered(&["wt", "--", "--complete"]), everything);
+    assert_eq!(
+        offered(&["wt", "--no-switch", "--", "--complete"]),
+        everything
+    );
 }
 
 /// Regression, in both halves. Git permits `$`, backticks and `${IFS}` in a ref
@@ -1550,6 +1554,21 @@ fn wt_no_switch_finds_an_existing_worktree_without_claiming_to_switch() {
         !stderr_str(&output).contains("switched to"),
         "the status must not claim a switch happened, got: {}",
         stderr_str(&output)
+    );
+}
+
+#[test]
+fn wt_double_dash_stops_no_switch_option_parsing() {
+    let (_bare, _parent, work) = setup_with_parent();
+
+    git(&work, &["branch", "feature"]);
+    let output = perch_args(&work, &["wt", "--", "feature", "--no-switch"]);
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+
+    let printed = stdout_str(&output).trim().to_string();
+    assert!(
+        printed.ends_with("worktrees/repo/feature") && Path::new(&printed).is_dir(),
+        "an option after `--` must not suppress the handoff, got: {printed}"
     );
 }
 

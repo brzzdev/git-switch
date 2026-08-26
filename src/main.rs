@@ -69,18 +69,21 @@ fn dispatch_br(args: &[String]) -> perch::AppResult<()> {
 }
 
 fn dispatch_wt(args: &[String]) -> perch::AppResult<()> {
-    let shell_handoff = if args.iter().any(|arg| arg == "--no-switch") {
-        ShellHandoff::Suppress
-    } else {
-        ShellHandoff::Emit
-    };
-    let args: Vec<&str> = args
-        .iter()
-        .map(String::as_str)
-        .filter(|arg| *arg != "--no-switch")
-        .collect();
+    let mut shell_handoff = ShellHandoff::Emit;
+    let mut reads_options = true;
+    let mut parsed = Vec::with_capacity(args.len());
+    for arg in args {
+        if reads_options && arg == "--" {
+            reads_options = false;
+            parsed.push(arg.as_str());
+        } else if reads_options && arg == "--no-switch" {
+            shell_handoff = ShellHandoff::Suppress;
+        } else {
+            parsed.push(arg.as_str());
+        }
+    }
 
-    match args.first().copied() {
+    match parsed.first().copied() {
         Some("--help" | "-h") => {
             print_wt_help();
             Ok(())
@@ -88,7 +91,7 @@ fn dispatch_wt(args: &[String]) -> perch::AppResult<()> {
         Some("--complete") => complete::run(Position::Wt),
         // As at the top level, `--` ends subverb parsing, which is what keeps a
         // branch named `ls`, `rm`, or one of the retired words below reachable.
-        Some("--") => escaped(args.get(1).copied(), |target| {
+        Some("--") => escaped(parsed.get(1).copied(), |target| {
             perch::app::wt::run(target, shell_handoff)
         }),
         // Parsed rather than matched word by word, for the same reason as the
@@ -102,7 +105,7 @@ fn dispatch_wt(args: &[String]) -> perch::AppResult<()> {
             // `list`.
             Some(Subverb::List) => Err(perch::Error::retired("list", "ls")),
             Some(Subverb::Remove) => Err(perch::Error::retired("remove", "rm")),
-            Some(Subverb::Rm) => dispatch_wt_rm(&args[1..]),
+            Some(Subverb::Rm) => dispatch_wt_rm(&parsed[1..]),
             None => perch::app::wt::run(Some(name), shell_handoff),
         },
         None => perch::app::wt::run(None, shell_handoff),
