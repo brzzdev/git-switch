@@ -56,7 +56,7 @@ complete -c perch -f -n '__fish_seen_subcommand_from br; and __fish_is_nth_token
 # how you say you meant the branch.
 complete -c perch -f -n '__fish_seen_subcommand_from wt; and __fish_is_nth_token 2; and not __perch_after_double_dash' -a 'ls rm'
 complete -c perch -f -n '__fish_seen_subcommand_from wt; and __fish_is_nth_token 2; and not __perch_after_double_dash' -a '(__perch_offers wt)'
-complete -c perch -l no-switch -d 'Create or find the worktree without switching to it' -n '__fish_seen_subcommand_from wt; and not __fish_seen_subcommand_from ls rm'
+complete -c perch -l no-switch -d 'Create or find the worktree without switching to it' -n '__fish_seen_subcommand_from wt; and not __fish_seen_subcommand_from ls rm list remove'
 
 # After `wt rm`: the worktrees, until one has been taken.
 complete -c perch -f -n '__perch_wt_rm_wants_target' -a '(__perch_offers wt rm)'

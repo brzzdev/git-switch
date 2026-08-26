@@ -85,7 +85,7 @@ _perch() {
   elif (( pos == 4 )) && [[ "$cmdline[2]" == wt ]]; then
     if [[ "$cmdline[3]" == --no-switch ]]; then
       _perch_offers branches 'branch' wt --no-switch
-    elif [[ "$cmdline[3]" != (ls|rm|--) ]]; then
+    elif [[ "$cmdline[3]" != (ls|rm|list|remove|--) ]]; then
       _describe -t options 'option' worktree_options
     fi
   # `br` reads everything after it as a branch, so nothing is filtered here.

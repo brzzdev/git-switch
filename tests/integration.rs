@@ -1536,12 +1536,7 @@ fn wt_no_switch_creates_a_new_branch_without_a_shell_handoff() {
 fn wt_no_switch_finds_an_existing_worktree_without_claiming_to_switch() {
     let (_bare, parent, work) = setup_with_parent();
 
-    git(&work, &["branch", "feature"]);
-    let path = parent.path().join("worktrees").join("repo").join("feature");
-    git(
-        &work,
-        &["worktree", "add", path.to_str().unwrap(), "feature"],
-    );
+    add_worktree(&work, &parent, "feature");
 
     let output = perch_args(&work, &["wt", "--no-switch", "feature"]);
     assert!(output.status.success(), "stderr: {}", stderr_str(&output));
