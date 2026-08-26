@@ -1553,6 +1553,26 @@ fn wt_no_switch_finds_an_existing_worktree_without_claiming_to_switch() {
 }
 
 #[test]
+fn wt_no_switch_is_rejected_before_rm() {
+    let (_bare, parent, work) = setup_with_parent();
+    let path = add_worktree(&work, &parent, "feature");
+
+    let output = perch_args(&path, &["wt", "--no-switch", "rm", ".", "--force"]);
+
+    assert!(
+        !output.status.success(),
+        "the create-only option must not reach `wt rm`; stderr: {}",
+        stderr_str(&output)
+    );
+    assert_eq!(
+        stdout_str(&output),
+        "",
+        "a rejected option must not hand the shell a directory"
+    );
+    assert!(path.exists(), "worktree must survive: {}", path.display());
+}
+
+#[test]
 fn wt_double_dash_stops_no_switch_option_parsing() {
     let (_bare, _parent, work) = setup_with_parent();
 

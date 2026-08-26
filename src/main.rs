@@ -97,17 +97,26 @@ fn dispatch_wt(args: &[String]) -> perch::AppResult<()> {
         // Parsed rather than matched word by word, for the same reason as the
         // verbs at the top level: this is where the subverbs are defined, and
         // the completions read what it reads rather than restating it.
-        Some(name) => match Subverb::parse(name) {
-            Some(Subverb::Ls) => perch::app::wt::run_ls(),
-            // `wt <name>` creates a worktree for any word it doesn't recognise,
-            // so the retired subverbs have to be turned away by name: left to
-            // fall through, old muscle memory would build a branch called
-            // `list`.
-            Some(Subverb::List) => Err(perch::Error::retired("list", "ls")),
-            Some(Subverb::Remove) => Err(perch::Error::retired("remove", "rm")),
-            Some(Subverb::Rm) => dispatch_wt_rm(&remaining_args[1..]),
-            None => perch::app::wt::run(Some(name), shell_handoff),
-        },
+        Some(name) => {
+            let subverb = Subverb::parse(name);
+            if shell_handoff == ShellHandoff::Suppress && subverb.is_some() {
+                return Err(perch::Error::NoSwitchWithSubverb {
+                    subverb: name.to_string(),
+                });
+            }
+
+            match subverb {
+                Some(Subverb::Ls) => perch::app::wt::run_ls(),
+                // `wt <name>` creates a worktree for any word it doesn't recognise,
+                // so the retired subverbs have to be turned away by name: left to
+                // fall through, old muscle memory would build a branch called
+                // `list`.
+                Some(Subverb::List) => Err(perch::Error::retired("list", "ls")),
+                Some(Subverb::Remove) => Err(perch::Error::retired("remove", "rm")),
+                Some(Subverb::Rm) => dispatch_wt_rm(&remaining_args[1..]),
+                None => perch::app::wt::run(Some(name), shell_handoff),
+            }
+        }
         None => perch::app::wt::run(None, shell_handoff),
     }
 }
