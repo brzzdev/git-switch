@@ -15,7 +15,14 @@ function __perch_after_double_dash
     set -l tokens (commandline -opc)
     test "$tokens[-1]" = "--"; or return 1
     test (count $tokens) -eq 2; and return 0
-    test (count $tokens) -eq 3; and contains -- $tokens[2] br wt
+    if test (count $tokens) -eq 3
+        contains -- $tokens[2] br wt; and return 0
+        test "$tokens[1]" = wt; and test "$tokens[2]" = --no-switch; and return 0
+    end
+    if test (count $tokens) -eq 4
+        test "$tokens[2]" = wt; and test "$tokens[3]" = --no-switch; and return 0
+    end
+    return 1
 end
 
 # True while `wt rm` still wants a target. It reads that target as the first word
@@ -29,6 +36,33 @@ function __perch_wt_rm_wants_target
         for token in $tokens[4..-1]
             string match --quiet -- '-*' $token; or return 1
         end
+    end
+    return 0
+end
+
+# True while the command is in `wt`'s option-parsing region. Unlike
+# `__fish_seen_subcommand_from`, this checks the verb's position, so a branch
+# called `wt` under `br` cannot make the option appear. A regular branch may
+# come before the option; a subverb or `--` closes the position.
+function __perch_wt_accepts_no_switch
+    set -l tokens (commandline -opc)
+    set -l first_arg
+    switch "$tokens[1]"
+        case perch
+            test (count $tokens) -ge 2; and test "$tokens[2]" = wt; or return 1
+            set first_arg 3
+        case wt
+            set first_arg 2
+        case '*'
+            return 1
+    end
+
+    test (count $tokens) -ge $first_arg; or return 0
+    for token in $tokens[$first_arg..-1]
+        test "$token" = --; and return 1
+        test "$token" = --no-switch; and return 1
+        string match --quiet -- '-*' "$token"; and continue
+        contains -- "$token" ls rm list remove; and return 1
     end
     return 0
 end
@@ -55,6 +89,7 @@ complete -c perch -f -n '__fish_seen_subcommand_from br; and __fish_is_nth_token
 # how you say you meant the branch.
 complete -c perch -f -n '__fish_seen_subcommand_from wt; and __fish_is_nth_token 2; and not __perch_after_double_dash' -a 'ls rm'
 complete -c perch -f -n '__fish_seen_subcommand_from wt; and __fish_is_nth_token 2; and not __perch_after_double_dash' -a '(__perch_offers wt)'
+complete -c perch -f -l no-switch -d 'Create or find the worktree without switching to it' -n '__perch_wt_accepts_no_switch'
 
 # After `wt rm`: the worktrees, until one has been taken.
 complete -c perch -f -n '__perch_wt_rm_wants_target' -a '(__perch_offers wt rm)'

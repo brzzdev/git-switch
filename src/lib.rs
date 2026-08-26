@@ -86,6 +86,10 @@ pub enum Error {
         keep: &'static str,
     },
 
+    /// A `wt` creation option was combined with a `wt` subverb.
+    #[error("`--no-switch` does not apply to `perch wt {subverb}`")]
+    NoSwitchWithSubverb { subverb: String },
+
     #[error("invalid number from git: {0}")]
     ParseInt(#[from] std::num::ParseIntError),
 

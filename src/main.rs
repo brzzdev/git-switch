@@ -1,7 +1,10 @@
 use std::process;
 
 use perch::app::complete::{self, Position};
-use perch::app::{Verb, wt::Subverb};
+use perch::app::{
+    Verb,
+    wt::{ShellHandoff, Subverb},
+};
 
 fn main() {
     let _ = ctrlc::set_handler(|| {
@@ -66,7 +69,21 @@ fn dispatch_br(args: &[String]) -> perch::AppResult<()> {
 }
 
 fn dispatch_wt(args: &[String]) -> perch::AppResult<()> {
-    match args.first().map(String::as_str) {
+    let mut shell_handoff = ShellHandoff::Emit;
+    let mut reads_options = true;
+    let mut remaining_args = Vec::with_capacity(args.len());
+    for arg in args {
+        if reads_options && arg == "--" {
+            reads_options = false;
+            remaining_args.push(arg.as_str());
+        } else if reads_options && arg == "--no-switch" {
+            shell_handoff = ShellHandoff::Suppress;
+        } else {
+            remaining_args.push(arg.as_str());
+        }
+    }
+
+    match remaining_args.first().copied() {
         Some("--help" | "-h") => {
             print_wt_help();
             Ok(())
@@ -74,22 +91,33 @@ fn dispatch_wt(args: &[String]) -> perch::AppResult<()> {
         Some("--complete") => complete::run(Position::Wt),
         // As at the top level, `--` ends subverb parsing, which is what keeps a
         // branch named `ls`, `rm`, or one of the retired words below reachable.
-        Some("--") => escaped(args.get(1).map(String::as_str), perch::app::wt::run),
+        Some("--") => escaped(remaining_args.get(1).copied(), |target| {
+            perch::app::wt::run(target, shell_handoff)
+        }),
         // Parsed rather than matched word by word, for the same reason as the
         // verbs at the top level: this is where the subverbs are defined, and
         // the completions read what it reads rather than restating it.
-        Some(name) => match Subverb::parse(name) {
-            Some(Subverb::Ls) => perch::app::wt::run_ls(),
-            // `wt <name>` creates a worktree for any word it doesn't recognise,
-            // so the retired subverbs have to be turned away by name: left to
-            // fall through, old muscle memory would build a branch called
-            // `list`.
-            Some(Subverb::List) => Err(perch::Error::retired("list", "ls")),
-            Some(Subverb::Remove) => Err(perch::Error::retired("remove", "rm")),
-            Some(Subverb::Rm) => dispatch_wt_rm(&args[1..]),
-            None => perch::app::wt::run(Some(name)),
-        },
-        None => perch::app::wt::run(None),
+        Some(name) => {
+            let subverb = Subverb::parse(name);
+            if shell_handoff == ShellHandoff::Suppress && subverb.is_some() {
+                return Err(perch::Error::NoSwitchWithSubverb {
+                    subverb: name.to_string(),
+                });
+            }
+
+            match subverb {
+                Some(Subverb::Ls) => perch::app::wt::run_ls(),
+                // `wt <name>` creates a worktree for any word it doesn't recognise,
+                // so the retired subverbs have to be turned away by name: left to
+                // fall through, old muscle memory would build a branch called
+                // `list`.
+                Some(Subverb::List) => Err(perch::Error::retired("list", "ls")),
+                Some(Subverb::Remove) => Err(perch::Error::retired("remove", "rm")),
+                Some(Subverb::Rm) => dispatch_wt_rm(&remaining_args[1..]),
+                None => perch::app::wt::run(Some(name), shell_handoff),
+            }
+        }
+        None => perch::app::wt::run(None, shell_handoff),
     }
 }
 
@@ -103,7 +131,7 @@ fn dispatch_wt(args: &[String]) -> perch::AppResult<()> {
 /// rather than borrowing the answer from a verb that happens to eat nothing.
 fn escaped(
     word: Option<&str>,
-    run: fn(Option<&str>) -> perch::AppResult<()>,
+    run: impl FnOnce(Option<&str>) -> perch::AppResult<()>,
 ) -> perch::AppResult<()> {
     match word {
         Some("--complete") => complete::run(Position::Escaped),
@@ -111,7 +139,7 @@ fn escaped(
     }
 }
 
-fn dispatch_wt_rm(args: &[String]) -> perch::AppResult<()> {
+fn dispatch_wt_rm(args: &[&str]) -> perch::AppResult<()> {
     // Read before the target and the force flag: this prints what `rm` accepts
     // and removes nothing. A flag rather than a subverb so it can never eat a
     // branch name, and so ADR 0007's three verbs stand — which is why every
@@ -120,14 +148,11 @@ fn dispatch_wt_rm(args: &[String]) -> perch::AppResult<()> {
     // either order. Deliberately absent from `print_wt_help`: the shell
     // completions are its only caller, and a line of usage teaching a human to
     // type it would be advertising a surface nothing asks them to use.
-    if args.iter().any(|a| a == "--complete") {
+    if args.contains(&"--complete") {
         return perch::app::wt::run_rm_complete();
     }
-    let force = args.iter().any(|a| a == "--force" || a == "-f");
-    let target = args
-        .iter()
-        .find(|a| !a.starts_with('-'))
-        .map(String::as_str);
+    let force = args.iter().any(|a| *a == "--force" || *a == "-f");
+    let target = args.iter().copied().find(|a| !a.starts_with('-'));
     perch::app::wt::run_rm(target, force)
 }
 
@@ -150,12 +175,14 @@ fn print_br_help() {
 }
 
 fn print_wt_help() {
-    println!("Usage: perch wt [<branch>]    Give the branch its own worktree");
+    println!("Usage: perch wt [<branch>] [--no-switch]");
+    println!("                                  Give the branch its own worktree");
     println!("       perch wt ls            List worktrees");
     println!("       perch wt rm [<branch>] Remove a worktree (deletes branch if merged)");
     println!("       perch wt rm .          Remove the worktree you're in");
     println!("       perch wt -- <branch>   Worktree a branch named ls/rm/list/remove");
     println!();
     println!("Options:");
-    println!("  -f, --force   Skip the confirmation for uncommitted or unmerged work");
+    println!("      --no-switch  Create or find the worktree without switching to it");
+    println!("  -f, --force      Skip the confirmation for uncommitted or unmerged work");
 }

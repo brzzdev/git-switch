@@ -28,9 +28,18 @@ spelled! {
 }
 
 enum Action {
-    CdToExisting(git::Worktree),
+    UseExisting(git::Worktree),
     CreateForBranch(String),
     CreateNewBranch(String),
+}
+
+/// Whether `wt` should print its destination for the shell wrapper to enter.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ShellHandoff {
+    /// Print the destination path on stdout for the wrapper.
+    Emit,
+    /// Leave stdout empty so the wrapper keeps the caller's directory.
+    Suppress,
 }
 
 /// Whether the branch behind a name has to exist, which the fresh state alone
@@ -45,7 +54,7 @@ enum Existence {
     MustExist,
 }
 
-pub fn run(target: Option<&str>) -> AppResult<()> {
+pub fn run(target: Option<&str>, shell_handoff: ShellHandoff) -> AppResult<()> {
     // A worktree whose directory was deleted by hand can't be entered, so its
     // branch is one to (re)create. `worktree_add`/`checkout` prune the stale
     // registration when it gets in the way.
@@ -72,9 +81,9 @@ pub fn run(target: Option<&str>) -> AppResult<()> {
     let action = resolve_target(&branch, existence, &worktrees, &remote)?;
 
     // The branch comes back alongside the path so the stale prompt can leave the
-    // worktree we're about to enter alone.
+    // targeted worktree alone.
     let (target_path, target_branch) = match action {
-        Action::CdToExisting(wt) => {
+        Action::UseExisting(wt) => {
             let branch = wt.branch.clone().unwrap_or_default();
             // The worktree's branch may track a different remote than ours.
             let branch_remote = git::current_remote(Some(branch.as_str()));
@@ -85,11 +94,19 @@ pub fn run(target: Option<&str>) -> AppResult<()> {
                     branch,
                 );
             }
-            eprintln!(
-                "{} switched to worktree at {}",
-                style("→").cyan().bold(),
-                display_path(&wt.path)
-            );
+            if shell_handoff == ShellHandoff::Emit {
+                eprintln!(
+                    "{} switched to worktree at {}",
+                    style("→").cyan().bold(),
+                    display_path(&wt.path)
+                );
+            } else {
+                eprintln!(
+                    "{} worktree for {branch} is at {}",
+                    style("→").cyan().bold(),
+                    display_path(&wt.path)
+                );
+            }
             (wt.path, branch)
         }
         Action::CreateForBranch(branch) => {
@@ -121,7 +138,9 @@ pub fn run(target: Option<&str>) -> AppResult<()> {
             style("!").yellow().bold()
         );
     }
-    handoff_cd(&target_path);
+    if shell_handoff == ShellHandoff::Emit {
+        handoff_cd(&target_path);
+    }
     Ok(())
 }
 
@@ -480,7 +499,7 @@ fn resolve_target(
     remote: &str,
 ) -> AppResult<Action> {
     if let Some(wt) = git::worktree_for_branch(worktrees, name) {
-        return Ok(Action::CdToExisting(wt));
+        return Ok(Action::UseExisting(wt));
     }
     let locals = git::local_branches()?;
     if locals.iter().any(|b| b == name) {
