@@ -114,6 +114,9 @@ perch wt
 # If `feature` doesn't exist as a branch, a new one is created from the remote's default branch.
 perch wt feature
 
+# Create or find the worktree, but leave this shell where it is
+perch wt feature --no-switch
+
 # List all worktrees
 perch wt ls
 
@@ -125,6 +128,8 @@ perch wt rm . --force # …without being asked about uncommitted work
 ```
 
 Worktrees land at `../worktrees/<repo>/<branch>` relative to the main checkout. Branch names with slashes (`feature/foo`) preserve their structure as subdirectories.
+
+`--no-switch` suppresses the directory handoff to the shell wrapper. Creation, fetching, hooks, and stale-branch cleanup still run as usual.
 
 `wt rm .` removes the worktree you're in and `cd`s you back to the main checkout. If your cwd is the main checkout there's nothing for `.` to name, and it says so.
 

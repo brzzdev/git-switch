@@ -1,7 +1,10 @@
 use std::process;
 
 use perch::app::complete::{self, Position};
-use perch::app::{Verb, wt::Subverb};
+use perch::app::{
+    Verb,
+    wt::{ShellHandoff, Subverb},
+};
 
 fn main() {
     let _ = ctrlc::set_handler(|| {
@@ -66,7 +69,18 @@ fn dispatch_br(args: &[String]) -> perch::AppResult<()> {
 }
 
 fn dispatch_wt(args: &[String]) -> perch::AppResult<()> {
-    match args.first().map(String::as_str) {
+    let shell_handoff = if args.iter().any(|arg| arg == "--no-switch") {
+        ShellHandoff::Suppress
+    } else {
+        ShellHandoff::Emit
+    };
+    let args: Vec<&str> = args
+        .iter()
+        .map(String::as_str)
+        .filter(|arg| *arg != "--no-switch")
+        .collect();
+
+    match args.first().copied() {
         Some("--help" | "-h") => {
             print_wt_help();
             Ok(())
@@ -74,7 +88,9 @@ fn dispatch_wt(args: &[String]) -> perch::AppResult<()> {
         Some("--complete") => complete::run(Position::Wt),
         // As at the top level, `--` ends subverb parsing, which is what keeps a
         // branch named `ls`, `rm`, or one of the retired words below reachable.
-        Some("--") => escaped(args.get(1).map(String::as_str), perch::app::wt::run),
+        Some("--") => escaped(args.get(1).copied(), |target| {
+            perch::app::wt::run(target, shell_handoff)
+        }),
         // Parsed rather than matched word by word, for the same reason as the
         // verbs at the top level: this is where the subverbs are defined, and
         // the completions read what it reads rather than restating it.
@@ -87,9 +103,9 @@ fn dispatch_wt(args: &[String]) -> perch::AppResult<()> {
             Some(Subverb::List) => Err(perch::Error::retired("list", "ls")),
             Some(Subverb::Remove) => Err(perch::Error::retired("remove", "rm")),
             Some(Subverb::Rm) => dispatch_wt_rm(&args[1..]),
-            None => perch::app::wt::run(Some(name)),
+            None => perch::app::wt::run(Some(name), shell_handoff),
         },
-        None => perch::app::wt::run(None),
+        None => perch::app::wt::run(None, shell_handoff),
     }
 }
 
@@ -103,7 +119,7 @@ fn dispatch_wt(args: &[String]) -> perch::AppResult<()> {
 /// rather than borrowing the answer from a verb that happens to eat nothing.
 fn escaped(
     word: Option<&str>,
-    run: fn(Option<&str>) -> perch::AppResult<()>,
+    run: impl FnOnce(Option<&str>) -> perch::AppResult<()>,
 ) -> perch::AppResult<()> {
     match word {
         Some("--complete") => complete::run(Position::Escaped),
@@ -111,7 +127,7 @@ fn escaped(
     }
 }
 
-fn dispatch_wt_rm(args: &[String]) -> perch::AppResult<()> {
+fn dispatch_wt_rm(args: &[&str]) -> perch::AppResult<()> {
     // Read before the target and the force flag: this prints what `rm` accepts
     // and removes nothing. A flag rather than a subverb so it can never eat a
     // branch name, and so ADR 0007's three verbs stand — which is why every
@@ -120,14 +136,11 @@ fn dispatch_wt_rm(args: &[String]) -> perch::AppResult<()> {
     // either order. Deliberately absent from `print_wt_help`: the shell
     // completions are its only caller, and a line of usage teaching a human to
     // type it would be advertising a surface nothing asks them to use.
-    if args.iter().any(|a| a == "--complete") {
+    if args.contains(&"--complete") {
         return perch::app::wt::run_rm_complete();
     }
-    let force = args.iter().any(|a| a == "--force" || a == "-f");
-    let target = args
-        .iter()
-        .find(|a| !a.starts_with('-'))
-        .map(String::as_str);
+    let force = args.iter().any(|a| *a == "--force" || *a == "-f");
+    let target = args.iter().copied().find(|a| !a.starts_with('-'));
     perch::app::wt::run_rm(target, force)
 }
 
@@ -150,12 +163,14 @@ fn print_br_help() {
 }
 
 fn print_wt_help() {
-    println!("Usage: perch wt [<branch>]    Give the branch its own worktree");
+    println!("Usage: perch wt [<branch>] [--no-switch]");
+    println!("                                  Give the branch its own worktree");
     println!("       perch wt ls            List worktrees");
     println!("       perch wt rm [<branch>] Remove a worktree (deletes branch if merged)");
     println!("       perch wt rm .          Remove the worktree you're in");
     println!("       perch wt -- <branch>   Worktree a branch named ls/rm/list/remove");
     println!();
     println!("Options:");
-    println!("  -f, --force   Skip the confirmation for uncommitted or unmerged work");
+    println!("      --no-switch  Create or find the worktree without switching to it");
+    println!("  -f, --force      Skip the confirmation for uncommitted or unmerged work");
 }

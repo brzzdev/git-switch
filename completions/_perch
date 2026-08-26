@@ -22,7 +22,7 @@ _perch_offers() {
 }
 
 _perch() {
-  local -a subcommands worktree_subs cmdline
+  local -a subcommands worktree_subs worktree_options cmdline
   local pos
   subcommands=(
     'br:Check a branch out here'
@@ -31,6 +31,9 @@ _perch() {
   worktree_subs=(
     'ls:List worktrees'
     'rm:Remove worktree (also deletes branch)'
+  )
+  worktree_options=(
+    '--no-switch:Create or find the worktree without switching to it'
   )
   # The wrapper asks for these two names as it defines them, but anything sourced
   # later can take one back — broot ships its own `br`. compdef records the claim
@@ -75,7 +78,14 @@ _perch() {
     _perch_offers branches 'branch'
   elif (( pos == 3 )) && [[ "$cmdline[2]" == wt ]]; then
     _describe -t subverbs 'worktree subverb' worktree_subs
+    _describe -t options 'option' worktree_options
     _perch_offers branches 'branch' wt
+  elif (( pos == 4 )) && [[ "$cmdline[2]" == wt ]]; then
+    if [[ "$cmdline[3]" == --no-switch ]]; then
+      _perch_offers branches 'branch' wt --no-switch
+    elif [[ "$cmdline[3]" != (ls|rm|--) ]]; then
+      _describe -t options 'option' worktree_options
+    fi
   # `br` reads everything after it as a branch, so nothing is filtered here.
   elif (( pos == 3 )) && [[ "$cmdline[2]" == br ]]; then
     _perch_offers branches 'branch' br

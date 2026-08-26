@@ -116,9 +116,17 @@ _perch_completions() {
     2)
       COMPREPLY=()
       if [[ "$verb" == "wt" ]]; then
-        _perch_reply "$cur" < <(printf '%s\n' ls rm; _perch_offers wt)
+        _perch_reply "$cur" < <(printf '%s\n' ls rm --no-switch; _perch_offers wt)
       elif [[ "$verb" == "br" ]]; then
         _perch_reply "$cur" < <(_perch_offers br)
+      fi
+      ;;
+    3)
+      COMPREPLY=()
+      if [[ "$verb" == "wt" && "$subverb" == "--no-switch" ]]; then
+        _perch_reply "$cur" < <(_perch_offers wt --no-switch)
+      elif [[ "$verb" == "wt" && "$subverb" != "ls" && "$subverb" != "rm" ]]; then
+        _perch_reply "$cur" < <(printf '%s\n' --no-switch)
       fi
       ;;
   esac

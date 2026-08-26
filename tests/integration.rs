@@ -1046,6 +1046,11 @@ fn complete_drops_only_the_words_that_position_eats() {
         ["br", "feat/x", "main", "wt"],
         "`wt` reads the two subverbs and the two retired spellings"
     );
+    assert_eq!(
+        offered(&["wt", "--no-switch", "--complete"]),
+        ["br", "feat/x", "main", "wt"],
+        "a `wt` option leaves the branch position unchanged"
+    );
 
     // `--` is what you type to reach a name some position would eat, so it has
     // to answer with every branch — at whichever level it was typed. Git
@@ -1200,6 +1205,19 @@ fn help_flag_prints_usage() {
     assert!(
         out.contains("PERCH_NO_SHORTCUTS"),
         "expected the shell shortcut footer in help, got: {out}"
+    );
+}
+
+#[test]
+fn wt_help_documents_no_switch() {
+    let dir = TempDir::new().unwrap();
+    let output = perch_args(dir.path(), &["wt", "--help"]);
+
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+    assert!(
+        stdout_str(&output).contains("--no-switch"),
+        "expected worktree help to document the flag, got: {}",
+        stdout_str(&output)
     );
 }
 
@@ -1484,6 +1502,55 @@ fn wt_creates_new_branch_from_default_when_branch_absent() {
         .output()
         .unwrap();
     assert!(head.status.success(), "stderr: {}", stderr_str(&head));
+}
+
+#[test]
+fn wt_no_switch_creates_a_new_branch_without_a_shell_handoff() {
+    let (_bare, parent, work) = setup_with_parent();
+
+    let output = perch_args(&work, &["wt", "brand-new", "--no-switch"]);
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+
+    let expected = parent
+        .path()
+        .join("worktrees")
+        .join("repo")
+        .join("brand-new");
+    assert!(
+        expected.is_dir(),
+        "worktree should exist at {}",
+        expected.display()
+    );
+    assert_eq!(
+        stdout_str(&output),
+        "",
+        "--no-switch must not print a path for the shell wrapper"
+    );
+}
+
+#[test]
+fn wt_no_switch_finds_an_existing_worktree_without_claiming_to_switch() {
+    let (_bare, parent, work) = setup_with_parent();
+
+    git(&work, &["branch", "feature"]);
+    let path = parent.path().join("worktrees").join("repo").join("feature");
+    git(
+        &work,
+        &["worktree", "add", path.to_str().unwrap(), "feature"],
+    );
+
+    let output = perch_args(&work, &["wt", "--no-switch", "feature"]);
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+    assert_eq!(
+        stdout_str(&output),
+        "",
+        "--no-switch must not print a path for the shell wrapper"
+    );
+    assert!(
+        !stderr_str(&output).contains("switched to"),
+        "the status must not claim a switch happened, got: {}",
+        stderr_str(&output)
+    );
 }
 
 #[test]
