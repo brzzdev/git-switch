@@ -15,8 +15,14 @@ function __perch_after_double_dash
     set -l tokens (commandline -opc)
     test "$tokens[-1]" = "--"; or return 1
     test (count $tokens) -eq 2; and return 0
-    test (count $tokens) -eq 3; and contains -- $tokens[2] br wt
-    test (count $tokens) -eq 4; and test "$tokens[2]" = wt; and test "$tokens[3]" = --no-switch
+    if test (count $tokens) -eq 3
+        contains -- $tokens[2] br wt; and return 0
+        test "$tokens[1]" = wt; and test "$tokens[2]" = --no-switch; and return 0
+    end
+    if test (count $tokens) -eq 4
+        test "$tokens[2]" = wt; and test "$tokens[3]" = --no-switch; and return 0
+    end
+    return 1
 end
 
 # True while `wt rm` still wants a target. It reads that target as the first word

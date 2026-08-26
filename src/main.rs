@@ -71,19 +71,19 @@ fn dispatch_br(args: &[String]) -> perch::AppResult<()> {
 fn dispatch_wt(args: &[String]) -> perch::AppResult<()> {
     let mut shell_handoff = ShellHandoff::Emit;
     let mut reads_options = true;
-    let mut parsed = Vec::with_capacity(args.len());
+    let mut remaining_args = Vec::with_capacity(args.len());
     for arg in args {
         if reads_options && arg == "--" {
             reads_options = false;
-            parsed.push(arg.as_str());
+            remaining_args.push(arg.as_str());
         } else if reads_options && arg == "--no-switch" {
             shell_handoff = ShellHandoff::Suppress;
         } else {
-            parsed.push(arg.as_str());
+            remaining_args.push(arg.as_str());
         }
     }
 
-    match parsed.first().copied() {
+    match remaining_args.first().copied() {
         Some("--help" | "-h") => {
             print_wt_help();
             Ok(())
@@ -91,7 +91,7 @@ fn dispatch_wt(args: &[String]) -> perch::AppResult<()> {
         Some("--complete") => complete::run(Position::Wt),
         // As at the top level, `--` ends subverb parsing, which is what keeps a
         // branch named `ls`, `rm`, or one of the retired words below reachable.
-        Some("--") => escaped(parsed.get(1).copied(), |target| {
+        Some("--") => escaped(remaining_args.get(1).copied(), |target| {
             perch::app::wt::run(target, shell_handoff)
         }),
         // Parsed rather than matched word by word, for the same reason as the
@@ -105,7 +105,7 @@ fn dispatch_wt(args: &[String]) -> perch::AppResult<()> {
             // `list`.
             Some(Subverb::List) => Err(perch::Error::retired("list", "ls")),
             Some(Subverb::Remove) => Err(perch::Error::retired("remove", "rm")),
-            Some(Subverb::Rm) => dispatch_wt_rm(&parsed[1..]),
+            Some(Subverb::Rm) => dispatch_wt_rm(&remaining_args[1..]),
             None => perch::app::wt::run(Some(name), shell_handoff),
         },
         None => perch::app::wt::run(None, shell_handoff),
