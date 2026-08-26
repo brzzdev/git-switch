@@ -97,7 +97,7 @@ The one you're in. `perch .` refreshes the current branch; `perch wt rm .` remov
 _Avoid_: Here, current, self
 
 **Handoff**:
-Printing a directory to stdout for the shell wrapper to `cd` into, since a process cannot change its parent's working directory.
+Printing a directory to stdout for the shell wrapper to `cd` into, since a process cannot change its parent's working directory. `wt --no-switch` suppresses the handoff after creating or finding a worktree, so the shell stays where it is.
 _Avoid_: Jump, teleport, redirect
 
 ### Hooks
