@@ -28,7 +28,7 @@ spelled! {
 }
 
 enum Action {
-    CdToExisting(git::Worktree),
+    UseExisting(git::Worktree),
     CreateForBranch(String),
     CreateNewBranch(String),
 }
@@ -81,9 +81,9 @@ pub fn run(target: Option<&str>, shell_handoff: ShellHandoff) -> AppResult<()> {
     let action = resolve_target(&branch, existence, &worktrees, &remote)?;
 
     // The branch comes back alongside the path so the stale prompt can leave the
-    // worktree we're about to enter alone.
+    // targeted worktree alone.
     let (target_path, target_branch) = match action {
-        Action::CdToExisting(wt) => {
+        Action::UseExisting(wt) => {
             let branch = wt.branch.clone().unwrap_or_default();
             // The worktree's branch may track a different remote than ours.
             let branch_remote = git::current_remote(Some(branch.as_str()));
@@ -499,7 +499,7 @@ fn resolve_target(
     remote: &str,
 ) -> AppResult<Action> {
     if let Some(wt) = git::worktree_for_branch(worktrees, name) {
-        return Ok(Action::CdToExisting(wt));
+        return Ok(Action::UseExisting(wt));
     }
     let locals = git::local_branches()?;
     if locals.iter().any(|b| b == name) {
