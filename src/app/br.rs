@@ -2,7 +2,7 @@
 //! three verbs share it; branch removal lives here because its local and upstream
 //! targets have a safety contract of their own.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use console::style;
 
@@ -85,20 +85,12 @@ pub fn run_rm(options: &RmOptions) -> AppResult<()> {
         return Ok(());
     }
 
-    let held: Vec<git::Worktree> = worktrees
-        .iter()
-        .filter(|worktree| worktree.branch.is_some())
-        .cloned()
-        .collect();
     let kept: HashSet<String> = git::pinned_branches(&remote).into_iter().collect();
     let unmerged = git::unmerged_branches(Some(&main.path)).unwrap_or_default();
     let rows: Vec<BranchRow> = local
         .into_iter()
         .map(|name| BranchRow {
-            holder: held
-                .iter()
-                .find(|worktree| worktree.branch.as_deref() == Some(&name))
-                .cloned(),
+            holder: git::worktree_for_branch(&worktrees, &name),
             kept: kept.contains(&name),
             risk: Risk {
                 dirty: false,
@@ -112,7 +104,10 @@ pub fn run_rm(options: &RmOptions) -> AppResult<()> {
     if selected.is_empty() {
         return Ok(());
     }
-    let upstreams = select_upstreams(&rows, &selected, options)?;
+    let upstreams: HashMap<usize, git::RemoteBranch> = select_upstreams(&rows, &selected, options)?
+        .into_iter()
+        .map(|choice| (choice.row, choice.upstream))
+        .collect();
 
     let mut failed = false;
     let mut steps = removal::GitSteps::at_main(Some(&main.path));
@@ -144,19 +139,17 @@ pub fn run_rm(options: &RmOptions) -> AppResult<()> {
             failed = true;
         }
 
-        let Some(choice) = upstreams.iter().find(|choice| choice.row == row_index) else {
+        let Some(upstream) = upstreams.get(&row_index) else {
             continue;
         };
         let local_ref = format!("refs/heads/{}", row.name);
-        let outcome = if !local_deleted || git::resolve(None, &local_ref).is_some() {
-            git::RemoteBranchDeleteOutcome::SkippedLocalPresent
-        } else {
-            git::delete_remote_branch(&choice.upstream)?
-        };
-        eprintln!(
-            "{}",
-            reporting::upstream_outcome(&choice.upstream, &outcome)
-        );
+        if !local_deleted || git::resolve(None, &local_ref).is_some() {
+            eprintln!("{}", reporting::upstream_kept_local(upstream));
+            failed = true;
+            continue;
+        }
+        let outcome = git::delete_remote_branch(upstream)?;
+        eprintln!("{}", reporting::upstream_outcome(upstream, &outcome));
         if !matches!(
             outcome,
             git::RemoteBranchDeleteOutcome::Deleted | git::RemoteBranchDeleteOutcome::AlreadyAbsent
@@ -312,7 +305,7 @@ fn select_upstreams(
     let mut choices = Vec::new();
     for &row in selected {
         let branch = &rows[row].name;
-        if let Some(upstream) = inspect_upstream(row, branch, named, options.upstream)? {
+        if let Some(upstream) = upstream_choice(row, branch, named, options.upstream)? {
             choices.push(upstream);
         }
     }
@@ -377,14 +370,14 @@ fn select_upstreams(
         .collect())
 }
 
-fn inspect_upstream(
+fn upstream_choice(
     row: usize,
     branch: &str,
-    named: bool,
-    requested: bool,
+    target_was_named: bool,
+    upstream_requested: bool,
 ) -> AppResult<Option<UpstreamChoice>> {
     let Some(upstream) = git::same_named_upstream(branch)? else {
-        if named && requested {
+        if target_was_named && upstream_requested {
             return Err(Error::NoRemovableUpstream {
                 branch: branch.to_string(),
                 reason: "it has no explicit same-named upstream".into(),
@@ -397,7 +390,7 @@ fn inspect_upstream(
             Ok(Some(UpstreamChoice { row, upstream }))
         }
         Ok(git::UpstreamInspection::Absent(upstream)) => {
-            if named {
+            if target_was_named {
                 eprintln!(
                     "{} upstream {}/{} is already absent",
                     style("!").yellow().bold(),
@@ -408,7 +401,7 @@ fn inspect_upstream(
             Ok(None)
         }
         Ok(git::UpstreamInspection::Default(upstream)) => {
-            if named && requested {
+            if target_was_named && upstream_requested {
                 return Err(Error::NoRemovableUpstream {
                     branch: branch.to_string(),
                     reason: format!(
@@ -424,7 +417,7 @@ fn inspect_upstream(
                 "could not establish the default branch of {}",
                 upstream.remote
             );
-            if requested {
+            if upstream_requested {
                 return Err(Error::NoRemovableUpstream {
                     branch: branch.to_string(),
                     reason,
@@ -436,7 +429,7 @@ fn inspect_upstream(
             );
             Ok(None)
         }
-        Err(error) if requested => Err(error),
+        Err(error) if upstream_requested => Err(error),
         Err(error) => {
             eprintln!(
                 "{} could not inspect the upstream of {branch}: {error}; offering local removal only",

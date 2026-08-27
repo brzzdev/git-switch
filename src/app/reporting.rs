@@ -86,10 +86,6 @@ pub(crate) fn upstream_outcome(
         git::RemoteBranchDeleteOutcome::AlreadyAbsent => {
             format!("{} upstream {name} was already absent", done())
         }
-        git::RemoteBranchDeleteOutcome::SkippedLocalPresent => format!(
-            "{} kept upstream {name} because the local branch still exists",
-            warn(),
-        ),
         git::RemoteBranchDeleteOutcome::Moved { expected, now } => format!(
             "{} kept upstream {name}: it moved from {expected} to {now} after it was shown",
             warn(),
@@ -98,6 +94,15 @@ pub(crate) fn upstream_outcome(
             format!("{} could not delete upstream {name}: {detail}", warn())
         }
     }
+}
+
+pub(crate) fn upstream_kept_local(upstream: &git::RemoteBranch) -> String {
+    format!(
+        "{} kept upstream {}/{} because the local branch still exists",
+        warn(),
+        upstream.remote,
+        upstream.branch,
+    )
 }
 
 /// What a removal did, as the lines to print — the target says which steps could

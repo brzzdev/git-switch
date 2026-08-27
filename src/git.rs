@@ -1415,7 +1415,6 @@ pub enum BranchDeleteOutcome {
 pub enum RemoteBranchDeleteOutcome {
     Deleted,
     AlreadyAbsent,
-    SkippedLocalPresent,
     Moved { expected: String, now: String },
     Failed(String),
 }
