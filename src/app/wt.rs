@@ -190,7 +190,16 @@ pub(crate) fn run_rm(options: &WorktreeRemoval) -> AppResult<()> {
         return Ok(());
     };
     let pending = assessment.choose(choice)?;
-    let outcome = pending.finish(removal::UpstreamChoice::keep(), |line| eprintln!("{line}"))?;
+    let outcome = match pending.finish(removal::UpstreamChoice::keep(), |line| eprintln!("{line}"))
+    {
+        Ok(outcome) => outcome,
+        Err(failure) => {
+            if let Some(path) = failure.handoff() {
+                handoff_cd(path);
+            }
+            return Err(failure.into_error());
+        }
+    };
     if let Some(path) = outcome.handoff() {
         handoff_cd(path);
     }

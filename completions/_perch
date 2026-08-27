@@ -62,7 +62,13 @@ _perch() {
   if (( pos >= 4 )) && [[ "$cmdline[2]" == br && "$cmdline[3]" == rm ]]; then
     local word target_seen=0
     for word in "${(@)cmdline[4,pos-1]}"; do
-      [[ "$word" == -* ]] || (( target_seen = 1 ))
+      if [[ "$word" == -- ]]; then
+        return
+      elif [[ "$word" == -* ]]; then
+        continue
+      else
+        (( target_seen = 1 ))
+      fi
     done
     _describe -t options 'option' branch_rm_options
     if (( ! target_seen )); then

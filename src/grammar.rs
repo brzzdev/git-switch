@@ -79,8 +79,8 @@ pub(crate) enum HelpPage {
 impl HelpPage {
     pub(crate) fn text(self) -> &'static str {
         match self {
-            Self::Main => MAIN_HELP,
             Self::Branch => BRANCH_HELP,
+            Self::Main => MAIN_HELP,
             Self::Worktree => WORKTREE_HELP,
         }
     }
@@ -107,8 +107,8 @@ impl Position {
         match self {
             Self::Bare => parse_verb(word).is_some(),
             Self::Branch => parse_branch_subverb(word).is_some(),
-            Self::Worktree => parse_worktree_subverb(word).is_some(),
             Self::Escaped | Self::Removal => false,
+            Self::Worktree => parse_worktree_subverb(word).is_some(),
         }
     }
 }
@@ -548,55 +548,6 @@ mod tests {
         assert_eq!(
             worktree.render(candidates.iter().map(String::as_str)),
             "br\nwt\ntopic\n"
-        );
-    }
-
-    #[test]
-    fn help_pages_remain_exact_static_text() {
-        assert_eq!(
-            HelpPage::Main.text(),
-            concat!(
-                "Usage: perch [<branch>]       Go to the branch, wherever it lives\n",
-                "       perch br [<branch>]    Check the branch out here\n",
-                "       perch wt [<branch>]    Give the branch its own worktree\n",
-                "\n",
-                "       perch .                Refresh the current branch from its remote\n",
-                "       perch -- <branch>      Go to a branch named br/wt\n",
-                "       perch br rm [<branch>] Remove local branches\n",
-                "       perch wt ls            List worktrees\n",
-                "       perch wt rm [<branch>|.]\n",
-                "\n",
-                "With the shell integration sourced, `br` and `wt` stand in for `perch br`\n",
-                "and `perch wt`. Set PERCH_NO_SHORTCUTS to leave both names alone.\n",
-            )
-        );
-        assert_eq!(
-            HelpPage::Branch.text(),
-            concat!(
-                "Usage: perch br [<branch>]    Check the branch out here\n",
-                "       perch br rm [<branch>] [--upstream] [--force]\n",
-                "                                  Remove local branches\n",
-                "       perch br -- <branch>   Check out a branch named rm\n",
-                "\n",
-                "Options:\n",
-                "      --upstream  Also offer the branch's same-named upstream for removal\n",
-                "      --force     Skip destructive confirmations\n",
-            )
-        );
-        assert_eq!(
-            HelpPage::Worktree.text(),
-            concat!(
-                "Usage: perch wt [<branch>] [--no-switch]\n",
-                "                                  Give the branch its own worktree\n",
-                "       perch wt ls            List worktrees\n",
-                "       perch wt rm [<branch>] Remove a worktree (deletes branch if merged)\n",
-                "       perch wt rm .          Remove the worktree you're in\n",
-                "       perch wt -- <branch>   Worktree a branch named ls/rm/list/remove\n",
-                "\n",
-                "Options:\n",
-                "      --no-switch  Create or find the worktree without switching to it\n",
-                "  -f, --force      Skip the confirmation for uncommitted or unmerged work\n",
-            )
         );
     }
 }

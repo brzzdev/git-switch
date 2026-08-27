@@ -36,8 +36,12 @@ function __perch_rm_wants_target
     test "$tokens[2]" = $verb; and test "$tokens[3]" = rm; or return 1
     if test (count $tokens) -gt 3
         for token in $tokens[4..-1]
-            if test $verb = wt; and test $reads_options -eq 1; and test "$token" = --
-                set reads_options 0
+            if test "$token" = --
+                if test $verb = wt; and test $reads_options -eq 1
+                    set reads_options 0
+                else
+                    return 1
+                end
             else if test $reads_options -eq 1; and string match --quiet -- '-*' $token
                 continue
             else

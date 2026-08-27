@@ -67,7 +67,7 @@ What permits forcing: the markers already shown to the user, the separate upstre
 _Avoid_: Permission, approval, consent
 
 **Removal**:
-Destroying a local branch, an upstream branch, a worktree, or a local branch together with the worktree holding it. Every destructive path first *assesses* repository facts, then records the user's *choice*, and only then *finishes* the chosen work. Assessment cannot mutate; abandoning a pending removal cancels it. A worktree goes before the local branch it holds; an upstream branch goes only after its selected local branch, and only while the upstream still stands at the tip the user was shown.
+Destroying a local branch, an upstream branch, a worktree, or a local branch together with the worktree holding it. Every destructive path first *assesses* repository facts, then records the user's *choice*, and only then *finishes* the chosen work. Assessment makes no destructive change; any Git objects it creates are unreachable and have no user-visible effect. Abandoning a pending removal cancels it. A worktree goes before the local branch it holds; an upstream branch goes only after its selected local branch, and only while the upstream still stands at the tip the user was shown.
 _Avoid_: Deletion (reserved for branches), cleanup, teardown
 
 ### Targets

@@ -645,7 +645,9 @@ pub(crate) fn prompt_delete_stale_branches(
         return Ok(());
     };
     let pending = assessment.choose(choice)?;
-    pending.finish(removal::UpstreamChoice::keep(), |line| eprintln!("{line}"))?;
+    pending
+        .finish(removal::UpstreamChoice::keep(), |line| eprintln!("{line}"))
+        .map_err(removal::FinishFailure::into_error)?;
 
     Ok(())
 }

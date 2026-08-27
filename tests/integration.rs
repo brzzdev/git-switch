@@ -1134,6 +1134,62 @@ fn bash_br_rm_completion_offers_one_target_and_only_long_flags() {
     );
 }
 
+#[test]
+fn zsh_br_rm_completion_rejects_a_double_dash() {
+    if Command::new("zsh").arg("--version").output().is_err() {
+        return;
+    }
+    let completions = concat!(env!("CARGO_MANIFEST_DIR"), "/completions/_perch");
+    let script = format!(
+        "function _describe {{ : }}\n\
+         service=skip\n\
+         source \"{completions}\"\n\
+         function _perch_offers {{ print -r -- \"$*\" }}\n\
+         service=perch\n\
+         words=(perch br rm -- '')\n\
+         CURRENT=5\n\
+         _perch\n"
+    );
+
+    let output = Command::new("zsh")
+        .args(["-c", &script])
+        .output()
+        .expect("failed to run zsh completion");
+
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+    assert_eq!(stdout_str(&output), "");
+}
+
+#[test]
+fn fish_br_rm_completion_rejects_a_double_dash() {
+    if Command::new("fish").arg("--version").output().is_err() {
+        return;
+    }
+    let (_bare, work) = setup();
+    git(work.path(), &["branch", "feature"]);
+    let bin = Path::new(env!("CARGO_BIN_EXE_perch")).parent().unwrap();
+    let completions = concat!(env!("CARGO_MANIFEST_DIR"), "/completions/perch.fish");
+    let script = format!("source \"{completions}\"\ncomplete -C 'perch br rm -- '\n");
+
+    let output = Command::new("fish")
+        .args(["-c", &script])
+        .current_dir(work.path())
+        .env(
+            "PATH",
+            format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
+        )
+        .env("PERCH_NO_HOOKS", "1")
+        .output()
+        .expect("failed to run fish completion");
+
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+    let completions = stdout_str(&output);
+    assert!(
+        !completions.lines().any(|line| line.starts_with("feature")),
+        "br rm rejects `--`, so fish must not offer a target after it: {completions}"
+    );
+}
+
 /// Regression, in both halves. Git permits `$`, backticks and `${IFS}` in a ref
 /// name, so a branch can be called `$(…)` — and once remote-only branches were
 /// offered, that name came from whoever can push to a repo you fetch rather than
@@ -1278,6 +1334,26 @@ fn help_flag_prints_usage() {
         out.contains("PERCH_NO_SHORTCUTS"),
         "expected the shell shortcut footer in help, got: {out}"
     );
+}
+
+#[test]
+fn help_pages_remain_exact_static_text() {
+    let dir = TempDir::new().unwrap();
+    for (args, expected) in [
+        (&["--help"][..], include_str!("fixtures/help/main.txt")),
+        (
+            &["br", "--help"][..],
+            include_str!("fixtures/help/branch.txt"),
+        ),
+        (
+            &["wt", "--help"][..],
+            include_str!("fixtures/help/worktree.txt"),
+        ),
+    ] {
+        let output = perch_args(dir.path(), args);
+        assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+        assert_eq!(stdout_str(&output), expected);
+    }
 }
 
 #[test]

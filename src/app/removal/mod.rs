@@ -252,11 +252,11 @@ impl Assessment {
 
     pub(crate) fn named(&self, name: &str) -> AppResult<NamedOffer> {
         let id = match self.kind {
-            RequestKind::Stale => self
+            RequestKind::Branches => self
                 .locals
                 .iter()
                 .position(|local| local.target.name() == Some(name)),
-            RequestKind::Branches => self
+            RequestKind::Stale => self
                 .locals
                 .iter()
                 .position(|local| local.target.name() == Some(name)),
@@ -597,11 +597,11 @@ impl Pending {
                     });
                     local.upstream = Some((id, upstream));
                 }
-                UpstreamPreparation::Notice(notice) => self.notices.push(notice),
                 UpstreamPreparation::Failure(error) => {
                     local.preparation_failure = Some(error);
                 }
                 UpstreamPreparation::None => {}
+                UpstreamPreparation::Notice(notice) => self.notices.push(notice),
             }
         }
         Ok(())
@@ -610,8 +610,8 @@ impl Pending {
     pub(crate) fn finish(
         self,
         upstream: UpstreamChoice,
-        emit: impl FnMut(&str),
-    ) -> AppResult<Outcome> {
+        emit: impl FnMut(String),
+    ) -> Result<Outcome, FinishFailure> {
         let mut steps = GitSteps::at_main(self.main.as_deref());
         self.finish_with_steps(upstream, &mut steps, emit)
     }
@@ -620,50 +620,55 @@ impl Pending {
         self,
         upstream: UpstreamChoice,
         steps: &mut impl Steps,
-        mut emit: impl FnMut(&str),
-    ) -> AppResult<Outcome> {
+        mut emit: impl FnMut(String),
+    ) -> Result<Outcome, FinishFailure> {
         let selected: HashSet<UpstreamId> = upstream.ids.into_iter().collect();
         let cwd_will_vanish = self.locals.iter().any(|local| local.contains_cwd);
         if cwd_will_vanish && let Some(main) = &self.main {
-            env::set_current_dir(main)?;
+            env::set_current_dir(main).map_err(|error| FinishFailure::new(error.into(), None))?;
         }
 
         let mut outcome = Outcome {
-            lines: Vec::new(),
             failed: false,
-            handoff: cwd_will_vanish.then(|| self.main.clone()).flatten(),
+            handoff: None,
         };
         for local in self.locals {
             let display_name = local.target.name().unwrap_or("this worktree").to_string();
             if let Some(error) = local.preparation_failure {
-                outcome.report(
-                    format!(
-                        "{} could not prepare upstream removal for {display_name}: {error}; kept the local branch",
-                        style("!").yellow().bold(),
-                    ),
-                    &mut emit,
-                );
+                emit(format!(
+                    "{} could not prepare upstream removal for {display_name}: {error}; kept the local branch",
+                    style("!").yellow().bold(),
+                ));
                 outcome.failed = true;
                 continue;
             }
 
             let report = match remove(local.target.borrowed(), &local.license, steps) {
                 Ok(report) => report,
-                Err(error) if self.kind == RequestKind::Worktrees => return Err(error),
-                Err(error) => {
-                    outcome.report(
-                        format!(
-                            "{} could not remove {display_name}: {error}",
-                            style("!").yellow().bold(),
-                        ),
-                        &mut emit,
-                    );
+                Err(failure) if self.kind != RequestKind::Branches => {
+                    let RemovalFailure { error, report } = *failure;
+                    let removed_cwd_worktree = local.contains_cwd && report.worktree_removed();
+                    let handoff = outcome
+                        .handoff
+                        .take()
+                        .or_else(|| removed_cwd_worktree.then(|| self.main.clone()).flatten());
+                    return Err(FinishFailure::new(error, handoff));
+                }
+                Err(failure) => {
+                    let RemovalFailure { error, .. } = *failure;
+                    emit(format!(
+                        "{} could not remove {display_name}: {error}",
+                        style("!").yellow().bold(),
+                    ));
                     outcome.failed = true;
                     continue;
                 }
             };
             for line in reporting::removal_outcome(&report) {
-                outcome.report(line, &mut emit);
+                emit(line);
+            }
+            if local.contains_cwd && report.worktree_removed() {
+                outcome.handoff.clone_from(&self.main);
             }
 
             if report.worktree_removed()
@@ -686,30 +691,24 @@ impl Pending {
             };
             let local_ref = format!("refs/heads/{display_name}");
             if !local_deleted || git::resolve(None, &local_ref).is_some() {
-                outcome.report(reporting::upstream_kept_local(upstream), &mut emit);
+                emit(reporting::upstream_kept_local(upstream));
                 outcome.failed = true;
                 continue;
             }
             let remote_outcome = match git::delete_remote_branch(upstream) {
                 Ok(remote_outcome) => remote_outcome,
                 Err(error) => {
-                    outcome.report(
-                        format!(
-                            "{} could not delete upstream {}/{}: {error}",
-                            style("!").yellow().bold(),
-                            upstream.remote,
-                            upstream.branch,
-                        ),
-                        &mut emit,
-                    );
+                    emit(format!(
+                        "{} could not delete upstream {}/{}: {error}",
+                        style("!").yellow().bold(),
+                        upstream.remote,
+                        upstream.branch,
+                    ));
                     outcome.failed = true;
                     continue;
                 }
             };
-            outcome.report(
-                reporting::upstream_outcome(upstream, &remote_outcome),
-                &mut emit,
-            );
+            emit(reporting::upstream_outcome(upstream, &remote_outcome));
             if !matches!(
                 remote_outcome,
                 git::RemoteBranchDeleteOutcome::Deleted
@@ -736,24 +735,34 @@ impl UpstreamChoice {
     }
 }
 
+/// A fatal removal error plus the shell handoff earned before it occurred.
+#[derive(Debug)]
+pub(crate) struct FinishFailure {
+    error: Error,
+    handoff: Option<PathBuf>,
+}
+
+impl FinishFailure {
+    fn new(error: Error, handoff: Option<PathBuf>) -> Self {
+        Self { error, handoff }
+    }
+
+    pub(crate) fn handoff(&self) -> Option<&Path> {
+        self.handoff.as_deref()
+    }
+
+    pub(crate) fn into_error(self) -> Error {
+        self.error
+    }
+}
+
 /// Everything the caller must render or perform after mutation.
 pub(crate) struct Outcome {
-    lines: Vec<String>,
     failed: bool,
     handoff: Option<PathBuf>,
 }
 
 impl Outcome {
-    fn report(&mut self, line: String, emit: &mut impl FnMut(&str)) {
-        emit(&line);
-        self.lines.push(line);
-    }
-
-    #[cfg(test)]
-    pub(crate) fn lines(&self) -> &[String] {
-        &self.lines
-    }
-
     pub(crate) fn failed(&self) -> bool {
         self.failed
     }
@@ -765,8 +774,8 @@ impl Outcome {
 
 pub(crate) fn assess(request: Request) -> AppResult<Assessment> {
     match request {
-        Request::Stale(request) => Ok(assess_stale(request)),
         Request::Branches(request) => assess_branches(request),
+        Request::Stale(request) => Ok(assess_stale(request)),
         Request::Worktrees(request) => assess_worktrees(request),
     }
 }
@@ -1201,6 +1210,12 @@ struct Report<'a> {
     branch: Option<git::BranchDeleteOutcome>,
 }
 
+#[derive(Debug)]
+struct RemovalFailure<'a> {
+    error: Error,
+    report: Report<'a>,
+}
+
 impl Report<'_> {
     /// Whether the worktree itself went. False covers both a target that never
     /// had one and one git refused to remove — in either case there is no
@@ -1308,7 +1323,7 @@ fn remove<'a>(
     target: Target<'a>,
     license: &License,
     steps: &mut impl Steps,
-) -> AppResult<Report<'a>> {
+) -> Result<Report<'a>, Box<RemovalFailure<'a>>> {
     let mut report = Report {
         target,
         worktree: None,
@@ -1316,7 +1331,10 @@ fn remove<'a>(
     };
 
     if let Some(path) = target.path() {
-        report.worktree = Some(steps.remove_worktree(path, license.worktree)?);
+        report.worktree = match steps.remove_worktree(path, license.worktree) {
+            Ok(outcome) => Some(outcome),
+            Err(error) => return Err(Box::new(RemovalFailure { error, report })),
+        };
         if !report.worktree_removed() {
             return Ok(report);
         }
@@ -1336,18 +1354,22 @@ fn remove<'a>(
         // that grows a commit in between is not discarded unwarned. The anchor
         // is checked here, since no single git command can speak for two refs.
         let outcome = match &license.branch {
-            BranchLicense::Outright => steps.delete_branch(branch, true)?,
+            BranchLicense::Outright => steps.delete_branch(branch, true),
             BranchLicense::Proven(proof)
                 if steps.resolve(&proof.anchor_ref).as_ref() == Some(&proof.anchor_tip) =>
             {
-                match steps.delete_branch_at(branch, &proof.tip)? {
-                    Some(outcome) => outcome,
-                    None => steps.delete_branch(branch, false)?,
+                match steps.delete_branch_at(branch, &proof.tip) {
+                    Ok(Some(outcome)) => Ok(outcome),
+                    Ok(None) => steps.delete_branch(branch, false),
+                    Err(error) => Err(error),
                 }
             }
-            BranchLicense::None | BranchLicense::Proven(_) => steps.delete_branch(branch, false)?,
+            BranchLicense::None | BranchLicense::Proven(_) => steps.delete_branch(branch, false),
         };
-        report.branch = Some(outcome);
+        report.branch = match outcome {
+            Ok(outcome) => Some(outcome),
+            Err(error) => return Err(Box::new(RemovalFailure { error, report })),
+        };
     }
 
     Ok(report)
@@ -1709,15 +1731,15 @@ mod tests {
     /// was forced.
     #[derive(Debug, PartialEq, Eq)]
     enum Call {
-        RemoveWorktree {
-            force: bool,
-        },
         DeleteBranch {
             force: bool,
         },
         /// The pinned delete, and whether the branch was still there to take it.
         DeleteBranchAt {
             hit: bool,
+        },
+        RemoveWorktree {
+            force: bool,
         },
     }
 
@@ -1727,6 +1749,7 @@ mod tests {
         worktree: git::WorktreeRemoveOutcome,
         worktree_error: bool,
         branch: git::BranchDeleteOutcome,
+        branch_error: bool,
         /// What the refs read when [`remove`] asks. The proof tests move one out
         /// from under the license and leave the other where it was.
         refs: HashMap<String, String>,
@@ -1741,6 +1764,7 @@ mod tests {
                 worktree: git::WorktreeRemoveOutcome::Removed,
                 worktree_error: false,
                 branch: git::BranchDeleteOutcome::Deleted,
+                branch_error: false,
                 refs: HashMap::from([
                     ("refs/heads/feature".to_string(), PROVEN_TIP.to_string()),
                     (ANCHOR_REF.to_string(), PROVEN_ANCHOR.to_string()),
@@ -1780,6 +1804,12 @@ mod tests {
             force: bool,
         ) -> AppResult<git::BranchDeleteOutcome> {
             self.calls.push(Call::DeleteBranch { force });
+            if self.branch_error {
+                return Err(Error::Git {
+                    command: "branch delete".to_string(),
+                    message: "could not start git".to_string(),
+                });
+            }
             Ok(self.branch.clone())
         }
 
@@ -1818,6 +1848,27 @@ mod tests {
         }
     }
 
+    fn pending_with_local(
+        kind: RequestKind,
+        target: OwnedTarget,
+        contains_cwd: bool,
+        main: Option<PathBuf>,
+    ) -> Pending {
+        Pending {
+            kind,
+            locals: vec![PlannedLocal {
+                target,
+                license: License::forced(),
+                preparation_failure: None,
+                contains_cwd,
+                upstream: None,
+            }],
+            main,
+            upstream_offers: Vec::new(),
+            notices: Vec::new(),
+        }
+    }
+
     #[test]
     fn branch_removal_crosses_the_staged_interface() {
         let _lock = REPO_LOCK.lock().expect("repository lock");
@@ -1842,11 +1893,12 @@ mod tests {
         let pending = assessment
             .choose(LocalChoice::forced(named.id()))
             .expect("pending Removal");
+        let mut lines = Vec::new();
         let outcome = pending
-            .finish(UpstreamChoice::keep(), |_| {})
+            .finish(UpstreamChoice::keep(), |line| lines.push(line))
             .expect("Removal outcome");
 
-        assert_eq!(plain(outcome.lines()), ["✓ deleted feature"]);
+        assert_eq!(plain(&lines), ["✓ deleted feature"]);
         assert!(!outcome.failed());
         assert!(git::resolve(None, "refs/heads/feature").is_none());
     }
@@ -1880,12 +1932,13 @@ mod tests {
         let pending = assessment
             .choose(LocalChoice::forced_picked(vec![id]))
             .expect("pending Removal");
+        let mut lines = Vec::new();
         let outcome = pending
-            .finish(UpstreamChoice::keep(), |_| {})
+            .finish(UpstreamChoice::keep(), |line| lines.push(line))
             .expect("Removal outcome");
 
         assert_eq!(
-            plain(outcome.lines()),
+            plain(&lines),
             [format!(
                 "✓ removed worktree at {}, deleted feature",
                 display_path(&displayed_path)
@@ -1913,22 +1966,15 @@ mod tests {
 
     #[test]
     fn a_fatal_worktree_error_escapes_the_staged_removal() {
-        let pending = Pending {
-            kind: RequestKind::Worktrees,
-            locals: vec![PlannedLocal {
-                target: OwnedTarget::Held {
-                    name: "feature".to_string(),
-                    path: PathBuf::from("/tmp/wt"),
-                },
-                license: License::forced(),
-                preparation_failure: None,
-                contains_cwd: false,
-                upstream: None,
-            }],
-            main: None,
-            upstream_offers: Vec::new(),
-            notices: Vec::new(),
-        };
+        let pending = pending_with_local(
+            RequestKind::Worktrees,
+            OwnedTarget::Held {
+                name: "feature".to_string(),
+                path: PathBuf::from("/tmp/wt"),
+            },
+            false,
+            None,
+        );
         let mut steps = FakeSteps::new();
         steps.worktree_error = true;
 
@@ -1938,8 +1984,61 @@ mod tests {
         };
 
         assert_eq!(
-            error.to_string(),
+            error.into_error().to_string(),
             "git worktree remove: could not start git"
+        );
+    }
+
+    #[test]
+    fn a_fatal_stale_error_escapes_the_staged_removal() {
+        let pending = pending_with_local(
+            RequestKind::Stale,
+            OwnedTarget::Branch {
+                name: "feature".to_string(),
+            },
+            false,
+            None,
+        );
+        let mut steps = FakeSteps::new();
+        steps.branch_error = true;
+
+        let Err(error) = pending.finish_with_steps(UpstreamChoice::keep(), &mut steps, |_| {})
+        else {
+            panic!("process-level git errors stay fatal during stale Removal");
+        };
+
+        assert_eq!(
+            error.into_error().to_string(),
+            "git branch delete: could not start git"
+        );
+    }
+
+    #[test]
+    fn a_fatal_error_after_removing_the_cwd_worktree_preserves_the_handoff() {
+        let _lock = REPO_LOCK.lock().expect("repository lock");
+        let repo = Repo::new();
+        let main = repo.path().to_path_buf();
+        let pending = pending_with_local(
+            RequestKind::Worktrees,
+            OwnedTarget::Held {
+                name: "feature".to_string(),
+                path: PathBuf::from("/tmp/wt"),
+            },
+            true,
+            Some(main.clone()),
+        );
+        let mut steps = FakeSteps::new();
+        steps.branch_error = true;
+
+        let Err(failure) = pending.finish_with_steps(UpstreamChoice::keep(), &mut steps, |_| {})
+        else {
+            panic!("the branch process failure should stay fatal");
+        };
+
+        assert_eq!(failure.handoff(), Some(main.as_path()));
+        assert_eq!(
+            failure.into_error().to_string(),
+            "git branch delete: could not start git"
         );
     }
 
