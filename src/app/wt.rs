@@ -319,12 +319,14 @@ fn select_for_removal(
                 .collect::<Vec<_>>(),
         );
         let defaults = vec![false; items.len()];
+        let disabled = vec![false; items.len()];
         let legend = super::risk_legend(risks);
         return multi_select(
             "Remove worktrees (space to toggle, →/← all/none)",
             legend.as_deref(),
             &items,
             &defaults,
+            &disabled,
             keys,
         );
     };

@@ -27,7 +27,7 @@ A branch whose whole diff against the anchor is already in the anchor, under som
 _Avoid_: Squashed, duplicate, redundant
 
 **Kept**:
-Pinned out of the cleanup prompt, via `perch.keep` config or by being the remote's default branch.
+Pinned out of deletion pickers, via `perch.keep` config or by being the remote's default branch. A precisely named local branch is still removable; a remote default branch never is.
 _Avoid_: Protected, ignored, excluded
 
 ### Worktrees
@@ -51,29 +51,29 @@ _Avoid_: Root, primary, parent
 ### Destruction
 
 **Risk**:
-What removing something would irreversibly destroy — a dirty worktree's files, an unmerged branch's commits, or both. Something with no risk can be removed without asking. An unmerged branch that is *Equivalent* destroys nothing, so it carries no risk and draws no *Marker*.
+What removing something would irreversibly destroy: a dirty worktree's files, an unmerged branch's commits, or a shared upstream ref. Something with no risk can be removed without asking. An unmerged branch that is *Equivalent* destroys nothing, so it carries no risk and draws no *Marker*; an upstream deletion always carries risk because the local merge judgement assumes that ref survives.
 _Avoid_: Danger, safety, hazard
 
 **Marker**:
-The rendering of a risk in a picker row: `●` for dirty, `↑N` for unmerged. A marker is a warning, and per [ADR 0001](./docs/adr/0001-warned-means-forceable.md) a shown warning is what licenses forcing. `wt ls` draws from the same vocabulary, so a glyph looks the same wherever it appears — but `↑N` there counts commits the upstream lacks, which is not the same judgement as *Unmerged* and licenses nothing. Sharing the glyphs is not sharing the facts.
+The rendering of a risk in a picker row: `●` for dirty, `↑N` for unmerged. A marker is a warning, and per [ADR 0001](./docs/adr/0001-warned-means-forceable.md) a shown warning is what licenses forcing. Upstream deletion has no marker: its separate picker or confirmation is the warning. `wt ls` draws from the same vocabulary, so a glyph looks the same wherever it appears — but `↑N` there counts commits the upstream lacks, which is not the same judgement as *Unmerged* and licenses nothing. Sharing the glyphs is not sharing the facts.
 _Avoid_: Flag, badge, indicator
 
 **Forcing**:
-Destroying something git would otherwise protect — `worktree remove --force`, `branch -D`. Only ever licensed: by a warning the user has already seen, or — for a branch alone — by proof that it is *Equivalent*.
+Destroying something git would otherwise protect, or skipping Perch's upstream-deletion confirmation. Only ever licensed by a warning the user has already seen, an explicit `--force`, or, for a local branch alone, proof that it is *Equivalent*.
 _Avoid_: Overriding, ignoring
 
 **License**:
-What permits forcing: the markers already shown to the user, an explicit `--force`, or proof that a branch is *Equivalent*. It covers what was warned about or proven and nothing else, so anything that became risky after its row was drawn meets git's own guard instead — as does a proof whose ground has shifted, since equivalence is established on a pair of commits and lapses when either the branch or the *Anchor* moves off it. See [ADR 0001](./docs/adr/0001-warned-means-forceable.md) and [ADR 0005](./docs/adr/0005-proof-of-equivalence-is-a-license.md).
+What permits forcing: the markers already shown to the user, the separate upstream choice, an explicit `--force`, or proof that a branch is *Equivalent*. It covers what was warned about or proven and nothing else, so anything that became risky after its row was drawn meets git's own guard instead — as does a proof whose ground has shifted, since equivalence is established on a pair of commits and lapses when either the branch or the *Anchor* moves off it. See [ADR 0001](./docs/adr/0001-warned-means-forceable.md), [ADR 0005](./docs/adr/0005-proof-of-equivalence-is-a-license.md), and [ADR 0009](./docs/adr/0009-branch-removal-earns-a-subverb.md).
 _Avoid_: Permission, approval, consent
 
 **Removal**:
-Destroying a branch, a worktree, or a branch together with the worktree holding it. The worktree goes first, and one that refuses to go leaves its branch alone — git will not delete a branch something still holds.
+Destroying a local branch, an upstream branch, a worktree, or a local branch together with the worktree holding it. A worktree goes before the local branch it holds; an upstream branch goes only after its selected local branch, and only while the upstream still stands at the tip the user was shown.
 _Avoid_: Deletion (reserved for branches), cleanup, teardown
 
 ### Targets
 
 **Verb**:
-Which of three intents a command carries: bare `perch` goes to the branch wherever it lives, `br` checks it out in the worktree you're in, `wt` gives it one of its own. The verb decides what happens to a *Held* branch and nothing else, since git leaves exactly one move legal in every other case. That holds in the *Catalogue* too: all three verbs draw the same list, and the only row any of them differs over is a held one. See [ADR 0007](./docs/adr/0007-three-verbs-one-per-intent.md) and [ADR 0008](./docs/adr/0008-one-list-whichever-verb-is-picking.md).
+Which of three navigation intents a command carries: bare `perch` goes to the branch wherever it lives, `br` checks it out in the worktree you're in, `wt` gives it one of its own. The verb decides what happens to a *Held* branch and nothing else, since git leaves exactly one move legal in every other case. That holds in the *Catalogue* too: all three verbs draw the same list, and the only row any of them differs over is a held one. See [ADR 0007](./docs/adr/0007-three-verbs-one-per-intent.md) and [ADR 0008](./docs/adr/0008-one-list-whichever-verb-is-picking.md).
 _Avoid_: Mode, action
 
 **Catalogue**:
@@ -89,11 +89,11 @@ Of a *Kept* branch, existing neither locally nor on the remote — so it is list
 _Avoid_: Missing (reserved for worktrees), gone (reserved for a *Ground*), unavailable
 
 **Subverb**:
-A word `wt` reads before it reads a branch name: `ls` and `rm`, plus the retired `list` and `remove`, which are refused rather than taken for branches. Only `wt` has any — `br` reads everything after it as a branch. Collision is positional, and `--` is needed only where the dispatcher would eat the spelling: after `wt` for a subverb, at the top level for a *Verb*. Everywhere else the bare name reaches the branch, so `perch list`, `perch br list` and `perch br wt` all work as written.
+A word a *Verb* reads before it reads a branch name. `br` reads `rm`; `wt` reads `ls` and `rm`, plus the retired `list` and `remove`, which are refused rather than taken for branches. Collision is positional, and `--` is needed wherever the dispatcher would eat the spelling: after `br` or `wt` for a subverb, at the top level for a *Verb*. Everywhere else the bare name reaches the branch, so `perch list`, `perch br list` and `perch br wt` all work as written.
 _Avoid_: Subcommand (reserved for the *Verb*), flag, option
 
 **`.`**:
-The one you're in. `perch .` refreshes the current branch; `perch wt rm .` removes the current worktree.
+The one you're in. `perch .` refreshes the current branch; `perch wt rm .` removes the current worktree. `br rm .` has no special meaning because a branch cannot delete itself out from under its worktree.
 _Avoid_: Here, current, self
 
 **Handoff**:

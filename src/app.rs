@@ -5,6 +5,7 @@ use indicatif::ProgressBar;
 
 use crate::{AppResult, Error, git};
 
+pub mod br;
 pub mod complete;
 pub(crate) mod hook;
 pub(crate) mod marker;
@@ -692,6 +693,7 @@ pub(crate) fn prompt_delete_stale_branches(
         legend.as_deref(),
         &items,
         &defaults,
+        &vec![false; items.len()],
         keys,
     )?;
 

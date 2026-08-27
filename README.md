@@ -103,6 +103,23 @@ Local
 
 `perch .` fetches and brings the branch you're on up to date with its remote. A clean branch integrates with no prompt — fast-forwarding, or (when it has diverged, e.g. after rebasing through a web UI) rebasing your local commits onto the remote, which drops any already upstream and replays genuine new work. Only when the working tree is dirty does it stop to ask: **keep** the uncommitted work (stash, rebase, restore) or **discard** it (hard reset to the remote).
 
+## Removing branches
+
+```sh
+perch br rm                    # multi-select local branches
+perch br rm feature            # remove one local branch
+perch br rm feature --upstream # offer origin/feature too, when it is the configured upstream
+perch br rm feature --upstream --force
+```
+
+The picker lists every local branch. The branch you're on, branches held by another worktree, the remote's default branch, and branches named by `perch.keep` stay visible but cannot be selected. A precisely named default or kept branch can still be removed when no worktree holds it. A held branch points to `wt rm`, which owns removing the worktree along with its branch.
+
+Local rows use the same `↑N` marker and main-worktree merge judgement as `wt rm`. A named unmerged branch asks before using `git branch -D`; a non-interactive run needs `--force`. `br rm` does not apply the stronger squash/rebase equivalence proof used by stale cleanup.
+
+An upstream is offered only when the local branch explicitly tracks a same-named branch, such as `feature` tracking `origin/feature`. Perch never guesses from `origin`, never follows `feature` to a differently named upstream such as `origin/main`, and never offers a remote's default branch. Upstream deletion has its own default-off choice because removing both refs may discard the last names for commits that local deletion alone would preserve. Perch deletes the local branch first, then deletes the upstream only if its server tip has not changed since the choice was shown.
+
+`--upstream` preselects eligible upstreams but keeps the confirmation. `--upstream --force` skips it; both are required outside a terminal. If you really have a branch named `rm`, `perch br -- rm` checks it out and `perch br rm rm` deletes it.
+
 ## Worktrees
 
 ```sh

@@ -40,6 +40,24 @@ function __perch_wt_rm_wants_target
     return 0
 end
 
+function __perch_br_rm_wants_target
+    set -l tokens (commandline -opc)
+    test (count $tokens) -ge 3; or return 1
+    test "$tokens[2]" = br; and test "$tokens[3]" = rm; or return 1
+    if test (count $tokens) -gt 3
+        for token in $tokens[4..-1]
+            string match --quiet -- '-*' $token; or return 1
+        end
+    end
+    return 0
+end
+
+function __perch_in_br_rm
+    set -l tokens (commandline -opc)
+    test (count $tokens) -ge 3; or return 1
+    test "$tokens[2]" = br; and test "$tokens[3]" = rm
+end
+
 # True while the command is in `wt`'s option-parsing region. Unlike
 # `__fish_seen_subcommand_from`, this checks the verb's position, so a branch
 # called `wt` under `br` cannot make the option appear. A regular branch may
@@ -78,9 +96,11 @@ complete -c perch -f -n '__fish_is_nth_token 1' -a 'wt' -d 'Worktree commands'
 # misses, and its own rule below takes it.
 complete -c perch -f -n '__perch_after_double_dash' -a '(__perch_offers --)'
 
-# After `br`: branches. Unlike bash and zsh, fish has no fall-through case, so
+# After `br`: its subverb and branches. Unlike bash and zsh, fish has no
+# fall-through case, so
 # every verb needs its own rule or the second token completes to nothing. `br`
-# has no subverbs, so nothing is filtered — `perch br wt` reaches a branch `wt`.
+# `perch br wt` reaches a branch `wt`, while `rm` needs `br -- rm`.
+complete -c perch -f -n '__fish_seen_subcommand_from br; and __fish_is_nth_token 2; and not __perch_after_double_dash' -a 'rm' -d 'Remove local branches'
 complete -c perch -f -n '__fish_seen_subcommand_from br; and __fish_is_nth_token 2' -a '(__perch_offers br)'
 
 # After `wt`: subverbs + the branches reachable without `--`. `__fish_is_nth_token`
@@ -93,6 +113,12 @@ complete -c perch -f -l no-switch -d 'Create or find the worktree without switch
 
 # After `wt rm`: the worktrees, until one has been taken.
 complete -c perch -f -n '__perch_wt_rm_wants_target' -a '(__perch_offers wt rm)'
+
+# After `br rm`: local branches until a target has been taken; flags remain
+# valid on either side of it.
+complete -c perch -f -n '__perch_br_rm_wants_target' -a '(__perch_offers br rm)'
+complete -c perch -f -n '__perch_in_br_rm' -l upstream -d 'Also remove explicitly configured same-named upstreams'
+complete -c perch -f -n '__perch_in_br_rm' -s f -l force -d 'Skip destructive confirmations'
 
 # `br` and `wt` are the shell wrapper's shorthand for `perch br` and `perch wt`.
 # `--wraps` takes a command prefix, so every rule above applies to them at the

@@ -4,10 +4,11 @@
 //! as a branch, so it is the only thing that can say which branches are
 //! reachable at which position. Every position on the command line answers
 //! `--complete` with what it would accept there — worktree names after
-//! `wt rm`, branch names everywhere else — and each subtracts the words its own
+//! `wt rm`, local branch names after `br rm`, and branch names everywhere else —
+//! and each subtracts the words its own
 //! `match` arm takes first.
 //!
-//! That subtraction reads the words declared on `Verb` and `wt::Subverb`
+//! That subtraction reads the words declared on `Verb`, `br::Subverb`, and `wt::Subverb`
 //! themselves, the same ones the dispatcher parses through, rather than a list
 //! restated in each completion file. The `spelled!` macro makes the word part
 //! of the variant declaration, so there is no separate list of words for a new
@@ -19,7 +20,7 @@
 
 use crate::{AppResult, git};
 
-use super::{Verb, wt};
+use super::{Verb, br, wt};
 
 /// Where on the command line the next word would be read as a branch name,
 /// which is the whole of what decides the words eaten before it.
@@ -27,7 +28,7 @@ use super::{Verb, wt};
 pub enum Position {
     /// `perch <branch>`, where a *Verb* is read first.
     Bare,
-    /// `perch br <branch>`. `br` has no *Subverb*s, so nothing is.
+    /// `perch br <branch>`, where `rm` is read first.
     Br,
     /// `perch wt <branch>`, where a *Subverb* is read first.
     Wt,
@@ -46,7 +47,8 @@ impl Position {
     fn eats(self, word: &str) -> bool {
         match self {
             Position::Bare => Verb::parse(word).is_some(),
-            Position::Br | Position::Escaped => false,
+            Position::Br => br::Subverb::parse(word).is_some(),
+            Position::Escaped => false,
             Position::Wt => wt::Subverb::parse(word).is_some(),
         }
     }

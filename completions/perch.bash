@@ -59,6 +59,14 @@ _perch_wt_rm_wants_target() {
   return 0
 }
 
+_perch_br_rm_wants_target() {
+  local word
+  for word in "$@"; do
+    [[ "$word" == -* ]] || return 1
+  done
+  return 0
+}
+
 _perch_completions() {
   # `br` and `wt` are the shell wrapper's shorthand for `perch br` and `perch wt`,
   # so every rule below reads a word list with the verb spelled out. One offset
@@ -83,6 +91,16 @@ _perch_completions() {
   local prev="${cmdline[pos-1]}"
   local verb="${cmdline[1]}"
   local subverb="${cmdline[2]}"
+
+  if [[ "$verb" == "br" && "$subverb" == "rm" ]] && (( pos >= 3 )); then
+    COMPREPLY=()
+    if _perch_br_rm_wants_target "${cmdline[@]:3:pos-3}"; then
+      _perch_reply "$cur" < <(printf '%s\n' --upstream --force; _perch_offers br rm)
+    else
+      _perch_reply "$cur" < <(printf '%s\n' --upstream --force)
+    fi
+    return
+  fi
 
   if [[ "$verb" == "wt" && "$subverb" == "rm" ]] && (( pos >= 3 )); then
     if _perch_wt_rm_wants_target "${cmdline[@]:3:pos-3}"; then
@@ -119,7 +137,7 @@ _perch_completions() {
       if [[ "$verb" == "wt" ]]; then
         _perch_reply "$cur" < <(printf '%s\n' ls rm --no-switch; _perch_offers wt)
       elif [[ "$verb" == "br" ]]; then
-        _perch_reply "$cur" < <(_perch_offers br)
+        _perch_reply "$cur" < <(printf '%s\n' rm; _perch_offers br)
       fi
       ;;
     3)

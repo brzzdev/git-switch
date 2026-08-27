@@ -71,6 +71,19 @@ pub enum Error {
     )]
     HeldByWorktree { branch: String, path: String },
 
+    #[error("{branch} is checked out at {path}; {hint}")]
+    HeldForRemoval {
+        branch: String,
+        path: String,
+        hint: String,
+    },
+
+    #[error("branch '{branch}' does not exist locally")]
+    LocalBranchNotFound { branch: String },
+
+    #[error("{branch} has no removable upstream: {reason}")]
+    NoRemovableUpstream { branch: String, reason: String },
+
     #[error("no branches found")]
     NoBranches,
 
@@ -97,6 +110,12 @@ pub enum Error {
     /// there was no terminal to warn on or ask in, and `--force` wasn't given.
     #[error("{0}")]
     Unconfirmed(String),
+
+    #[error("invalid `perch br rm` invocation: {0}")]
+    BrRmUsage(String),
+
+    #[error("one or more requested removals failed")]
+    RemovalFailed,
 
     /// A branch picked from a row went away between the list being drawn and
     /// the selection being resolved. Its own error because the alternative is
