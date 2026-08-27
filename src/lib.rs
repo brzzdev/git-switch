@@ -56,6 +56,9 @@ pub enum Error {
     #[error(transparent)]
     Io(#[from] std::io::Error),
 
+    #[error("invalid `perch br rm` invocation: {0}")]
+    BrRmUsage(String),
+
     #[error("not on a branch (detached HEAD); nothing to refresh")]
     Detached,
 
@@ -81,11 +84,11 @@ pub enum Error {
     #[error("branch '{branch}' does not exist locally")]
     LocalBranchNotFound { branch: String },
 
-    #[error("{branch} has no removable upstream: {reason}")]
-    NoRemovableUpstream { branch: String, reason: String },
-
     #[error("no branches found")]
     NoBranches,
+
+    #[error("{branch} has no removable upstream: {reason}")]
+    NoRemovableUpstream { branch: String, reason: String },
 
     /// One of the `wt` subverb spellings dropped at 2.0.0. Worth its own error
     /// because `wt` would otherwise read the retired word as a branch to create
@@ -106,16 +109,13 @@ pub enum Error {
     #[error("invalid number from git: {0}")]
     ParseInt(#[from] std::num::ParseIntError),
 
+    #[error("one or more requested removals failed")]
+    RemovalFailed,
+
     /// A destructive action was declined because its risk could not be shown:
     /// there was no terminal to warn on or ask in, and `--force` wasn't given.
     #[error("{0}")]
     Unconfirmed(String),
-
-    #[error("invalid `perch br rm` invocation: {0}")]
-    BrRmUsage(String),
-
-    #[error("one or more requested removals failed")]
-    RemovalFailed,
 
     /// A branch picked from a row went away between the list being drawn and
     /// the selection being resolved. Its own error because the alternative is

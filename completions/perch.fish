@@ -86,9 +86,9 @@ complete -c perch -f -n '__fish_is_nth_token 1' -a 'wt' -d 'Worktree commands'
 complete -c perch -f -n '__perch_after_double_dash' -a '(__perch_offers --)'
 
 # After `br`: its subverb and branches. Unlike bash and zsh, fish has no
-# fall-through case, so
-# every verb needs its own rule or the second token completes to nothing. `br`
-# `perch br wt` reaches a branch `wt`, while `rm` needs `br -- rm`.
+# fall-through case, so every verb needs its own rule or the second token
+# completes to nothing. `perch br wt` reaches a branch `wt`, while a branch
+# named `rm` needs `perch br -- rm`.
 complete -c perch -f -n '__fish_seen_subcommand_from br; and __fish_is_nth_token 2; and not __perch_after_double_dash' -a 'rm' -d 'Remove local branches'
 complete -c perch -f -n '__fish_seen_subcommand_from br; and __fish_is_nth_token 2' -a '(__perch_offers br)'
 

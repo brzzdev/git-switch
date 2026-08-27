@@ -2159,6 +2159,29 @@ fn br_rm_picker_shows_but_does_not_select_disabled_branches() {
 }
 
 #[test]
+fn br_rm_named_kept_branch_is_removable_when_unheld() {
+    let (_bare, work) = setup();
+    git(work.path(), &["branch", "kept"]);
+    git(work.path(), &["config", "perch.keep", "kept"]);
+
+    let output = perch_args(work.path(), &["br", "rm", "kept"]);
+
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+    assert!(!local_branch_exists(work.path(), "kept"));
+}
+
+#[test]
+fn br_rm_named_local_default_branch_is_removable_when_unheld() {
+    let (_bare, work) = setup();
+    git(work.path(), &["switch", "-c", "topic"]);
+
+    let output = perch_args(work.path(), &["br", "rm", "main"]);
+
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+    assert!(!local_branch_exists(work.path(), "main"));
+}
+
+#[test]
 fn br_rm_completion_lists_local_branches_only() {
     let (_bare, work) = setup();
     git(work.path(), &["branch", "local"]);

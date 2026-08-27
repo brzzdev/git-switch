@@ -68,6 +68,13 @@ struct UpstreamChoice {
     upstream: git::RemoteBranch,
 }
 
+#[derive(Clone, Copy)]
+struct UpstreamSelection {
+    target_was_named: bool,
+    requested: bool,
+    interactive: bool,
+}
+
 #[derive(Default)]
 struct UpstreamPlan {
     selected: HashMap<usize, git::RemoteBranch>,
@@ -213,6 +220,8 @@ fn select_local(
 ) -> AppResult<Vec<usize>> {
     let Some(target) = options.target.as_deref() else {
         let Some(keys) = interactive_keys() else {
+            // Non-interactive (piped/CI): we can't prompt, so remove nothing rather
+            // than blocking on key input.
             return Ok(Vec::new());
         };
         let disabled: Vec<bool> = rows.iter().map(BranchRow::disabled).collect();
@@ -332,20 +341,23 @@ fn select_upstreams(
     selected: &[usize],
     options: &RmOptions,
 ) -> AppResult<UpstreamPlan> {
-    let interactive = interactive_term().is_some();
-    if !options.upstream && !interactive {
+    let selection = UpstreamSelection {
+        target_was_named: options.target.is_some(),
+        requested: options.upstream,
+        interactive: interactive_term().is_some(),
+    };
+    if !selection.requested && !selection.interactive {
         return Ok(UpstreamPlan::default());
     }
 
-    let named = options.target.is_some();
     let mut choices = Vec::new();
     let mut failures = HashMap::new();
     for &row in selected {
         let branch = &rows[row].name;
-        match upstream_choice(row, branch, named, options.upstream) {
+        match upstream_choice(row, branch, selection) {
             Ok(Some(upstream)) => choices.push(upstream),
             Ok(None) => {}
-            Err(error) if named => return Err(error),
+            Err(error) if selection.target_was_named => return Err(error),
             Err(error) => {
                 failures.insert(row, error.to_string());
             }
@@ -358,14 +370,14 @@ fn select_upstreams(
         });
     }
 
-    if options.force && options.upstream {
+    if options.force && selection.requested {
         return Ok(plan_all(choices, failures));
     }
-    if named {
-        return select_named_upstream(choices, failures, options.upstream, interactive);
+    if selection.target_was_named {
+        return select_named_upstream(choices, failures, selection);
     }
 
-    select_upstream_rows(choices, failures, options.upstream)
+    select_upstream_rows(choices, failures, selection.requested)
 }
 
 fn plan_all(choices: Vec<UpstreamChoice>, failures: HashMap<usize, String>) -> UpstreamPlan {
@@ -381,12 +393,11 @@ fn plan_all(choices: Vec<UpstreamChoice>, failures: HashMap<usize, String>) -> U
 fn select_named_upstream(
     choices: Vec<UpstreamChoice>,
     failures: HashMap<usize, String>,
-    requested: bool,
-    interactive: bool,
+    selection: UpstreamSelection,
 ) -> AppResult<UpstreamPlan> {
     let choice = &choices[0];
     eprintln!("{}", reporting::upstream_warning(&choice.upstream));
-    if !interactive {
+    if !selection.interactive {
         return Err(Error::Unconfirmed(
             "upstream deletion was requested without a terminal; pass --force to confirm it".into(),
         ));
@@ -396,7 +407,7 @@ fn select_named_upstream(
             "Delete upstream {}/{} too?",
             choice.upstream.remote, choice.upstream.branch
         ),
-        requested,
+        selection.requested,
     )? {
         Ok(plan_all(choices, failures))
     } else {
@@ -413,6 +424,8 @@ fn select_upstream_rows(
     requested: bool,
 ) -> AppResult<UpstreamPlan> {
     let Some(keys) = interactive_keys() else {
+        // Non-interactive (piped/CI): we can't prompt, so refuse an explicit
+        // request or keep every upstream rather than blocking on key input.
         return if requested {
             Err(Error::Unconfirmed(
                 "upstream deletion was requested without a terminal; pass --force to confirm it"
@@ -457,12 +470,11 @@ fn select_upstream_rows(
 fn upstream_choice(
     row: usize,
     branch: &str,
-    target_was_named: bool,
-    upstream_requested: bool,
+    selection: UpstreamSelection,
 ) -> AppResult<Option<UpstreamChoice>> {
     let upstream = match git::same_named_upstream(branch) {
         Ok(upstream) => upstream,
-        Err(error) if upstream_requested => return Err(error),
+        Err(error) if selection.requested => return Err(error),
         Err(error) => {
             eprintln!(
                 "{} could not read the upstream of {branch}: {error}; offering local removal only",
@@ -472,7 +484,7 @@ fn upstream_choice(
         }
     };
     let Some(upstream) = upstream else {
-        if target_was_named && upstream_requested {
+        if selection.target_was_named && selection.requested {
             return Err(Error::NoRemovableUpstream {
                 branch: branch.to_string(),
                 reason: "it has no explicit same-named upstream".into(),
@@ -485,7 +497,7 @@ fn upstream_choice(
             Ok(Some(UpstreamChoice { row, upstream }))
         }
         Ok(git::UpstreamInspection::Absent(upstream)) => {
-            if target_was_named {
+            if selection.target_was_named {
                 eprintln!(
                     "{} upstream {}/{} is already absent",
                     style("!").yellow().bold(),
@@ -496,7 +508,7 @@ fn upstream_choice(
             Ok(None)
         }
         Ok(git::UpstreamInspection::Default(upstream)) => {
-            if target_was_named && upstream_requested {
+            if selection.target_was_named && selection.requested {
                 return Err(Error::NoRemovableUpstream {
                     branch: branch.to_string(),
                     reason: format!(
@@ -512,7 +524,7 @@ fn upstream_choice(
                 "could not establish the default branch of {}",
                 upstream.remote
             );
-            if upstream_requested {
+            if selection.requested {
                 return Err(Error::NoRemovableUpstream {
                     branch: branch.to_string(),
                     reason,
@@ -524,7 +536,7 @@ fn upstream_choice(
             );
             Ok(None)
         }
-        Err(error) if upstream_requested => Err(error),
+        Err(error) if selection.requested => Err(error),
         Err(error) => {
             eprintln!(
                 "{} could not inspect the upstream of {branch}: {error}; offering local removal only",

@@ -59,7 +59,7 @@ The rendering of a risk in a picker row: `●` for dirty, `↑N` for unmerged. A
 _Avoid_: Flag, badge, indicator
 
 **Forcing**:
-Destroying something git would otherwise protect, or skipping Perch's upstream-deletion confirmation. Only ever licensed by a warning the user has already seen, an explicit `--force`, or, for a local branch alone, proof that it is *Equivalent*.
+Destroying something git would otherwise protect, or skipping Perch's upstream-deletion confirmation when `--upstream` also requests it. Only ever licensed by a warning the user has already seen, an explicit `--force`, or, for a local branch alone, proof that it is *Equivalent*.
 _Avoid_: Overriding, ignoring
 
 **License**:
