@@ -47,14 +47,19 @@ _perch_reply() {
   done
 }
 
-# `wt rm` reads its target as the first word after `rm` that isn't an option,
-# and takes its `--force` in either order, so a flag or a `--` leaves the slot
-# open while a bare word closes it. Words typed after a target are ignored.
-# Takes those in-between words as its arguments.
+# True while a removal still wants its one target. `--` closes option parsing,
+# so the following word counts as the target even when it begins with `-`.
+# Takes the words already typed after `rm` as its arguments.
 _perch_rm_wants_target() {
-  local word
+  local word reads_options=1
   for word in "$@"; do
-    [[ "$word" == -* ]] || return 1
+    if (( reads_options )) && [[ "$word" == -- ]]; then
+      reads_options=0
+    elif (( reads_options )) && [[ "$word" == -* ]]; then
+      continue
+    else
+      return 1
+    fi
   done
   return 0
 }

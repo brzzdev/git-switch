@@ -92,6 +92,10 @@ _Avoid_: Missing (reserved for worktrees), gone (reserved for a *Ground*), unava
 A word a *Verb* reads before it reads a branch name. `br` reads `rm`; `wt` reads `ls` and `rm`, plus the retired `list` and `remove`, which are refused rather than taken for branches. Collision is positional, and `--` is needed wherever the dispatcher would eat the spelling: after `br` or `wt` for a subverb, at the top level for a *Verb*. Everywhere else the bare name reaches the branch, so `perch list`, `perch br list` and `perch br wt` all work as written.
 _Avoid_: Subcommand (reserved for the *Verb*), flag, option
 
+**Grammar**:
+The rules that decide whether each command word names a *Verb*, *Subverb*, option, or branch. `--` stops command-word reading at its position, and destructive forms reject duplicate options, unknown options, and extra targets rather than ignoring them.
+_Avoid_: Dispatch, parsing
+
 **`.`**:
 The one you're in. `perch .` refreshes the current branch; `perch wt rm .` removes the current worktree. `br rm .` has no special meaning because a branch cannot delete itself out from under its worktree.
 _Avoid_: Here, current, self

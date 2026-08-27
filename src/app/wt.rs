@@ -1,4 +1,3 @@
-use std::collections::HashSet;
 use std::env;
 use std::path::{Path, PathBuf};
 
@@ -7,39 +6,16 @@ use indicatif::ProgressBar;
 
 use super::picker::{MultiItem, PickerOptions, Selection, interactive_keys, multi_select, pick};
 use super::{
-    Confirmation, CursorGuard, Verb, build_catalogue, confirm, display_path, fetch_and_ff,
-    handoff_cd, hook, marker, picker, prompt_delete_stale_branches, removal, report_update,
+    Confirmation, CursorGuard, build_catalogue, confirm, display_path, fetch_and_ff, handoff_cd,
+    hook, marker, picker, prompt_delete_stale_branches, removal, report_update,
 };
+use crate::grammar::{ShellHandoff, Verb, WorktreeRemoval};
 use crate::{AppResult, Error, git};
-
-spelled! {
-    /// A word `perch wt` reads as a *Subverb* before it reads it as a branch
-    /// name. `list` and `remove` are the spellings retired at 2.0.0: they are
-    /// eaten in order to be refused, which counts here for the same reason `ls`
-    /// does — a name offered where one of these sits reaches an error rather
-    /// than a branch.
-    #[derive(Clone, Copy)]
-    pub enum Subverb {
-        List = "list",
-        Ls = "ls",
-        Remove = "remove",
-        Rm = "rm",
-    }
-}
 
 enum Action {
     UseExisting(git::Worktree),
     CreateForBranch(String),
     CreateNewBranch(String),
-}
-
-/// Whether `wt` should print its destination for the shell wrapper to enter.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum ShellHandoff {
-    /// Print the destination path on stdout for the wrapper.
-    Emit,
-    /// Leave stdout empty so the wrapper keeps the caller's directory.
-    Suppress,
 }
 
 /// Whether the branch behind a name has to exist, which the fresh state alone
@@ -54,7 +30,7 @@ enum Existence {
     MustExist,
 }
 
-pub fn run(target: Option<&str>, shell_handoff: ShellHandoff) -> AppResult<()> {
+pub(crate) fn run(target: Option<&str>, shell_handoff: ShellHandoff) -> AppResult<()> {
     // A worktree whose directory was deleted by hand can't be entered, so its
     // branch is one to (re)create. `worktree_add`/`checkout` prune the stale
     // registration when it gets in the way.
@@ -144,7 +120,7 @@ pub fn run(target: Option<&str>, shell_handoff: ShellHandoff) -> AppResult<()> {
     Ok(())
 }
 
-pub fn run_ls() -> AppResult<()> {
+pub(crate) fn run_ls() -> AppResult<()> {
     let worktrees = git::worktree_list()?;
     let track = git::ahead_behind_map();
 
@@ -191,7 +167,7 @@ pub fn run_ls() -> AppResult<()> {
     Ok(())
 }
 
-pub fn run_rm(target: Option<&str>, force: bool) -> AppResult<()> {
+pub(crate) fn run_rm(options: &WorktreeRemoval) -> AppResult<()> {
     let worktrees = git::worktree_list()?;
     let cwd = env::current_dir()
         .ok()
@@ -203,9 +179,9 @@ pub fn run_rm(target: Option<&str>, force: bool) -> AppResult<()> {
         eprintln!("No worktrees to remove.");
         return Ok(());
     }
-    let choice = if let Some(name) = target {
+    let choice = if let Some(name) = options.target() {
         let named = assessment.named(name)?;
-        if force {
+        if options.force() {
             removal::LocalChoice::forced(named.id())
         } else if named.warnings().is_empty() {
             removal::LocalChoice::named(named.id())
@@ -247,7 +223,7 @@ pub fn run_rm(target: Option<&str>, force: bool) -> AppResult<()> {
             .into_iter()
             .map(|index| assessment.offers()[index].id())
             .collect();
-        if force {
+        if options.force() {
             removal::LocalChoice::forced_picked(ids)
         } else {
             removal::LocalChoice::picked(ids)
@@ -274,19 +250,14 @@ pub fn run_rm(target: Option<&str>, force: bool) -> AppResult<()> {
 /// in rather than any worktree in particular — [`select_for_removal`] resolves
 /// it from the cwd, and `rm_names` never sees it.
 ///
-/// Each name prints once. Most worktrees answer to one name twice over, their
-/// directory carrying their branch name; two worktrees under different parents
-/// can also share a basename, and `run_rm` takes the first one that matches.
-pub fn run_rm_complete() -> AppResult<()> {
+/// This returns the raw names in worktree order. Grammar removes duplicates and
+/// renders the newline-separated answer after Git facts return to it.
+pub(crate) fn removal_candidates() -> AppResult<Vec<String>> {
     let worktrees = git::worktree_list()?;
-    let mut seen = HashSet::new();
-    for name in removable(&worktrees)
+    Ok(removable(&worktrees)
         .flat_map(rm_names)
-        .filter(|name| seen.insert(*name))
-    {
-        println!("{name}");
-    }
-    Ok(())
+        .map(str::to_string)
+        .collect())
 }
 
 /// Fetch + fast-forward `branch` in the worktree at `path`. Unlike the in-place

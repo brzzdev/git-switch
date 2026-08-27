@@ -4,46 +4,10 @@
 
 use super::picker::{MultiItem, interactive_keys, multi_select};
 use super::{Confirmation, confirm, interactive_term, removal};
+use crate::grammar::BranchRemoval;
 use crate::{AppResult, Error, git};
 
-spelled! {
-    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-    pub enum Subverb {
-        Rm = "rm",
-    }
-}
-
-#[derive(Debug, Default, Eq, PartialEq)]
-pub struct RmOptions {
-    target: Option<String>,
-    force: bool,
-    upstream: bool,
-}
-
-impl RmOptions {
-    pub fn parse(args: &[String]) -> AppResult<Self> {
-        let mut options = Self::default();
-        for arg in args {
-            match arg.as_str() {
-                "--force" if !options.force => options.force = true,
-                "--upstream" if !options.upstream => options.upstream = true,
-                "--force" | "--upstream" => {
-                    return Err(Error::BrRmUsage(format!("duplicate option '{arg}'")));
-                }
-                _ if arg.starts_with('-') => {
-                    return Err(Error::BrRmUsage(format!("unknown option '{arg}'")));
-                }
-                _ if options.target.is_some() => {
-                    return Err(Error::BrRmUsage(format!("unexpected extra target '{arg}'")));
-                }
-                _ => options.target = Some(arg.clone()),
-            }
-        }
-        Ok(options)
-    }
-}
-
-pub fn run_rm(options: &RmOptions) -> AppResult<()> {
+pub(crate) fn run_rm(options: &BranchRemoval) -> AppResult<()> {
     let worktrees = git::worktree_list()?;
     let current = git::current_branch()?;
     let remote = git::current_remote(current.as_deref());
@@ -52,7 +16,7 @@ pub fn run_rm(options: &RmOptions) -> AppResult<()> {
         eprintln!("No local branches to remove.");
         return Ok(());
     }
-    let upstream = if options.upstream {
+    let upstream = if options.upstream() {
         removal::UpstreamInterest::Requested
     } else if interactive_term().is_some() {
         removal::UpstreamInterest::Offer
@@ -81,11 +45,11 @@ pub fn run_rm(options: &RmOptions) -> AppResult<()> {
 
 fn select_local(
     assessment: &removal::Assessment,
-    options: &RmOptions,
+    options: &BranchRemoval,
 ) -> AppResult<Option<removal::LocalChoice>> {
-    if let Some(target) = options.target.as_deref() {
+    if let Some(target) = options.target() {
         let named = assessment.named(target)?;
-        if options.force {
+        if options.force() {
             return Ok(Some(removal::LocalChoice::forced(named.id())));
         }
         if named.warnings().is_empty() {
@@ -131,7 +95,7 @@ fn select_local(
         .into_iter()
         .map(|index| assessment.offers()[index].id())
         .collect();
-    Ok(Some(if options.force {
+    Ok(Some(if options.force() {
         removal::LocalChoice::forced_picked(ids)
     } else {
         removal::LocalChoice::picked(ids)
@@ -140,12 +104,12 @@ fn select_local(
 
 fn select_upstream(
     pending: &removal::Pending,
-    options: &RmOptions,
+    options: &BranchRemoval,
 ) -> AppResult<Option<removal::UpstreamChoice>> {
     if pending.upstream_offers().is_empty() {
         return Ok(Some(removal::UpstreamChoice::keep()));
     }
-    if options.force && options.upstream {
+    if options.force() && options.upstream() {
         return Ok(Some(removal::UpstreamChoice::selected(
             pending
                 .upstream_offers()
@@ -154,7 +118,7 @@ fn select_upstream(
                 .collect(),
         )));
     }
-    if options.target.is_some() {
+    if options.target().is_some() {
         let offer = &pending.upstream_offers()[0];
         eprintln!("{}", offer.warning());
         if interactive_term().is_none() {
@@ -163,7 +127,7 @@ fn select_upstream(
                     .into(),
             ));
         }
-        return Ok(match confirm(offer.question(), options.upstream)? {
+        return Ok(match confirm(offer.question(), options.upstream())? {
             Confirmation::Accepted => Some(removal::UpstreamChoice::selected(vec![offer.id()])),
             Confirmation::Cancelled => None,
             Confirmation::Declined => Some(removal::UpstreamChoice::keep()),
@@ -171,7 +135,7 @@ fn select_upstream(
     }
 
     let Some(keys) = interactive_keys() else {
-        if options.upstream {
+        if options.upstream() {
             return Err(Error::Unconfirmed(
                 "upstream deletion was requested without a terminal; pass --force to confirm it"
                     .into(),
@@ -184,7 +148,7 @@ fn select_upstream(
         .iter()
         .map(|offer| MultiItem {
             label: offer.label().to_string(),
-            selected: options.upstream,
+            selected: options.upstream(),
             disabled: false,
         })
         .collect();
@@ -214,52 +178,5 @@ fn finish(pending: removal::Pending, upstream: removal::UpstreamChoice) -> AppRe
         Err(Error::RemovalFailed)
     } else {
         Ok(())
-    }
-}
-
-pub fn run_rm_complete() -> AppResult<()> {
-    let mut out = String::new();
-    for branch in git::local_branches()? {
-        out.push_str(&branch);
-        out.push('\n');
-    }
-    print!("{out}");
-    Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn strings(args: &[&str]) -> Vec<String> {
-        args.iter().map(|arg| (*arg).to_string()).collect()
-    }
-
-    #[test]
-    fn rm_options_accept_target_and_flags_in_any_order() {
-        let parsed = RmOptions::parse(&strings(&["--upstream", "topic", "--force"]))
-            .expect("valid options should parse");
-        assert_eq!(
-            parsed,
-            RmOptions {
-                target: Some("topic".into()),
-                force: true,
-                upstream: true,
-            }
-        );
-    }
-
-    #[test]
-    fn rm_options_reject_unknown_flags() {
-        let error = RmOptions::parse(&strings(&["--remote", "topic"]))
-            .expect_err("unknown option should fail");
-        assert!(error.to_string().contains("unknown option '--remote'"));
-    }
-
-    #[test]
-    fn rm_options_reject_extra_targets() {
-        let error =
-            RmOptions::parse(&strings(&["one", "two"])).expect_err("extra target should fail");
-        assert!(error.to_string().contains("unexpected extra target 'two'"));
     }
 }

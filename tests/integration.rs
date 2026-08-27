@@ -1808,6 +1808,54 @@ fn wt_rm_removes_worktree_and_deletes_branch() {
     );
 }
 
+#[test]
+fn wt_rm_rejects_malformed_invocations_before_removing_anything() {
+    let (_bare, parent, work) = setup_with_parent();
+    let path = add_worktree(&work, &parent, "feature");
+    let cases: &[(&[&str], &str)] = &[
+        (
+            &["wt", "rm", "--remote", "feature"],
+            "unknown option '--remote'",
+        ),
+        (
+            &["wt", "rm", "-f", "--force", "feature"],
+            "duplicate option '--force'",
+        ),
+        (
+            &["wt", "rm", "--", "feature", "other"],
+            "unexpected extra target 'other'",
+        ),
+    ];
+
+    for (args, expected) in cases {
+        let output = perch_args(&work, args);
+        assert!(!output.status.success(), "{args:?} should fail");
+        assert!(
+            stderr_str(&output).contains(expected),
+            "{args:?} should report {expected:?}; got: {}",
+            stderr_str(&output)
+        );
+        assert!(path.exists(), "{args:?} must not remove the worktree");
+    }
+}
+
+#[test]
+fn wt_rm_double_dash_allows_a_target_named_like_an_option() {
+    let (_bare, parent, work) = setup_with_parent();
+    git(&work, &["branch", "feature"]);
+    let path = parent.path().join("worktrees").join("repo").join("--force");
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    git(
+        &work,
+        &["worktree", "add", path.to_str().unwrap(), "feature"],
+    );
+
+    let output = perch_args(&work, &["wt", "rm", "--force", "--", "--force"]);
+
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+    assert!(!path.exists(), "the escaped target should be removed");
+}
+
 /// Risk is judged from the main worktree, so the delete must run there too.
 /// `git branch -d` consults HEAD only where no upstream is set, so an untracked
 /// branch is where the difference shows: removing it while standing in an

@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use console::{Key, Term, style};
 use indicatif::ProgressBar;
 
+use crate::grammar::{Invocation, Navigation, Verb};
 use crate::{AppResult, Error, git};
 
 pub mod br;
@@ -41,30 +42,6 @@ fn interactive_term() -> Option<Term> {
     term.is_term().then_some(term)
 }
 
-spelled! {
-    /// Which of three intents a command carries. A verb decides what happens to
-    /// a *Held* branch and nothing else, since git leaves exactly one move legal
-    /// in every other case — so it also decides which picker rows are inert, and
-    /// never which are listed. See [ADR
-    /// 0007](../docs/adr/0007-three-verbs-one-per-intent.md).
-    ///
-    /// The words beside the variants are the whole of what the dispatcher reads
-    /// as a verb, and so the whole of what the completions subtract.
-    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-    pub enum Verb {
-        /// Bare `perch <name>` — hand off to the worktree holding the branch.
-        /// No word of its own: being typed is not how you reach it, which is
-        /// why a branch named `br` or `wt` needs the `--` escape and one named
-        /// anything else does not.
-        Go,
-        /// `perch br <name>` — refuse, naming the path and the verb that
-        /// reaches it.
-        Here = "br",
-        /// `perch wt <name>` — give the branch a worktree of its own.
-        Worktree = "wt",
-    }
-}
-
 impl Verb {
     /// The picker's prompt. All three verbs draw the same list, so the prompt is
     /// the only thing on screen saying what selecting a row will do.
@@ -74,6 +51,29 @@ impl Verb {
             Verb::Here => "Check out here",
             Verb::Worktree => "Worktree",
         }
+    }
+}
+
+pub(crate) fn run_invocation(invocation: Invocation) -> AppResult<()> {
+    match invocation {
+        Invocation::Navigate(Navigation::Go(target)) => run(target.as_deref()),
+        Invocation::Navigate(Navigation::Here(target)) => run_br(target.as_deref()),
+        Invocation::Navigate(Navigation::Worktree {
+            target,
+            shell_handoff,
+        }) => wt::run(target.as_deref(), shell_handoff),
+        Invocation::RemoveBranches(removal) => br::run_rm(&removal),
+        Invocation::ListWorktrees => wt::run_ls(),
+        Invocation::RemoveWorktrees(removal) => wt::run_rm(&removal),
+        Invocation::Help(page) => {
+            print!("{}", page.text());
+            Ok(())
+        }
+        Invocation::Version => {
+            println!("perch {}", env!("CARGO_PKG_VERSION"));
+            Ok(())
+        }
+        Invocation::Complete(query) => complete::run(&query),
     }
 }
 
@@ -692,11 +692,11 @@ pub(crate) fn prompt_delete_stale_branches(
 ///
 /// A branch named after a verb is read as that verb, and `perch wt` opens the
 /// worktree picker rather than going anywhere — so those names need the `--`
-/// escape hatch. Which names those are is [`Verb::parse`], the same reading the
-/// dispatcher does and the completions subtract.
+/// escape hatch. Grammar uses the same command facts for this check, invocation
+/// parsing, and completion filtering.
 pub(crate) fn go_there_argument(branch: &str) -> String {
     let quoted = shell_quote(branch);
-    if Verb::parse(branch).is_some() {
+    if crate::grammar::needs_top_level_escape(branch) {
         format!("-- {quoted}")
     } else {
         quoted
@@ -799,17 +799,6 @@ mod tests {
     #[test]
     fn shell_quote_handles_a_quote_in_the_name() {
         assert_eq!(shell_quote("it's"), r"'it'\''s'");
-    }
-
-    /// The words now live on the variants themselves, so completeness is the
-    /// declaration's job rather than a test's. What is left worth pinning is the
-    /// mapping, and that an ordinary name is left alone — which is what sends a
-    /// bare `perch <name>` to a branch instead of a verb.
-    #[test]
-    fn a_verb_parses_from_the_word_that_selects_it() {
-        assert_eq!(Verb::parse("br"), Some(Verb::Here));
-        assert_eq!(Verb::parse("wt"), Some(Verb::Worktree));
-        assert_eq!(Verb::parse("feature"), None);
     }
 
     #[test]

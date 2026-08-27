@@ -12,8 +12,9 @@ use std::collections::{HashMap, HashSet};
 
 use console::{Key, Term, measure_text_width, style};
 
-use super::{CursorGuard, Verb, interactive_term};
+use super::{CursorGuard, interactive_term};
 use crate::AppResult;
+use crate::grammar::Verb;
 
 /// Source of key events for the interactive pickers. Abstracting input behind a
 /// trait lets the event loops be driven by a scripted sequence in tests; the

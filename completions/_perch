@@ -71,14 +71,19 @@ _perch() {
     return
   fi
 
-  # `wt rm` reads its target as the first word after `rm` that isn't an option,
-  # and takes its `--force` in either order, so a flag or a `--` leaves the slot
-  # open while a bare word closes it. Words typed after a target are ignored.
+  # `wt rm` accepts one target. `--` closes option parsing, so the following
+  # word counts as the target even when it begins with `-`.
   # This arm wants worktrees rather than branches, so it comes first.
   if (( pos >= 4 )) && [[ "$cmdline[2]" == wt && "$cmdline[3]" == rm ]]; then
-    local word
+    local word reads_options=1
     for word in "${(@)cmdline[4,pos-1]}"; do
-      [[ "$word" == -* ]] || return
+      if (( reads_options )) && [[ "$word" == -- ]]; then
+        reads_options=0
+      elif (( reads_options )) && [[ "$word" == -* ]]; then
+        continue
+      else
+        return
+      fi
     done
     _perch_offers worktrees 'worktree' wt rm
     return
