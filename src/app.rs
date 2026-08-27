@@ -15,7 +15,8 @@ pub(crate) mod reporting;
 pub mod wt;
 
 use picker::{
-    Catalogue, PickerOptions, Selection, align_labels, interactive_keys, multi_select, pick,
+    Catalogue, MultiItem, PickerOptions, Selection, align_labels, interactive_keys, multi_select,
+    pick,
 };
 
 pub(crate) struct CursorGuard(Term);
@@ -679,7 +680,16 @@ pub(crate) fn prompt_delete_stale_branches(
         .iter()
         .map(|r| old_branch.is_some_and(|old| old == r.branch))
         .collect();
-    let items = align_labels(&rows.iter().map(stale_label).collect::<Vec<_>>());
+    let labels = align_labels(&rows.iter().map(stale_label).collect::<Vec<_>>());
+    let items: Vec<MultiItem> = labels
+        .into_iter()
+        .zip(defaults)
+        .map(|(label, selected)| MultiItem {
+            label,
+            selected,
+            disabled: false,
+        })
+        .collect();
 
     // The terminal was checked at the top, so this is acquisition rather than a
     // second guard — raw mode is taken here and not a moment earlier, so it is
@@ -692,8 +702,6 @@ pub(crate) fn prompt_delete_stale_branches(
         "Delete stale branches (space to toggle, →/← all/none)",
         legend.as_deref(),
         &items,
-        &defaults,
-        &vec![false; items.len()],
         keys,
     )?;
 

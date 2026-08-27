@@ -5,7 +5,9 @@ use std::path::{Path, PathBuf};
 use console::{measure_text_width, style};
 use indicatif::ProgressBar;
 
-use super::picker::{PickerOptions, Selection, align_labels, interactive_keys, multi_select, pick};
+use super::picker::{
+    MultiItem, PickerOptions, Selection, align_labels, interactive_keys, multi_select, pick,
+};
 use super::{
     CursorGuard, Risk, Verb, build_catalogue, confirm, display_path, fetch_and_ff, handoff_cd,
     hook, marker, picker, prompt_delete_stale_branches, removal, report_update, reporting,
@@ -311,22 +313,26 @@ fn select_for_removal(
         let Some(keys) = interactive_keys() else {
             return Ok(vec![]);
         };
-        let items = align_labels(
+        let labels = align_labels(
             &removable
                 .iter()
                 .enumerate()
                 .map(|(i, w)| (rm_label(w, current == Some(i)), marker::markers(risks[i])))
                 .collect::<Vec<_>>(),
         );
-        let defaults = vec![false; items.len()];
-        let disabled = vec![false; items.len()];
+        let items: Vec<MultiItem> = labels
+            .into_iter()
+            .map(|label| MultiItem {
+                label,
+                selected: false,
+                disabled: false,
+            })
+            .collect();
         let legend = super::risk_legend(risks);
         return multi_select(
             "Remove worktrees (space to toggle, →/← all/none)",
             legend.as_deref(),
             &items,
-            &defaults,
-            &disabled,
             keys,
         );
     };

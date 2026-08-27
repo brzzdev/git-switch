@@ -128,6 +128,17 @@ impl Report<'_> {
     pub(crate) fn worktree_removed(&self) -> bool {
         matches!(self.worktree, Some(git::WorktreeRemoveOutcome::Removed))
     }
+
+    pub(crate) fn branch_removed(&self) -> bool {
+        matches!(
+            self.branch,
+            Some(
+                git::BranchDeleteOutcome::Deleted
+                    | git::BranchDeleteOutcome::DeletedLeavingConfig(_)
+                    | git::BranchDeleteOutcome::DeletedConfigUnverified(_)
+            )
+        )
+    }
 }
 
 /// What a removal asks of git: the two operations it performs, and the one

@@ -1088,6 +1088,46 @@ fn complete_drops_only_the_words_that_position_eats() {
     );
 }
 
+#[test]
+fn bash_br_rm_completion_offers_one_target_and_only_long_flags() {
+    let (_bare, work) = setup();
+    git(work.path(), &["branch", "feature"]);
+    let bin = Path::new(env!("CARGO_BIN_EXE_perch")).parent().unwrap();
+    let completions = concat!(env!("CARGO_MANIFEST_DIR"), "/completions/perch.bash");
+    let complete = |words: &str, cword: usize| {
+        let script = format!(
+            "PATH=\"{bin}\":$PATH\n\
+             source \"{completions}\"\n\
+             COMP_WORDS=({words}); COMP_CWORD={cword}; COMPREPLY=()\n\
+             _perch_completions\n\
+             printf '%s\\n' \"${{COMPREPLY[@]}}\"\n",
+            bin = bin.display(),
+        );
+        let output = Command::new("bash")
+            .args(["-c", &script])
+            .current_dir(work.path())
+            .env("PERCH_NO_HOOKS", "1")
+            .output()
+            .expect("failed to run bash completion");
+        assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+        stdout_str(&output)
+    };
+
+    let before_target = complete("perch br rm ''", 3);
+    for candidate in ["feature", "--upstream", "--force"] {
+        assert!(
+            before_target.lines().any(|line| line == candidate),
+            "missing {candidate}: {before_target}"
+        );
+    }
+    assert!(!before_target.lines().any(|line| line == "-f"));
+
+    let after_target = complete("perch br rm feature ''", 4);
+    assert!(!after_target.lines().any(|line| line == "feature"));
+    assert!(after_target.lines().any(|line| line == "--upstream"));
+    assert!(after_target.lines().any(|line| line == "--force"));
+}
+
 /// Regression, in both halves. Git permits `$`, backticks and `${IFS}` in a ref
 /// name, so a branch can be called `$(…)` — and once remote-only branches were
 /// offered, that name came from whoever can push to a repo you fetch rather than
@@ -1245,6 +1285,18 @@ fn wt_help_documents_no_switch() {
         "expected worktree help to document the flag, got: {}",
         stdout_str(&output)
     );
+}
+
+#[test]
+fn br_help_documents_removal_without_a_short_force_flag() {
+    let dir = TempDir::new().unwrap();
+    let output = perch_args(dir.path(), &["br", "--help"]);
+
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+    let help = stdout_str(&output);
+    assert!(help.contains("perch br rm [<branch>] [--upstream] [--force]"));
+    assert!(help.contains("perch br -- <branch>"));
+    assert!(!help.contains("-f, --force"));
 }
 
 #[test]
@@ -2062,6 +2114,47 @@ fn br_rm_rejects_unknown_options_and_extra_targets() {
     let extra = perch_args(work.path(), &["br", "rm", "one", "two"]);
     assert!(!extra.status.success());
     assert!(stderr_str(&extra).contains("unexpected extra target 'two'"));
+
+    let short_force = perch_args(work.path(), &["br", "rm", "feature", "-f"]);
+    assert!(!short_force.status.success());
+    assert!(stderr_str(&short_force).contains("unknown option '-f'"));
+}
+
+#[test]
+fn br_rm_picker_shows_but_does_not_select_disabled_branches() {
+    let (_bare, parent, work) = setup_with_parent();
+    git(&work, &["branch", "free"]);
+    git(&work, &["branch", "held"]);
+    git(&work, &["branch", "kept"]);
+    git(&work, &["config", "perch.keep", "kept"]);
+    let held_path = parent.path().join("held-worktree");
+    git(
+        &work,
+        &["worktree", "add", held_path.to_str().unwrap(), "held"],
+    );
+
+    let output = String::from_utf8_lossy(&drive_multi_select_prompt(
+        &work,
+        &["br", "rm", "--force"],
+        "free",
+        false,
+        || {},
+    ))
+    .into_owned();
+
+    assert!(!local_branch_exists(&work, "free"));
+    for branch in ["held", "kept", "main"] {
+        assert!(
+            local_branch_exists(&work, branch),
+            "disabled branch {branch} should survive; output: {output}"
+        );
+    }
+    assert!(output.contains("current"), "current row missing: {output}");
+    assert!(output.contains("kept"), "kept row missing: {output}");
+    assert!(
+        output.contains("use wt rm"),
+        "held row should point to wt rm: {output}"
+    );
 }
 
 #[test]
@@ -2204,6 +2297,106 @@ fn br_rm_force_without_upstream_leaves_the_remote_branch_alone() {
     assert!(output.status.success(), "stderr: {}", stderr_str(&output));
     assert!(!local_branch_exists(work.path(), "feature"));
     assert!(remote_branch_tip(work.path(), "origin", "feature").is_some());
+}
+
+#[test]
+fn br_rm_named_upstream_confirmation_defaults_off() {
+    let (_bare, work) = setup();
+    git(work.path(), &["branch", "feature"]);
+    git(work.path(), &["push", "-u", "origin", "feature"]);
+
+    let output = drive_enter_confirmation(
+        work.path(),
+        &["br", "rm", "feature"],
+        "Delete upstream origin/feature too?",
+    );
+
+    assert!(!local_branch_exists(work.path(), "feature"));
+    assert!(remote_branch_tip(work.path(), "origin", "feature").is_some());
+    assert!(output.contains("deleting origin/feature removes a shared upstream ref"));
+}
+
+#[test]
+fn br_rm_upstream_flag_preselects_the_named_confirmation() {
+    let (_bare, work) = setup();
+    git(work.path(), &["branch", "feature"]);
+    git(work.path(), &["push", "-u", "origin", "feature"]);
+
+    let output = drive_enter_confirmation(
+        work.path(),
+        &["br", "rm", "feature", "--upstream"],
+        "Delete upstream origin/feature too?",
+    );
+
+    assert!(!local_branch_exists(work.path(), "feature"));
+    assert_eq!(remote_branch_tip(work.path(), "origin", "feature"), None);
+    assert!(output.contains("deleted upstream origin/feature"));
+}
+
+#[test]
+fn br_rm_batch_keeps_a_failed_local_and_its_upstream_then_continues() {
+    let (_bare, parent, work) = setup_with_parent();
+    git(&work, &["branch", "a"]);
+    git(&work, &["branch", "b"]);
+    git(&work, &["push", "-u", "origin", "a"]);
+    let held = parent.path().join("held-a");
+
+    let output = String::from_utf8_lossy(&drive_multi_select_prompt(
+        &work,
+        &["br", "rm", "--upstream", "--force"],
+        "a",
+        false,
+        || {
+            git(&work, &["worktree", "add", held.to_str().unwrap(), "a"]);
+        },
+    ))
+    .into_owned();
+
+    assert!(local_branch_exists(&work, "a"));
+    assert!(!local_branch_exists(&work, "b"));
+    assert!(remote_branch_tip(&work, "origin", "a").is_some());
+    assert!(
+        output.contains("kept upstream origin/a because the local branch still exists"),
+        "the remote half must follow local failure: {output}"
+    );
+    assert!(
+        output.contains("one or more requested removals failed"),
+        "a partial batch failure must return a failing result: {output}"
+    );
+}
+
+#[test]
+fn br_rm_batch_continues_after_explicit_upstream_inspection_failure() {
+    let (_bare, work) = setup();
+    git(work.path(), &["branch", "a"]);
+    git(work.path(), &["branch", "b"]);
+    git(
+        work.path(),
+        &["remote", "add", "broken", "/path/that/does/not/exist"],
+    );
+    git(
+        work.path(),
+        &["update-ref", "refs/remotes/broken/a", "refs/heads/a"],
+    );
+    git(work.path(), &["config", "branch.a.remote", "broken"]);
+    git(work.path(), &["config", "branch.a.merge", "refs/heads/a"]);
+
+    let output = String::from_utf8_lossy(&drive_multi_select_prompt(
+        work.path(),
+        &["br", "rm", "--upstream", "--force"],
+        "a",
+        false,
+        || {},
+    ))
+    .into_owned();
+
+    assert!(local_branch_exists(work.path(), "a"));
+    assert!(!local_branch_exists(work.path(), "b"));
+    assert!(
+        output.contains("could not prepare upstream removal for a"),
+        "the failed pair should be reported in row order: {output}"
+    );
+    assert!(output.contains("one or more requested removals failed"));
 }
 
 #[test]
@@ -2687,9 +2880,9 @@ fn wait_for(seen: &Mutex<Vec<u8>>, needle: &str) {
 ///
 /// `hooks` leaves worktree hooks on for the tests that configure one in the repo
 /// under test; every other caller wants them off, as [`perch_args`] does.
-fn drive_cleanup_prompt(
+fn drive_multi_select_prompt(
     work: &Path,
-    target: &str,
+    args: &[&str],
     row: &str,
     hooks: bool,
     before_confirm: impl FnOnce(),
@@ -2702,7 +2895,7 @@ fn drive_cleanup_prompt(
         .openpty(PtySize::default())
         .expect("failed to open pty");
     let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_perch"));
-    cmd.arg(target);
+    cmd.args(args);
     cmd.cwd(work);
     if !hooks {
         cmd.env("PERCH_NO_HOOKS", "1");
@@ -2744,6 +2937,56 @@ fn drive_cleanup_prompt(
     drop(pty.master);
     output.join().unwrap();
     Arc::try_unwrap(seen).unwrap().into_inner().unwrap()
+}
+
+fn drive_cleanup_prompt(
+    work: &Path,
+    target: &str,
+    row: &str,
+    hooks: bool,
+    before_confirm: impl FnOnce(),
+) -> Vec<u8> {
+    drive_multi_select_prompt(work, &[target], row, hooks, before_confirm)
+}
+
+fn drive_enter_confirmation(work: &Path, args: &[&str], prompt: &str) -> String {
+    use portable_pty::{CommandBuilder, PtySize, native_pty_system};
+    use std::io::{Read, Write};
+    use std::sync::Arc;
+
+    let pty = native_pty_system()
+        .openpty(PtySize::default())
+        .expect("failed to open pty");
+    let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_perch"));
+    cmd.args(args);
+    cmd.cwd(work);
+    cmd.env("PERCH_NO_HOOKS", "1");
+    let mut child = ChildGuard(pty.slave.spawn_command(cmd).expect("failed to spawn"));
+    drop(pty.slave);
+
+    let mut reader = pty.master.try_clone_reader().unwrap();
+    let mut writer = pty.master.take_writer().unwrap();
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let collected = Arc::clone(&seen);
+    let output = std::thread::spawn(move || {
+        let mut chunk = [0u8; 1024];
+        while let Ok(n) = reader.read(&mut chunk) {
+            if n == 0 {
+                break;
+            }
+            collected.lock().unwrap().extend_from_slice(&chunk[..n]);
+        }
+    });
+
+    wait_for(&seen, prompt);
+    writer.write_all(b"\r").unwrap();
+    writer.flush().unwrap();
+
+    child.wait_bounded();
+    drop(writer);
+    drop(pty.master);
+    output.join().unwrap();
+    String::from_utf8_lossy(&Arc::try_unwrap(seen).unwrap().into_inner().unwrap()).into_owned()
 }
 
 /// [`drive_cleanup_prompt`] with hooks off and nothing to do between ticking and
@@ -3446,6 +3689,23 @@ fn an_untouched_branch_cut_from_the_anchor_is_not_read_as_landed() {
 // ---------------------------------------------------------------------------
 // Worktree hooks
 // ---------------------------------------------------------------------------
+
+#[test]
+fn br_rm_does_not_fire_the_worktree_removal_hook() {
+    let (_bare, parent, work) = setup_with_parent();
+    let log = parent.path().join("hook.log");
+    let script = format!("printf removed >> '{}'", log.display());
+    git(&work, &["config", "perch.hook.removed", &script]);
+    git(&work, &["branch", "feature"]);
+
+    let output = perch_hooked(&work, &["br", "rm", "feature"]);
+
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+    assert!(
+        !log.exists(),
+        "br rm must not masquerade as worktree removal"
+    );
+}
 
 /// The payload a hook is handed, from both creation arms and from a removal,
 /// each firing exactly once for the worktree it describes.

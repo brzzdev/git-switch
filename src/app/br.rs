@@ -6,7 +6,7 @@ use std::collections::{HashMap, HashSet};
 
 use console::style;
 
-use super::picker::{align_labels, interactive_keys, multi_select};
+use super::picker::{MultiItem, align_labels, interactive_keys, multi_select};
 use super::{
     Risk, confirm, display_path, interactive_term, marker, removal, reporting, risk_legend,
 };
@@ -31,9 +31,9 @@ impl RmOptions {
         let mut options = Self::default();
         for arg in args {
             match arg.as_str() {
-                "-f" | "--force" if !options.force => options.force = true,
+                "--force" if !options.force => options.force = true,
                 "--upstream" if !options.upstream => options.upstream = true,
-                "-f" | "--force" | "--upstream" => {
+                "--force" | "--upstream" => {
                     return Err(Error::BrRmUsage(format!("duplicate option '{arg}'")));
                 }
                 _ if arg.starts_with('-') => {
@@ -66,6 +66,12 @@ impl BranchRow {
 struct UpstreamChoice {
     row: usize,
     upstream: git::RemoteBranch,
+}
+
+#[derive(Default)]
+struct UpstreamPlan {
+    selected: HashMap<usize, git::RemoteBranch>,
+    failures: HashMap<usize, String>,
 }
 
 pub fn run_rm(options: &RmOptions) -> AppResult<()> {
@@ -104,58 +110,18 @@ pub fn run_rm(options: &RmOptions) -> AppResult<()> {
     if selected.is_empty() {
         return Ok(());
     }
-    let upstreams: HashMap<usize, git::RemoteBranch> = select_upstreams(&rows, &selected, options)?
-        .into_iter()
-        .map(|choice| (choice.row, choice.upstream))
-        .collect();
+    let upstreams = select_upstreams(&rows, &selected, options)?;
 
     let mut failed = false;
     let mut steps = removal::GitSteps::at_main(Some(&main.path));
     for &row_index in &selected {
-        let row = &rows[row_index];
-        let license = if options.force {
-            removal::License::forced()
-        } else {
-            removal::License::shown(row.risk)
-        };
-        let report = removal::remove(
-            removal::Target::Branch { name: &row.name },
-            &license,
+        failed |= !remove_pair(
+            row_index,
+            &rows[row_index],
+            &upstreams,
+            options.force,
             &mut steps,
-        )?;
-        for line in reporting::removal_outcome(&report) {
-            eprintln!("{line}");
-        }
-
-        let local_deleted = matches!(
-            report.branch,
-            Some(
-                git::BranchDeleteOutcome::Deleted
-                    | git::BranchDeleteOutcome::DeletedLeavingConfig(_)
-                    | git::BranchDeleteOutcome::DeletedConfigUnverified(_)
-            )
         );
-        if !local_deleted {
-            failed = true;
-        }
-
-        let Some(upstream) = upstreams.get(&row_index) else {
-            continue;
-        };
-        let local_ref = format!("refs/heads/{}", row.name);
-        if !local_deleted || git::resolve(None, &local_ref).is_some() {
-            eprintln!("{}", reporting::upstream_kept_local(upstream));
-            failed = true;
-            continue;
-        }
-        let outcome = git::delete_remote_branch(upstream)?;
-        eprintln!("{}", reporting::upstream_outcome(upstream, &outcome));
-        if !matches!(
-            outcome,
-            git::RemoteBranchDeleteOutcome::Deleted | git::RemoteBranchDeleteOutcome::AlreadyAbsent
-        ) {
-            failed = true;
-        }
     }
 
     if failed {
@@ -163,6 +129,70 @@ pub fn run_rm(options: &RmOptions) -> AppResult<()> {
     } else {
         Ok(())
     }
+}
+
+fn remove_pair(
+    row_index: usize,
+    row: &BranchRow,
+    upstreams: &UpstreamPlan,
+    force: bool,
+    steps: &mut removal::GitSteps,
+) -> bool {
+    if let Some(error) = upstreams.failures.get(&row_index) {
+        eprintln!(
+            "{} could not prepare upstream removal for {}: {error}; kept the local branch",
+            style("!").yellow().bold(),
+            row.name,
+        );
+        return false;
+    }
+    let license = if force {
+        removal::License::forced()
+    } else {
+        removal::License::shown(row.risk)
+    };
+    let report = match removal::remove(removal::Target::Branch { name: &row.name }, &license, steps)
+    {
+        Ok(report) => report,
+        Err(error) => {
+            eprintln!(
+                "{} could not remove {}: {error}",
+                style("!").yellow().bold(),
+                row.name,
+            );
+            return false;
+        }
+    };
+    for line in reporting::removal_outcome(&report) {
+        eprintln!("{line}");
+    }
+
+    let local_deleted = report.branch_removed();
+    let Some(upstream) = upstreams.selected.get(&row_index) else {
+        return local_deleted;
+    };
+    let local_ref = format!("refs/heads/{}", row.name);
+    if !local_deleted || git::resolve(None, &local_ref).is_some() {
+        eprintln!("{}", reporting::upstream_kept_local(upstream));
+        return false;
+    }
+    let outcome = match git::delete_remote_branch(upstream) {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            eprintln!(
+                "{} could not delete upstream {}/{}: {error}",
+                style("!").yellow().bold(),
+                upstream.remote,
+                upstream.branch,
+            );
+            return false;
+        }
+    };
+    eprintln!("{}", reporting::upstream_outcome(upstream, &outcome));
+    matches!(
+        outcome,
+        git::RemoteBranchDeleteOutcome::Deleted | git::RemoteBranchDeleteOutcome::AlreadyAbsent
+    )
 }
 
 pub fn run_rm_complete() -> AppResult<()> {
@@ -205,7 +235,15 @@ fn select_local(
                 })
                 .collect::<Vec<_>>(),
         );
-        let defaults = vec![false; rows.len()];
+        let items: Vec<MultiItem> = labels
+            .into_iter()
+            .zip(disabled)
+            .map(|(label, disabled)| MultiItem {
+                label,
+                selected: false,
+                disabled,
+            })
+            .collect();
         let visible_risks: Vec<Risk> = rows
             .iter()
             .filter(|row| !row.disabled())
@@ -215,9 +253,7 @@ fn select_local(
         return multi_select(
             "Remove local branches (space to toggle, →/← all/none)",
             legend.as_deref(),
-            &labels,
-            &defaults,
-            &disabled,
+            &items,
             keys,
         );
     };
@@ -295,79 +331,127 @@ fn select_upstreams(
     rows: &[BranchRow],
     selected: &[usize],
     options: &RmOptions,
-) -> AppResult<Vec<UpstreamChoice>> {
+) -> AppResult<UpstreamPlan> {
     let interactive = interactive_term().is_some();
     if !options.upstream && !interactive {
-        return Ok(Vec::new());
+        return Ok(UpstreamPlan::default());
     }
 
     let named = options.target.is_some();
     let mut choices = Vec::new();
+    let mut failures = HashMap::new();
     for &row in selected {
         let branch = &rows[row].name;
-        if let Some(upstream) = upstream_choice(row, branch, named, options.upstream)? {
-            choices.push(upstream);
+        match upstream_choice(row, branch, named, options.upstream) {
+            Ok(Some(upstream)) => choices.push(upstream),
+            Ok(None) => {}
+            Err(error) if named => return Err(error),
+            Err(error) => {
+                failures.insert(row, error.to_string());
+            }
         }
     }
     if choices.is_empty() {
-        return Ok(Vec::new());
+        return Ok(UpstreamPlan {
+            selected: HashMap::new(),
+            failures,
+        });
     }
 
     if options.force && options.upstream {
-        return Ok(choices);
+        return Ok(plan_all(choices, failures));
     }
     if named {
-        let choice = &choices[0];
-        eprintln!("{}", reporting::upstream_warning(&choice.upstream));
-        if !interactive {
-            return Err(Error::Unconfirmed(
-                "upstream deletion was requested without a terminal; pass --force to confirm it"
-                    .into(),
-            ));
-        }
-        return if confirm(
-            &format!(
-                "Delete upstream {}/{} too?",
-                choice.upstream.remote, choice.upstream.branch
-            ),
-            options.upstream,
-        )? {
-            Ok(choices)
-        } else {
-            Ok(Vec::new())
-        };
+        return select_named_upstream(choices, failures, options.upstream, interactive);
     }
 
+    select_upstream_rows(choices, failures, options.upstream)
+}
+
+fn plan_all(choices: Vec<UpstreamChoice>, failures: HashMap<usize, String>) -> UpstreamPlan {
+    UpstreamPlan {
+        selected: choices
+            .into_iter()
+            .map(|choice| (choice.row, choice.upstream))
+            .collect(),
+        failures,
+    }
+}
+
+fn select_named_upstream(
+    choices: Vec<UpstreamChoice>,
+    failures: HashMap<usize, String>,
+    requested: bool,
+    interactive: bool,
+) -> AppResult<UpstreamPlan> {
+    let choice = &choices[0];
+    eprintln!("{}", reporting::upstream_warning(&choice.upstream));
+    if !interactive {
+        return Err(Error::Unconfirmed(
+            "upstream deletion was requested without a terminal; pass --force to confirm it".into(),
+        ));
+    }
+    if confirm(
+        &format!(
+            "Delete upstream {}/{} too?",
+            choice.upstream.remote, choice.upstream.branch
+        ),
+        requested,
+    )? {
+        Ok(plan_all(choices, failures))
+    } else {
+        Ok(UpstreamPlan {
+            selected: HashMap::new(),
+            failures,
+        })
+    }
+}
+
+fn select_upstream_rows(
+    choices: Vec<UpstreamChoice>,
+    failures: HashMap<usize, String>,
+    requested: bool,
+) -> AppResult<UpstreamPlan> {
     let Some(keys) = interactive_keys() else {
-        return if options.upstream {
+        return if requested {
             Err(Error::Unconfirmed(
                 "upstream deletion was requested without a terminal; pass --force to confirm it"
                     .into(),
             ))
         } else {
-            Ok(Vec::new())
+            Ok(UpstreamPlan {
+                selected: HashMap::new(),
+                failures,
+            })
         };
     };
-    let labels: Vec<String> = choices
+    let items: Vec<MultiItem> = choices
         .iter()
-        .map(|choice| format!("{}/{}", choice.upstream.remote, choice.upstream.branch))
+        .map(|choice| MultiItem {
+            label: format!("{}/{}", choice.upstream.remote, choice.upstream.branch),
+            selected: requested,
+            disabled: false,
+        })
         .collect();
-    let defaults = vec![options.upstream; choices.len()];
-    let disabled = vec![false; choices.len()];
     let picked = multi_select(
         "Also delete upstream branches? (space to toggle, →/← all/none)",
         Some("Each selected row removes a shared upstream ref"),
-        &labels,
-        &defaults,
-        &disabled,
+        &items,
         keys,
     )?;
     let picked: HashSet<usize> = picked.into_iter().collect();
-    Ok(choices
-        .into_iter()
-        .enumerate()
-        .filter_map(|(index, choice)| picked.contains(&index).then_some(choice))
-        .collect())
+    Ok(UpstreamPlan {
+        selected: choices
+            .into_iter()
+            .enumerate()
+            .filter_map(|(index, choice)| {
+                picked
+                    .contains(&index)
+                    .then_some((choice.row, choice.upstream))
+            })
+            .collect(),
+        failures,
+    })
 }
 
 fn upstream_choice(
@@ -376,7 +460,18 @@ fn upstream_choice(
     target_was_named: bool,
     upstream_requested: bool,
 ) -> AppResult<Option<UpstreamChoice>> {
-    let Some(upstream) = git::same_named_upstream(branch)? else {
+    let upstream = match git::same_named_upstream(branch) {
+        Ok(upstream) => upstream,
+        Err(error) if upstream_requested => return Err(error),
+        Err(error) => {
+            eprintln!(
+                "{} could not read the upstream of {branch}: {error}; offering local removal only",
+                style("!").yellow().bold(),
+            );
+            return Ok(None);
+        }
+    };
+    let Some(upstream) = upstream else {
         if target_was_named && upstream_requested {
             return Err(Error::NoRemovableUpstream {
                 branch: branch.to_string(),
@@ -450,7 +545,7 @@ mod tests {
 
     #[test]
     fn rm_options_accept_target_and_flags_in_any_order() {
-        let parsed = RmOptions::parse(&strings(&["--upstream", "topic", "-f"]))
+        let parsed = RmOptions::parse(&strings(&["--upstream", "topic", "--force"]))
             .expect("valid options should parse");
         assert_eq!(
             parsed,

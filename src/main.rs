@@ -187,7 +187,7 @@ fn print_br_help() {
     println!();
     println!("Options:");
     println!("      --upstream  Also offer the branch's same-named upstream for removal");
-    println!("  -f, --force     Skip destructive confirmations");
+    println!("      --force     Skip destructive confirmations");
 }
 
 fn print_wt_help() {

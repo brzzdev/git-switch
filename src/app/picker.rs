@@ -854,15 +854,14 @@ struct MultiModel {
 }
 
 impl MultiModel {
-    fn new(defaults: &[bool], disabled: &[bool]) -> Self {
-        let selected = defaults
+    fn new(items: &[MultiItem]) -> Self {
+        let selected = items
             .iter()
-            .zip(disabled)
-            .map(|(selected, disabled)| *selected && !disabled)
+            .map(|item| item.selected && !item.disabled)
             .collect();
         Self {
             cursor: 0,
-            disabled: disabled.to_vec(),
+            disabled: items.iter().map(|item| item.disabled).collect(),
             selected,
         }
     }
@@ -907,6 +906,12 @@ impl MultiModel {
     }
 }
 
+pub(crate) struct MultiItem {
+    pub(crate) label: String,
+    pub(crate) selected: bool,
+    pub(crate) disabled: bool,
+}
+
 /// The multi-select picker. `legend` is an optional dim line under the prompt,
 /// for glossing anything in the rows that isn't self-explanatory; callers pass
 /// `None` where nothing needs it, so a plain list stays plain. `keys` is taken
@@ -915,18 +920,11 @@ impl MultiModel {
 pub(crate) fn multi_select(
     prompt: &str,
     legend: Option<&str>,
-    items: &[String],
-    defaults: &[bool],
-    disabled: &[bool],
+    items: &[MultiItem],
     mut keys: impl KeySource,
 ) -> AppResult<Vec<usize>> {
-    // The model is sized from `defaults` but the rows are drawn from `items`,
-    // so the cursor is only in bounds for both while the two agree.
-    debug_assert_eq!(items.len(), defaults.len());
-    debug_assert_eq!(items.len(), disabled.len());
-
     let term = Term::stderr();
-    let mut model = MultiModel::new(defaults, disabled);
+    let mut model = MultiModel::new(items);
     let header = format!("{} {}", style("?").green().bold(), style(prompt).bold());
     let legend = legend.map(|l| format!("  {}", style(l).dim()));
 
@@ -956,8 +954,8 @@ pub(crate) fn multi_select(
         for i in scroll..end {
             let arrow = if i == cursor { ">" } else { " " };
             let check = if selected[i] { "[x]" } else { "[ ]" };
-            let line = format!("  {arrow} {check} {}", items[i]);
-            let line = if disabled[i] {
+            let line = format!("  {arrow} {check} {}", items[i].label);
+            let line = if items[i].disabled {
                 style(line).dim().to_string()
             } else {
                 line
@@ -1241,7 +1239,11 @@ mod tests {
     /// this guards is a select-all that also flips the current row back.
     #[test]
     fn toggling_flips_only_the_row_under_the_cursor() {
-        let mut model = MultiModel::new(&[false, false, false], &[false, false, false]);
+        let mut model = MultiModel::new(&multi_items(
+            &["a", "b", "c"],
+            &[false, false, false],
+            &[false, false, false],
+        ));
         model.update(MultiMsg::SteppedDown);
         model.update(MultiMsg::Toggled);
         assert_eq!(model.selected, vec![false, true, false]);
@@ -1252,7 +1254,8 @@ mod tests {
     /// space would then tick something the user never looked at.
     #[test]
     fn multi_select_stepping_stops_at_both_ends() {
-        let mut model = MultiModel::new(&[false, false], &[false, false]);
+        let mut model =
+            MultiModel::new(&multi_items(&["a", "b"], &[false, false], &[false, false]));
         model.update(MultiMsg::SteppedUp);
         assert_eq!(model.cursor, 0);
         model.update(MultiMsg::SteppedDown);
@@ -1296,13 +1299,10 @@ mod tests {
         disabled: &[bool],
         keys: Vec<Key>,
     ) -> Vec<usize> {
-        let items: Vec<String> = items.iter().map(|s| (*s).to_string()).collect();
         multi_select(
             "Test",
             None,
-            &items,
-            defaults,
-            disabled,
+            &multi_items(items, defaults, disabled),
             ScriptedKeys::new(keys),
         )
         .expect("multi_select should not error")
@@ -1310,6 +1310,19 @@ mod tests {
 
     fn run_multi_select(items: &[&str], defaults: &[bool], keys: Vec<Key>) -> Vec<usize> {
         run_multi_select_with_disabled(items, defaults, &vec![false; items.len()], keys)
+    }
+
+    fn multi_items(items: &[&str], selected: &[bool], disabled: &[bool]) -> Vec<MultiItem> {
+        items
+            .iter()
+            .zip(selected)
+            .zip(disabled)
+            .map(|((label, selected), disabled)| MultiItem {
+                label: (*label).to_string(),
+                selected: *selected,
+                disabled: *disabled,
+            })
+            .collect()
     }
 
     #[test]

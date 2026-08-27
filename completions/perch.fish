@@ -28,22 +28,11 @@ end
 # True while `wt rm` still wants a target. It reads that target as the first word
 # after `rm` that isn't an option, and takes its `--force` in either order, so a
 # flag or a `--` leaves the slot open while a bare word closes it.
-function __perch_wt_rm_wants_target
+function __perch_rm_wants_target
+    set -l verb $argv[1]
     set -l tokens (commandline -opc)
     test (count $tokens) -ge 3; or return 1
-    test "$tokens[2]" = wt; and test "$tokens[3]" = rm; or return 1
-    if test (count $tokens) -gt 3
-        for token in $tokens[4..-1]
-            string match --quiet -- '-*' $token; or return 1
-        end
-    end
-    return 0
-end
-
-function __perch_br_rm_wants_target
-    set -l tokens (commandline -opc)
-    test (count $tokens) -ge 3; or return 1
-    test "$tokens[2]" = br; and test "$tokens[3]" = rm; or return 1
+    test "$tokens[2]" = $verb; and test "$tokens[3]" = rm; or return 1
     if test (count $tokens) -gt 3
         for token in $tokens[4..-1]
             string match --quiet -- '-*' $token; or return 1
@@ -112,13 +101,13 @@ complete -c perch -f -n '__fish_seen_subcommand_from wt; and __fish_is_nth_token
 complete -c perch -f -l no-switch -d 'Create or find the worktree without switching to it' -n '__perch_wt_accepts_no_switch'
 
 # After `wt rm`: the worktrees, until one has been taken.
-complete -c perch -f -n '__perch_wt_rm_wants_target' -a '(__perch_offers wt rm)'
+complete -c perch -f -n '__perch_rm_wants_target wt' -a '(__perch_offers wt rm)'
 
 # After `br rm`: local branches until a target has been taken; flags remain
 # valid on either side of it.
-complete -c perch -f -n '__perch_br_rm_wants_target' -a '(__perch_offers br rm)'
+complete -c perch -f -n '__perch_rm_wants_target br' -a '(__perch_offers br rm)'
 complete -c perch -f -n '__perch_in_br_rm' -l upstream -d 'Also remove explicitly configured same-named upstreams'
-complete -c perch -f -n '__perch_in_br_rm' -s f -l force -d 'Skip destructive confirmations'
+complete -c perch -f -n '__perch_in_br_rm' -l force -d 'Skip destructive confirmations'
 
 # `br` and `wt` are the shell wrapper's shorthand for `perch br` and `perch wt`.
 # `--wraps` takes a command prefix, so every rule above applies to them at the
