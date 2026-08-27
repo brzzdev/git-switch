@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::env;
 use std::path::{Path, PathBuf};
 
@@ -201,15 +202,7 @@ pub(crate) fn run_rm(options: &WorktreeRemoval) -> AppResult<()> {
         let Some(keys) = interactive_keys() else {
             return Ok(());
         };
-        let items: Vec<MultiItem> = assessment
-            .offers()
-            .iter()
-            .map(|offer| MultiItem {
-                label: offer.label().to_string(),
-                selected: offer.selected(),
-                disabled: offer.disabled(),
-            })
-            .collect();
+        let items: Vec<MultiItem> = assessment.offers().iter().map(MultiItem::from).collect();
         let Some(selected) = multi_select(
             "Remove worktrees (space to toggle, →/← all/none)",
             assessment.legend(),
@@ -254,8 +247,10 @@ pub(crate) fn run_rm(options: &WorktreeRemoval) -> AppResult<()> {
 /// renders the newline-separated answer after Git facts return to it.
 pub(crate) fn removal_candidates() -> AppResult<Vec<String>> {
     let worktrees = git::worktree_list()?;
+    let mut seen = HashSet::new();
     Ok(removable(&worktrees)
         .flat_map(rm_names)
+        .filter(|name| seen.insert(*name))
         .map(str::to_string)
         .collect())
 }

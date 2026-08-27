@@ -639,15 +639,7 @@ pub(crate) fn prompt_delete_stale_branches(
         return Ok(());
     }
 
-    let items: Vec<MultiItem> = assessment
-        .offers()
-        .iter()
-        .map(|offer| MultiItem {
-            label: offer.label().to_string(),
-            selected: offer.selected(),
-            disabled: offer.disabled(),
-        })
-        .collect();
+    let items: Vec<MultiItem> = assessment.offers().iter().map(MultiItem::from).collect();
 
     // The terminal was checked at the top, so this is acquisition rather than a
     // second guard — raw mode is taken here and not a moment earlier, so it is

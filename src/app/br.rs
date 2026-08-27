@@ -70,15 +70,7 @@ fn select_local(
     let Some(keys) = interactive_keys() else {
         return Ok(None);
     };
-    let items: Vec<MultiItem> = assessment
-        .offers()
-        .iter()
-        .map(|offer| MultiItem {
-            label: offer.label().to_string(),
-            selected: offer.selected(),
-            disabled: offer.disabled(),
-        })
-        .collect();
+    let items: Vec<MultiItem> = assessment.offers().iter().map(MultiItem::from).collect();
     let Some(selected) = multi_select(
         "Remove local branches (space to toggle, →/← all/none)",
         assessment.legend(),

@@ -7,16 +7,21 @@ use crate::grammar::{Completion, CompletionSource};
 use crate::{AppResult, git};
 
 pub(crate) fn run(query: &Completion) -> AppResult<()> {
-    let candidates = match query.source() {
+    let output = match query.source() {
         CompletionSource::ReachableBranches => {
             let remote = git::current_remote(git::current_branch()?.as_deref());
-            let (mut local, remote_only) = super::reachable_branches(&remote)?;
-            local.extend(remote_only);
-            local
+            let (local, remote_only) = super::reachable_branches(&remote)?;
+            query.render(local.iter().chain(&remote_only).map(String::as_str))
         }
-        CompletionSource::LocalBranches => git::local_branches()?,
-        CompletionSource::Worktrees => super::wt::removal_candidates()?,
+        CompletionSource::LocalBranches => {
+            let local = git::local_branches()?;
+            query.render(local.iter().map(String::as_str))
+        }
+        CompletionSource::Worktrees => {
+            let worktrees = super::wt::removal_candidates()?;
+            query.render(worktrees.iter().map(String::as_str))
+        }
     };
-    print!("{}", query.render(&candidates));
+    print!("{output}");
     Ok(())
 }

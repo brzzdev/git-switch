@@ -1,5 +1,3 @@
-use std::collections::HashSet;
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum Invocation {
     Navigate(Navigation),
@@ -126,11 +124,10 @@ impl Completion {
         self.source
     }
 
-    pub(crate) fn render(&self, candidates: &[String]) -> String {
-        let mut seen = HashSet::new();
+    pub(crate) fn render<'a>(&self, candidates: impl IntoIterator<Item = &'a str>) -> String {
         let mut output = String::new();
         for candidate in candidates {
-            if !self.position.eats(candidate) && seen.insert(candidate.as_str()) {
+            if !self.position.eats(candidate) {
                 output.push_str(candidate);
                 output.push('\n');
             }
@@ -537,12 +534,18 @@ mod tests {
         let Invocation::Complete(bare) = parse(&args(&["--complete"])).unwrap() else {
             panic!("expected completion");
         };
-        assert_eq!(bare.render(&candidates), "ls\nrm\nlist\nremove\ntopic\n");
+        assert_eq!(
+            bare.render(candidates.iter().map(String::as_str)),
+            "ls\nrm\nlist\nremove\ntopic\n"
+        );
 
         let Invocation::Complete(worktree) = parse(&args(&["wt", "--complete"])).unwrap() else {
             panic!("expected completion");
         };
-        assert_eq!(worktree.render(&candidates), "br\nwt\ntopic\n");
+        assert_eq!(
+            worktree.render(candidates.iter().map(String::as_str)),
+            "br\nwt\ntopic\n"
+        );
     }
 
     #[test]

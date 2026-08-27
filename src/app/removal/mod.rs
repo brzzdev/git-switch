@@ -6,7 +6,7 @@
 //! mutate Git state. Outcome wording, Hook eligibility, partial failures, and a
 //! current-worktree Handoff stay behind the same seam.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::env;
 use std::path::{Path, PathBuf};
 
@@ -122,17 +122,15 @@ impl Offer {
     pub(crate) fn id(&self) -> LocalId {
         self.id
     }
+}
 
-    pub(crate) fn label(&self) -> &str {
-        &self.label
-    }
-
-    pub(crate) fn selected(&self) -> bool {
-        self.selected
-    }
-
-    pub(crate) fn disabled(&self) -> bool {
-        self.disabled
+impl From<&Offer> for picker::MultiItem {
+    fn from(offer: &Offer) -> Self {
+        Self {
+            label: offer.label.clone(),
+            selected: offer.selected,
+            disabled: offer.disabled,
+        }
     }
 }
 
@@ -337,11 +335,11 @@ impl Assessment {
                 },
             };
             locals.push(PlannedLocal {
-                row: id.0,
                 target: local.target.clone(),
                 license,
                 preparation_failure: None,
                 contains_cwd: local.contains_cwd,
+                upstream: None,
             });
         }
 
@@ -350,7 +348,6 @@ impl Assessment {
             locals,
             main: self.main,
             upstream_offers: Vec::new(),
-            upstream_by_row: HashMap::new(),
             notices: Vec::new(),
         };
         if self.kind == RequestKind::Branches && self.upstream != UpstreamInterest::None {
@@ -446,11 +443,11 @@ impl UpstreamOffer {
 }
 
 struct PlannedLocal {
-    row: usize,
     target: OwnedTarget,
     license: License,
     preparation_failure: Option<String>,
     contains_cwd: bool,
+    upstream: Option<(UpstreamId, git::RemoteBranch)>,
 }
 
 /// A fully chosen Removal. Dropping it is cancellation; only [`Self::finish`]
@@ -460,7 +457,6 @@ pub(crate) struct Pending {
     locals: Vec<PlannedLocal>,
     main: Option<PathBuf>,
     upstream_offers: Vec<UpstreamOffer>,
-    upstream_by_row: HashMap<usize, (UpstreamId, git::RemoteBranch)>,
     notices: Vec<String>,
 }
 
@@ -582,7 +578,7 @@ impl Pending {
                             upstream.remote, upstream.branch
                         ),
                     });
-                    self.upstream_by_row.insert(local.row, (id, upstream));
+                    local.upstream = Some((id, upstream));
                 }
                 UpstreamPreparation::Notice(notice) => self.notices.push(notice),
                 UpstreamPreparation::Failure(error) => {
@@ -638,9 +634,9 @@ impl Pending {
             }
 
             let local_deleted = report.branch_removed();
-            let selected_upstream = self
-                .upstream_by_row
-                .get(&local.row)
+            let selected_upstream = local
+                .upstream
+                .as_ref()
                 .filter(|(id, _)| selected.contains(id))
                 .map(|(_, candidate)| candidate);
             let Some(upstream) = selected_upstream else {
@@ -727,12 +723,20 @@ pub(crate) fn assess(request: Request) -> AppResult<Assessment> {
 }
 
 fn risk_legend(risks: impl IntoIterator<Item = Risk>) -> Option<String> {
-    let risks: Vec<Risk> = risks.into_iter().collect();
+    let (has_dirty, has_unmerged) =
+        risks
+            .into_iter()
+            .fold((false, false), |(has_dirty, has_unmerged), risk| {
+                (
+                    has_dirty || risk.dirty,
+                    has_unmerged || risk.unmerged.is_some(),
+                )
+            });
     let mut parts = Vec::new();
-    if risks.iter().any(|risk| risk.dirty) {
+    if has_dirty {
         parts.push(format!("{} uncommitted changes", marker::Marker::Dirty));
     }
-    if risks.iter().any(|risk| risk.unmerged.is_some()) {
+    if has_unmerged {
         parts.push(format!(
             "{} unmerged commits",
             marker::Marker::Unmerged(None)
@@ -938,11 +942,6 @@ fn assess_worktrees(request: WorktreeRequest) -> AppResult<Assessment> {
         })?
         .path
         .clone();
-    let removable: Vec<git::Worktree> = request
-        .worktrees
-        .into_iter()
-        .filter(|worktree| !worktree.is_main)
-        .collect();
     let contains_cwd = |worktree: &git::Worktree| {
         let path = worktree
             .path
@@ -953,16 +952,25 @@ fn assess_worktrees(request: WorktreeRequest) -> AppResult<Assessment> {
             .as_ref()
             .is_some_and(|cwd| cwd.starts_with(path))
     };
+    let removable: Vec<(git::Worktree, bool)> = request
+        .worktrees
+        .into_iter()
+        .filter(|worktree| !worktree.is_main)
+        .map(|worktree| {
+            let contains_cwd = contains_cwd(&worktree);
+            (worktree, contains_cwd)
+        })
+        .collect();
     let current = removable
         .iter()
         .enumerate()
-        .filter(|(_, worktree)| contains_cwd(worktree))
-        .max_by_key(|(_, worktree)| worktree.path.as_os_str().len())
+        .filter(|(_, (_, contains_cwd))| *contains_cwd)
+        .max_by_key(|(_, (worktree, _))| worktree.path.as_os_str().len())
         .map(|(index, _)| LocalId(index));
     let unmerged = git::unmerged_branches(Some(&main)).unwrap_or_default();
     let mut raw = Vec::new();
     let mut locals = Vec::new();
-    for (index, worktree) in removable.into_iter().enumerate() {
+    for (index, (worktree, contains_cwd)) in removable.into_iter().enumerate() {
         let risk = Risk {
             dirty: !worktree.prunable && git::worktree_dirty(&worktree.path),
             unmerged: worktree
@@ -981,7 +989,6 @@ fn assess_worktrees(request: WorktreeRequest) -> AppResult<Assessment> {
             name.push_str(" (current)");
         }
         raw.push((name, marker::markers(risk.dirty, risk.unmerged)));
-        let contains_cwd = contains_cwd(&worktree);
         let target = match worktree.branch {
             Some(name) => OwnedTarget::Held {
                 name,
@@ -1517,7 +1524,7 @@ mod tests {
         let id = assessment
             .offers()
             .iter()
-            .find(|offer| console::strip_ansi_codes(offer.label()).starts_with("feature"))
+            .find(|offer| console::strip_ansi_codes(&offer.label).starts_with("feature"))
             .map(Offer::id)
             .expect("feature offer");
 
