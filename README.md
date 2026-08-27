@@ -157,7 +157,7 @@ A named target like `wt rm .` has no row to carry a marker, so the same informat
 ```
 ! ~/dev/worktrees/repo/spike has uncommitted changes
 ! spike has unmerged commits and no upstream
-? Remove the worktree and delete spike anyway? [y/N]
+? Remove the worktree and delete spike anyway? [y/N] / esc
 ```
 
 Nothing at risk means no prompt at all. `--force` (`-f`) skips it. In a pipe or CI run there's no way to show the warning or ask, so a risky removal refuses and exits non-zero unless you pass `--force`.
