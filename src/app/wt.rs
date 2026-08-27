@@ -329,12 +329,13 @@ fn select_for_removal(
             })
             .collect();
         let legend = super::risk_legend(risks);
-        return multi_select(
+        return Ok(multi_select(
             "Remove worktrees (space to toggle, →/← all/none)",
             legend.as_deref(),
             &items,
             keys,
-        );
+        )?
+        .unwrap_or_default());
     };
 
     // `.` means the worktree the cwd sits in, matching `perch .` for the

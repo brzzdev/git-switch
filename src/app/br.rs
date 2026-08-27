@@ -117,7 +117,9 @@ pub fn run_rm(options: &RmOptions) -> AppResult<()> {
     if selected.is_empty() {
         return Ok(());
     }
-    let upstreams = select_upstreams(&rows, &selected, options)?;
+    let Some(upstreams) = select_upstreams(&rows, &selected, options)? else {
+        return Ok(());
+    };
 
     let mut failed = false;
     let mut steps = removal::GitSteps::at_main(Some(&main.path));
@@ -259,12 +261,13 @@ fn select_local(
             .map(|row| row.risk)
             .collect();
         let legend = risk_legend(&visible_risks);
-        return multi_select(
+        return Ok(multi_select(
             "Remove local branches (space to toggle, →/← all/none)",
             legend.as_deref(),
             &items,
             keys,
-        );
+        )?
+        .unwrap_or_default());
     };
 
     let index = rows
@@ -340,14 +343,14 @@ fn select_upstreams(
     rows: &[BranchRow],
     selected: &[usize],
     options: &RmOptions,
-) -> AppResult<UpstreamPlan> {
+) -> AppResult<Option<UpstreamPlan>> {
     let selection = UpstreamSelection {
         target_was_named: options.target.is_some(),
         requested: options.upstream,
         interactive: interactive_term().is_some(),
     };
     if !selection.requested && !selection.interactive {
-        return Ok(UpstreamPlan::default());
+        return Ok(Some(UpstreamPlan::default()));
     }
 
     let mut choices = Vec::new();
@@ -364,17 +367,17 @@ fn select_upstreams(
         }
     }
     if choices.is_empty() {
-        return Ok(UpstreamPlan {
+        return Ok(Some(UpstreamPlan {
             selected: HashMap::new(),
             failures,
-        });
+        }));
     }
 
     if options.force && selection.requested {
-        return Ok(plan_all(choices, failures));
+        return Ok(Some(plan_all(choices, failures)));
     }
     if selection.target_was_named {
-        return select_named_upstream(choices, failures, selection);
+        return select_named_upstream(choices, failures, selection).map(Some);
     }
 
     select_upstream_rows(choices, failures, selection.requested)
@@ -422,7 +425,7 @@ fn select_upstream_rows(
     choices: Vec<UpstreamChoice>,
     failures: HashMap<usize, String>,
     requested: bool,
-) -> AppResult<UpstreamPlan> {
+) -> AppResult<Option<UpstreamPlan>> {
     let Some(keys) = interactive_keys() else {
         // Non-interactive (piped/CI): we can't prompt, so refuse an explicit
         // request or keep every upstream rather than blocking on key input.
@@ -432,10 +435,10 @@ fn select_upstream_rows(
                     .into(),
             ))
         } else {
-            Ok(UpstreamPlan {
+            Ok(Some(UpstreamPlan {
                 selected: HashMap::new(),
                 failures,
-            })
+            }))
         };
     };
     let items: Vec<MultiItem> = choices
@@ -446,14 +449,17 @@ fn select_upstream_rows(
             disabled: false,
         })
         .collect();
-    let picked = multi_select(
+    let Some(picked) = multi_select(
         "Also delete upstream branches? (space to toggle, →/← all/none)",
         Some("Each selected row removes a shared upstream ref"),
         &items,
         keys,
-    )?;
+    )?
+    else {
+        return Ok(None);
+    };
     let picked: HashSet<usize> = picked.into_iter().collect();
-    Ok(UpstreamPlan {
+    Ok(Some(UpstreamPlan {
         selected: choices
             .into_iter()
             .enumerate()
@@ -464,7 +470,7 @@ fn select_upstream_rows(
             })
             .collect(),
         failures,
-    })
+    }))
 }
 
 fn upstream_choice(

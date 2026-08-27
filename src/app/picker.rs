@@ -821,8 +821,7 @@ fn render_line(line: &str) {
 enum MultiMsg {
     Accepted,
     AllSelected,
-    /// Settles on no rows, which is indistinguishable from accepting an empty
-    /// tick list — as it has always been, since both mean "remove nothing".
+    /// Cancels the picker, distinct from accepting an empty tick list.
     Escaped,
     NoneSelected,
     SteppedDown,
@@ -866,15 +865,15 @@ impl MultiModel {
         }
     }
 
-    fn update(&mut self, msg: MultiMsg) -> Flow<Vec<usize>> {
+    fn update(&mut self, msg: MultiMsg) -> Flow<Option<Vec<usize>>> {
         match msg {
-            MultiMsg::Accepted => return Flow::Stop(self.ticked()),
+            MultiMsg::Accepted => return Flow::Stop(Some(self.ticked())),
             MultiMsg::AllSelected => {
                 for (selected, disabled) in self.selected.iter_mut().zip(&self.disabled) {
                     *selected = !disabled;
                 }
             }
-            MultiMsg::Escaped => return Flow::Stop(Vec::new()),
+            MultiMsg::Escaped => return Flow::Stop(None),
             MultiMsg::NoneSelected => self.selected.fill(false),
             // Unlike the single-select, this is a fixed list of things to act
             // on rather than a ring: running off an end stays put, where
@@ -922,7 +921,7 @@ pub(crate) fn multi_select(
     legend: Option<&str>,
     items: &[MultiItem],
     mut keys: impl KeySource,
-) -> AppResult<Vec<usize>> {
+) -> AppResult<Option<Vec<usize>>> {
     let term = Term::stderr();
     let mut model = MultiModel::new(items);
     let header = format!("{} {}", style("?").green().bold(), style(prompt).bold());
@@ -976,9 +975,9 @@ pub(crate) fn multi_select(
         let Some(msg) = multi_msg(&keys.read_key()?) else {
             continue;
         };
-        if let Flow::Stop(ticked) = model.update(msg) {
+        if let Flow::Stop(selection) = model.update(msg) {
             clear(drawn);
-            return Ok(ticked);
+            return Ok(selection);
         }
 
         clear(drawn);
@@ -1298,7 +1297,7 @@ mod tests {
         defaults: &[bool],
         disabled: &[bool],
         keys: Vec<Key>,
-    ) -> Vec<usize> {
+    ) -> Option<Vec<usize>> {
         multi_select(
             "Test",
             None,
@@ -1308,7 +1307,7 @@ mod tests {
         .expect("multi_select should not error")
     }
 
-    fn run_multi_select(items: &[&str], defaults: &[bool], keys: Vec<Key>) -> Vec<usize> {
+    fn run_multi_select(items: &[&str], defaults: &[bool], keys: Vec<Key>) -> Option<Vec<usize>> {
         run_multi_select_with_disabled(items, defaults, &vec![false; items.len()], keys)
     }
 
@@ -1338,7 +1337,7 @@ mod tests {
                 Key::Enter,
             ],
         );
-        assert_eq!(got, vec![0, 2]);
+        assert_eq!(got, Some(vec![0, 2]));
     }
 
     #[test]
@@ -1348,7 +1347,7 @@ mod tests {
             &[false, false],
             vec![Key::ArrowRight, Key::Enter],
         );
-        assert_eq!(got, vec![0, 1]);
+        assert_eq!(got, Some(vec![0, 1]));
     }
 
     #[test]
@@ -1359,7 +1358,7 @@ mod tests {
             &[true, false],
             vec![Key::Char(' '), Key::Enter],
         );
-        assert!(got.is_empty());
+        assert_eq!(got, Some(Vec::new()));
     }
 
     #[test]
@@ -1370,19 +1369,19 @@ mod tests {
             &[true, false],
             vec![Key::ArrowRight, Key::Enter],
         );
-        assert_eq!(got, vec![1]);
+        assert_eq!(got, Some(vec![1]));
     }
 
     #[test]
     fn multi_select_left_selects_none() {
         let got = run_multi_select(&["a", "b"], &[true, true], vec![Key::ArrowLeft, Key::Enter]);
-        assert!(got.is_empty());
+        assert_eq!(got, Some(Vec::new()));
     }
 
     #[test]
-    fn multi_select_escape_returns_empty() {
+    fn multi_select_escape_cancels() {
         let got = run_multi_select(&["a", "b"], &[true, true], vec![Key::Escape]);
-        assert!(got.is_empty());
+        assert_eq!(got, None);
     }
 
     /// One list, whichever verb is picking: every branch is on it, in the same

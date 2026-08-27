@@ -698,12 +698,15 @@ pub(crate) fn prompt_delete_stale_branches(
         return Ok(());
     };
     let legend = risk_legend(&rows.iter().map(|r| r.risk).collect::<Vec<_>>());
-    let selections = multi_select(
+    let Some(selections) = multi_select(
         "Delete stale branches (space to toggle, →/← all/none)",
         legend.as_deref(),
         &items,
         keys,
-    )?;
+    )?
+    else {
+        return Ok(());
+    };
 
     // Delete from the main worktree, the same HEAD the risk was judged against.
     let mut steps = removal::GitSteps::at_main(main_dir.as_deref());

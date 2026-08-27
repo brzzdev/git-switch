@@ -2090,6 +2090,25 @@ fn br_rm_refuses_a_branch_held_by_a_worktree() {
 }
 
 #[test]
+fn br_rm_refuses_the_main_worktree_branch_without_a_wt_rm_hint() {
+    let (_bare, work) = setup();
+
+    let output = perch_args(work.path(), &["br", "rm", "main", "--force"]);
+    let stderr = stderr_str(&output);
+
+    assert!(!output.status.success());
+    assert!(local_branch_exists(work.path(), "main"));
+    assert!(
+        stderr.contains("check out another branch in the main worktree first"),
+        "the refusal should explain how to release the main-worktree branch; got: {stderr}",
+    );
+    assert!(
+        !stderr.contains("wt rm"),
+        "the main worktree cannot be removed with wt rm; got: {stderr}",
+    );
+}
+
+#[test]
 fn br_rm_does_not_give_dot_a_special_meaning() {
     let (_bare, work) = setup();
 
@@ -2355,6 +2374,33 @@ fn br_rm_upstream_flag_preselects_the_named_confirmation() {
     assert!(!local_branch_exists(work.path(), "feature"));
     assert_eq!(remote_branch_tip(work.path(), "origin", "feature"), None);
     assert!(output.contains("deleted upstream origin/feature"));
+}
+
+#[test]
+fn br_rm_escape_from_upstream_picker_cancels_every_removal() {
+    let (_bare, work) = setup();
+    for branch in ["a", "b"] {
+        git(work.path(), &["branch", branch]);
+        git(work.path(), &["push", "-u", "origin", branch]);
+    }
+
+    drive_multi_select_prompt_then_escape(
+        work.path(),
+        &["br", "rm", "--upstream"],
+        "a",
+        "Also delete upstream branches?",
+    );
+
+    assert_eq!(
+        (
+            local_branch_exists(work.path(), "a"),
+            local_branch_exists(work.path(), "b"),
+            remote_branch_tip(work.path(), "origin", "a").is_some(),
+            remote_branch_tip(work.path(), "origin", "b").is_some(),
+        ),
+        (true, true, true, true),
+        "Escape from the upstream picker must cancel the whole removal",
+    );
 }
 
 #[test]
@@ -2922,6 +2968,46 @@ fn drive_multi_select_prompt(
     hooks: bool,
     before_confirm: impl FnOnce(),
 ) -> Vec<u8> {
+    drive_multi_select_prompt_until(
+        work,
+        args,
+        row,
+        hooks,
+        before_confirm,
+        MultiSelectFinish::Accept,
+    )
+}
+
+fn drive_multi_select_prompt_then_escape(
+    work: &Path,
+    args: &[&str],
+    row: &str,
+    prompt: &str,
+) -> Vec<u8> {
+    drive_multi_select_prompt_until(
+        work,
+        args,
+        row,
+        false,
+        || {},
+        MultiSelectFinish::EscapeAt(prompt),
+    )
+}
+
+#[derive(Clone, Copy)]
+enum MultiSelectFinish<'a> {
+    Accept,
+    EscapeAt(&'a str),
+}
+
+fn drive_multi_select_prompt_until(
+    work: &Path,
+    args: &[&str],
+    row: &str,
+    hooks: bool,
+    before_confirm: impl FnOnce(),
+    finish: MultiSelectFinish<'_>,
+) -> Vec<u8> {
     use portable_pty::{CommandBuilder, PtySize, native_pty_system};
     use std::io::{Read, Write};
     use std::sync::Arc;
@@ -2966,6 +3052,11 @@ fn drive_multi_select_prompt(
     before_confirm();
     writer.write_all(b"\r").unwrap();
     writer.flush().unwrap();
+    if let MultiSelectFinish::EscapeAt(prompt) = finish {
+        wait_for(&seen, prompt);
+        writer.write_all(b"\x1b").unwrap();
+        writer.flush().unwrap();
+    }
 
     child.wait_bounded();
     drop(writer);
