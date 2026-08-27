@@ -25,7 +25,7 @@ function __perch_after_double_dash
     return 1
 end
 
-# True while `wt rm` still wants a target. It reads that target as the first word
+# True while either removal subverb still wants a target. It reads that target as the first word
 # after `rm` that isn't an option, and takes its `--force` in either order, so a
 # flag or a `--` leaves the slot open while a bare word closes it.
 function __perch_rm_wants_target

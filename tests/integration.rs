@@ -2127,6 +2127,7 @@ fn br_rm_picker_shows_but_does_not_select_disabled_branches() {
     git(&work, &["branch", "held"]);
     git(&work, &["branch", "kept"]);
     git(&work, &["config", "perch.keep", "kept"]);
+    git(&work, &["switch", "-c", "current"]);
     let held_path = parent.path().join("held-worktree");
     git(
         &work,
@@ -2143,7 +2144,7 @@ fn br_rm_picker_shows_but_does_not_select_disabled_branches() {
     .into_owned();
 
     assert!(!local_branch_exists(&work, "free"));
-    for branch in ["held", "kept", "main"] {
+    for branch in ["current", "held", "kept", "main"] {
         assert!(
             local_branch_exists(&work, branch),
             "disabled branch {branch} should survive; output: {output}"
@@ -2363,6 +2364,10 @@ fn br_rm_batch_keeps_a_failed_local_and_its_upstream_then_continues() {
         output.contains("one or more requested removals failed"),
         "a partial batch failure must return a failing result: {output}"
     );
+    assert!(
+        output.find("could not delete a").unwrap() < output.find("deleted b").unwrap(),
+        "pairs should report in picker order: {output}"
+    );
 }
 
 #[test]
@@ -2397,6 +2402,13 @@ fn br_rm_batch_continues_after_explicit_upstream_inspection_failure() {
         "the failed pair should be reported in row order: {output}"
     );
     assert!(output.contains("one or more requested removals failed"));
+    assert!(
+        output
+            .find("could not prepare upstream removal for a")
+            .unwrap()
+            < output.find("deleted b").unwrap(),
+        "preflight failures should keep pair order: {output}"
+    );
 }
 
 #[test]
