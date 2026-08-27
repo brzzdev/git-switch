@@ -3,7 +3,7 @@
 //! targets have a safety contract of their own.
 
 use super::picker::{MultiItem, interactive_keys, multi_select};
-use super::{Confirmation, confirm, interactive_term, removal};
+use super::{Confirmation, confirm, interactive_term, removal, select_removal_locals};
 use crate::grammar::BranchRemoval;
 use crate::{AppResult, Error, git};
 
@@ -30,7 +30,13 @@ pub(crate) fn run_rm(options: &BranchRemoval) -> AppResult<()> {
         &remote,
         upstream,
     )))?;
-    let Some(choice) = select_local(&assessment, options)? else {
+    let Some(choice) = select_removal_locals(
+        &assessment,
+        options.target(),
+        options.force(),
+        "Remove local branches (space to toggle, →/← all/none)",
+    )?
+    else {
         return Ok(());
     };
     let pending = assessment.choose(choice)?;
@@ -41,57 +47,6 @@ pub(crate) fn run_rm(options: &BranchRemoval) -> AppResult<()> {
         return Ok(());
     };
     finish(pending, upstream)
-}
-
-fn select_local(
-    assessment: &removal::Assessment,
-    options: &BranchRemoval,
-) -> AppResult<Option<removal::LocalChoice>> {
-    if let Some(target) = options.target() {
-        let named = assessment.named(target)?;
-        if options.force() {
-            return Ok(Some(removal::LocalChoice::forced(named.id())));
-        }
-        if named.warnings().is_empty() {
-            return Ok(Some(removal::LocalChoice::named(named.id())));
-        }
-        if interactive_term().is_none() {
-            return Err(Error::Unconfirmed(named.refusal().to_string()));
-        }
-        for warning in named.warnings() {
-            eprintln!("{warning}");
-        }
-        return Ok(
-            (confirm(named.question(), false)? == Confirmation::Accepted)
-                .then(|| removal::LocalChoice::named(named.id())),
-        );
-    }
-
-    let Some(keys) = interactive_keys() else {
-        return Ok(None);
-    };
-    let items: Vec<MultiItem> = assessment.offers().iter().map(MultiItem::from).collect();
-    let Some(selected) = multi_select(
-        "Remove local branches (space to toggle, →/← all/none)",
-        assessment.legend(),
-        &items,
-        keys,
-    )?
-    else {
-        return Ok(None);
-    };
-    if selected.is_empty() {
-        return Ok(None);
-    }
-    let ids = selected
-        .into_iter()
-        .map(|index| assessment.offers()[index].id())
-        .collect();
-    Ok(Some(if options.force() {
-        removal::LocalChoice::forced_picked(ids)
-    } else {
-        removal::LocalChoice::picked(ids)
-    }))
 }
 
 fn select_upstream(

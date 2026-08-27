@@ -5,10 +5,10 @@ use std::path::{Path, PathBuf};
 use console::{measure_text_width, style};
 use indicatif::ProgressBar;
 
-use super::picker::{MultiItem, PickerOptions, Selection, interactive_keys, multi_select, pick};
+use super::picker::{PickerOptions, Selection, interactive_keys, pick};
 use super::{
-    Confirmation, CursorGuard, build_catalogue, confirm, display_path, fetch_and_ff, handoff_cd,
-    hook, marker, picker, prompt_delete_stale_branches, removal, report_update,
+    CursorGuard, build_catalogue, display_path, fetch_and_ff, handoff_cd, hook, marker, picker,
+    prompt_delete_stale_branches, removal, report_update, select_removal_locals,
 };
 use crate::grammar::{ShellHandoff, Verb, WorktreeRemoval};
 use crate::{AppResult, Error, git};
@@ -180,47 +180,14 @@ pub(crate) fn run_rm(options: &WorktreeRemoval) -> AppResult<()> {
         eprintln!("No worktrees to remove.");
         return Ok(());
     }
-    let choice = if let Some(name) = options.target() {
-        let named = assessment.named(name)?;
-        if options.force() {
-            removal::LocalChoice::forced(named.id())
-        } else if named.warnings().is_empty() {
-            removal::LocalChoice::named(named.id())
-        } else {
-            if !super::is_interactive() {
-                return Err(Error::Unconfirmed(named.refusal().to_string()));
-            }
-            for warning in named.warnings() {
-                eprintln!("{warning}");
-            }
-            if confirm(named.question(), false)? != Confirmation::Accepted {
-                return Ok(());
-            }
-            removal::LocalChoice::named(named.id())
-        }
-    } else {
-        let Some(keys) = interactive_keys() else {
-            return Ok(());
-        };
-        let items: Vec<MultiItem> = assessment.offers().iter().map(MultiItem::from).collect();
-        let Some(selected) = multi_select(
-            "Remove worktrees (space to toggle, →/← all/none)",
-            assessment.legend(),
-            &items,
-            keys,
-        )?
-        else {
-            return Ok(());
-        };
-        let ids = selected
-            .into_iter()
-            .map(|index| assessment.offers()[index].id())
-            .collect();
-        if options.force() {
-            removal::LocalChoice::forced_picked(ids)
-        } else {
-            removal::LocalChoice::picked(ids)
-        }
+    let Some(choice) = select_removal_locals(
+        &assessment,
+        options.target(),
+        options.force(),
+        "Remove worktrees (space to toggle, →/← all/none)",
+    )?
+    else {
+        return Ok(());
     };
     let pending = assessment.choose(choice)?;
     let outcome = pending.finish(removal::UpstreamChoice::keep())?;
@@ -235,16 +202,15 @@ pub(crate) fn run_rm(options: &WorktreeRemoval) -> AppResult<()> {
 
 /// `wt rm --complete` — the names `wt rm` will accept, one per line, for the
 /// shell completions to offer. It is [`removable`] and [`rm_names`] and nothing
-/// else, the two rules `run_rm` itself reads, so what is offered and what is
-/// accepted cannot drift apart.
+/// else, the same worktree facts Removal assesses for `run_rm`.
 ///
 /// `.` is the one accepted target left off. It is a single character, every
 /// shell already completes it as a path, and it names the worktree the cwd sits
 /// in rather than any worktree in particular — [`select_for_removal`] resolves
-/// it from the cwd, and `rm_names` never sees it.
+/// it from the cwd, and [`rm_names`] never sees it.
 ///
-/// This returns the raw names in worktree order. Grammar removes duplicates and
-/// renders the newline-separated answer after Git facts return to it.
+/// This returns unique raw names in worktree order. Grammar renders the
+/// newline-separated answer after Git facts return to it.
 pub(crate) fn removal_candidates() -> AppResult<Vec<String>> {
     let worktrees = git::worktree_list()?;
     let mut seen = HashSet::new();

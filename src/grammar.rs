@@ -192,9 +192,12 @@ pub(crate) fn parse(args: &[String]) -> Result<Invocation, GrammarError> {
         Some("--version" | "-V") => Ok(Invocation::Version),
         Some("--complete") => Ok(branch_completion(Position::Bare)),
         Some("--") => Ok(parse_escaped(args.get(1), Verb::Go)),
-        Some("br") => parse_branch(&args[1..]),
-        Some("wt") => parse_worktree(&args[1..]),
-        Some(target) => Ok(navigate(Verb::Go, Some(target))),
+        Some(word) => match parse_verb(word) {
+            Some(Verb::Here) => parse_branch(&args[1..]),
+            Some(Verb::Worktree) => parse_worktree(&args[1..]),
+            Some(Verb::Go) => unreachable!("go is the absence of a command word"),
+            None => Ok(navigate(Verb::Go, Some(word))),
+        },
         None => Ok(navigate(Verb::Go, None)),
     }
 }
@@ -208,8 +211,8 @@ fn parse_branch(args: &[String]) -> Result<Invocation, GrammarError> {
         Some("--help" | "-h") => Ok(Invocation::Help(HelpPage::Branch)),
         Some("--complete") => Ok(branch_completion(Position::Branch)),
         Some("--") => Ok(parse_escaped(args.get(1), Verb::Here)),
-        Some("rm") => parse_branch_removal(&args[1..]),
-        Some(target) => Ok(navigate(Verb::Here, Some(target))),
+        Some(word) if parse_branch_subverb(word).is_some() => parse_branch_removal(&args[1..]),
+        Some(word) => Ok(navigate(Verb::Here, Some(word))),
         None => Ok(navigate(Verb::Here, None)),
     }
 }

@@ -26,6 +26,23 @@ struct Risk {
     unmerged: Option<git::Unmerged>,
 }
 
+impl Risk {
+    /// The picker markers for this indivisible safety judgement. Keeping the
+    /// rendering here stops dirtiness and mergedness travelling as loose facts.
+    fn markers(self) -> String {
+        let mut markers = Vec::new();
+        if self.dirty {
+            markers.push(marker::Marker::Dirty);
+        }
+        match self.unmerged {
+            Some(git::Unmerged::Ahead(n)) => markers.push(marker::Marker::Unmerged(Some(n))),
+            Some(git::Unmerged::NoUpstream) => markers.push(marker::Marker::Unmerged(None)),
+            None => {}
+        }
+        marker::join(&markers)
+    }
+}
+
 /// One Removal request, before any warning has licensed mutation.
 pub(crate) enum Request {
     Stale(StaleRequest),
@@ -785,7 +802,11 @@ fn assess_stale(request: StaleRequest) -> Assessment {
             Some(_) if risk.dirty => format!("(+ worktree {})", marker::Marker::Dirty),
             Some(_) => "(+ worktree)".to_string(),
         };
-        let branch_risk = marker::markers(false, risk.unmerged);
+        let branch_risk = Risk {
+            dirty: false,
+            unmerged: risk.unmerged,
+        }
+        .markers();
         let ground = match stale.ground {
             git::Ground::Gone => "gone",
             git::Ground::Landed => "landed",
@@ -884,7 +905,7 @@ fn assess_branches(request: BranchRequest) -> AppResult<Assessment> {
         let markers = if disabled {
             String::new()
         } else {
-            marker::markers(risk.dirty, risk.unmerged)
+            risk.markers()
         };
         let detail = [annotation, markers]
             .into_iter()
@@ -988,7 +1009,7 @@ fn assess_worktrees(request: WorktreeRequest) -> AppResult<Assessment> {
         if current == Some(LocalId(index)) {
             name.push_str(" (current)");
         }
-        raw.push((name, marker::markers(risk.dirty, risk.unmerged)));
+        raw.push((name, risk.markers()));
         let target = match worktree.branch {
             Some(name) => OwnedTarget::Held {
                 name,
@@ -1130,7 +1151,7 @@ impl License {
 /// What happened, one field per step. `None` means the step never ran: because
 /// the target had nothing for it to act on, or — for the branch — because the
 /// worktree refused to go and left it alone. It carries the [`Target`] so
-/// [`reporting`](super::reporting) can word the outcome from the report alone.
+/// the reporting code can word the outcome from the report alone.
 #[derive(Debug)]
 struct Report<'a> {
     target: Target<'a>,
@@ -1362,6 +1383,29 @@ mod tests {
             .iter()
             .map(|line| console::strip_ansi_codes(line).into_owned())
             .collect()
+    }
+
+    fn plain_marker(risk: Risk) -> String {
+        console::strip_ansi_codes(&risk.markers()).into_owned()
+    }
+
+    #[test]
+    fn risk_markers_keep_dirty_and_unmerged_facts_together() {
+        assert_eq!(
+            plain_marker(Risk {
+                dirty: true,
+                unmerged: Some(git::Unmerged::Ahead(2)),
+            }),
+            "● ↑2"
+        );
+        assert_eq!(
+            plain_marker(Risk {
+                dirty: false,
+                unmerged: Some(git::Unmerged::NoUpstream),
+            }),
+            "↑"
+        );
+        assert!(Risk::default().markers().is_empty());
     }
 
     /// One recorded call, as the rules care about it: which step, and whether it

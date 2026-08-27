@@ -635,39 +635,75 @@ pub(crate) fn prompt_delete_stale_branches(
         old_branch,
         destination,
     )))?;
-    if assessment.offers().is_empty() {
-        return Ok(());
-    }
-
-    let items: Vec<MultiItem> = assessment.offers().iter().map(MultiItem::from).collect();
-
-    // The terminal was checked at the top, so this is acquisition rather than a
-    // second guard — raw mode is taken here and not a moment earlier, so it is
-    // never held across the git work above.
-    let Some(keys) = interactive_keys() else {
-        return Ok(());
-    };
-    let Some(selections) = multi_select(
+    let Some(choice) = select_removal_locals(
+        &assessment,
+        None,
+        false,
         "Delete stale branches (space to toggle, →/← all/none)",
-        assessment.legend(),
-        &items,
-        keys,
     )?
     else {
         return Ok(());
     };
-
-    let ids = selections
-        .into_iter()
-        .map(|index| assessment.offers()[index].id())
-        .collect();
-    let pending = assessment.choose(removal::LocalChoice::picked(ids))?;
+    let pending = assessment.choose(choice)?;
     let outcome = pending.finish(removal::UpstreamChoice::keep())?;
     for line in outcome.lines() {
         eprintln!("{line}");
     }
 
     Ok(())
+}
+
+/// Turns a named target or picker interaction into the one opaque choice that
+/// Removal accepts. Callers supply only the verb-specific picker prompt.
+pub(crate) fn select_removal_locals(
+    assessment: &removal::Assessment,
+    target: Option<&str>,
+    force: bool,
+    prompt: &str,
+) -> AppResult<Option<removal::LocalChoice>> {
+    if let Some(name) = target {
+        let named = assessment.named(name)?;
+        if force {
+            return Ok(Some(removal::LocalChoice::forced(named.id())));
+        }
+        if named.warnings().is_empty() {
+            return Ok(Some(removal::LocalChoice::named(named.id())));
+        }
+        if !is_interactive() {
+            return Err(Error::Unconfirmed(named.refusal().to_string()));
+        }
+        for warning in named.warnings() {
+            eprintln!("{warning}");
+        }
+        return Ok(
+            (confirm(named.question(), false)? == Confirmation::Accepted)
+                .then(|| removal::LocalChoice::named(named.id())),
+        );
+    }
+
+    if assessment.offers().is_empty() {
+        return Ok(None);
+    }
+
+    let Some(keys) = interactive_keys() else {
+        return Ok(None);
+    };
+    let items: Vec<MultiItem> = assessment.offers().iter().map(MultiItem::from).collect();
+    let Some(selected) = multi_select(prompt, assessment.legend(), &items, keys)? else {
+        return Ok(None);
+    };
+    if selected.is_empty() {
+        return Ok(None);
+    }
+    let ids = selected
+        .into_iter()
+        .map(|index| assessment.offers()[index].id())
+        .collect();
+    Ok(Some(if force {
+        removal::LocalChoice::forced_picked(ids)
+    } else {
+        removal::LocalChoice::picked(ids)
+    }))
 }
 
 /// Renders `word` so a shell reads it as the single literal it is. Git allows
