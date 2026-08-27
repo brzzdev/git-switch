@@ -33,7 +33,8 @@ _perch() {
   )
   branch_rm_options=(
     '--upstream:Also remove explicitly configured same-named upstreams'
-    '(-f --force)'{-f,--force}':Skip destructive confirmations'
+    '-f:Skip destructive confirmations'
+    '--force:Skip destructive confirmations'
   )
   worktree_subs=(
     'ls:List worktrees'
