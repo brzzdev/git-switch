@@ -25,17 +25,28 @@ function __perch_after_double_dash
     return 1
 end
 
-# True while either removal subverb still wants a target. It reads that target as the first word
-# after `rm` that isn't an option, and takes its `--force` in either order, so a
-# flag or a `--` leaves the slot open while a bare word closes it.
+# True while either removal subverb still wants a target. For `wt rm`, `--`
+# closes option parsing and the following word is the target even when it begins
+# with `-`. `br rm` keeps its existing long-option grammar.
 function __perch_rm_wants_target
     set -l verb $argv[1]
     set -l tokens (commandline -opc)
+    set -l reads_options 1
     test (count $tokens) -ge 3; or return 1
     test "$tokens[2]" = $verb; and test "$tokens[3]" = rm; or return 1
     if test (count $tokens) -gt 3
         for token in $tokens[4..-1]
-            string match --quiet -- '-*' $token; or return 1
+            if test "$token" = --
+                if test $verb = wt; and test $reads_options -eq 1
+                    set reads_options 0
+                else
+                    return 1
+                end
+            else if test $reads_options -eq 1; and string match --quiet -- '-*' $token
+                continue
+            else
+                return 1
+            end
         end
     end
     return 0

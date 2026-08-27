@@ -18,9 +18,6 @@ use std::fmt;
 
 use console::style;
 
-use super::Risk;
-use crate::git;
-
 /// The rendering of a *Risk*, or of a worktree's position against its upstream.
 /// A marker is a warning, and per ADR 0001 a shown warning is what licenses
 /// forcing — so what a glyph means is a fact about the whole project, not about
@@ -55,28 +52,12 @@ impl fmt::Display for Marker {
 }
 
 /// Joins markers into a column, space-separated.
-fn join(markers: &[Marker]) -> String {
+pub(super) fn join(markers: &[Marker]) -> String {
     markers
         .iter()
         .map(Marker::to_string)
         .collect::<Vec<_>>()
         .join(" ")
-}
-
-/// The markers for a picker row: `●` for a dirty worktree, `↑N` for an unmerged
-/// branch. Empty when there is nothing to lose, which is what keeps a non-empty
-/// column meaningful — and what withholds the license to force.
-pub(crate) fn markers(risk: Risk) -> String {
-    let mut marks = Vec::new();
-    if risk.dirty {
-        marks.push(Marker::Dirty);
-    }
-    match risk.unmerged {
-        Some(git::Unmerged::Ahead(n)) => marks.push(Marker::Unmerged(Some(n))),
-        Some(git::Unmerged::NoUpstream) => marks.push(Marker::Unmerged(None)),
-        None => {}
-    }
-    join(&marks)
 }
 
 /// The status column for `wt ls`: the same `●` the pickers draw, plus where the
@@ -102,35 +83,6 @@ mod tests {
     /// Strips ANSI styling so assertions read as the user sees the column.
     fn plain(s: &str) -> String {
         console::strip_ansi_codes(s).into_owned()
-    }
-
-    /// Dirtiness belongs to the worktree and unmerged commits to the branch, so
-    /// a row at risk both ways carries both glyphs.
-    #[test]
-    fn markers_render_a_dirty_worktree_and_an_unmerged_branch() {
-        let risk = Risk {
-            dirty: true,
-            unmerged: Some(git::Unmerged::Ahead(2)),
-        };
-        assert_eq!(plain(&markers(risk)), "● ↑2");
-    }
-
-    /// With no upstream there is no count to give, but the risk is real — so the
-    /// glyph still appears rather than being dropped for want of a number.
-    #[test]
-    fn unmerged_without_upstream_renders_a_bare_arrow() {
-        let risk = Risk {
-            dirty: false,
-            unmerged: Some(git::Unmerged::NoUpstream),
-        };
-        assert_eq!(plain(&markers(risk)), "↑");
-    }
-
-    /// An empty marker column is what keeps a non-empty one meaningful — and per
-    /// ADR 0001 it is also what withholds the license to force.
-    #[test]
-    fn no_risk_renders_no_markers() {
-        assert!(markers(Risk::default()).is_empty());
     }
 
     /// `wt ls` draws the same glyphs as the pickers, plus the one only it has.

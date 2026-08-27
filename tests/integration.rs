@@ -1126,6 +1126,68 @@ fn bash_br_rm_completion_offers_one_target_and_only_long_flags() {
     assert!(!after_target.lines().any(|line| line == "feature"));
     assert!(after_target.lines().any(|line| line == "--upstream"));
     assert!(after_target.lines().any(|line| line == "--force"));
+
+    let after_rejected_escape = complete("perch br rm -- ''", 4);
+    assert!(
+        !after_rejected_escape.lines().any(|line| line == "feature"),
+        "br rm rejects `--`, so completion must not offer a target after it: {after_rejected_escape}"
+    );
+}
+
+#[test]
+fn zsh_br_rm_completion_rejects_a_double_dash() {
+    if Command::new("zsh").arg("--version").output().is_err() {
+        return;
+    }
+    let completions = concat!(env!("CARGO_MANIFEST_DIR"), "/completions/_perch");
+    let script = format!(
+        "function _describe {{ : }}\n\
+         service=skip\n\
+         source \"{completions}\"\n\
+         function _perch_offers {{ print -r -- \"$*\" }}\n\
+         service=perch\n\
+         words=(perch br rm -- '')\n\
+         CURRENT=5\n\
+         _perch\n"
+    );
+
+    let output = Command::new("zsh")
+        .args(["-c", &script])
+        .output()
+        .expect("failed to run zsh completion");
+
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+    assert_eq!(stdout_str(&output), "");
+}
+
+#[test]
+fn fish_br_rm_completion_rejects_a_double_dash() {
+    if Command::new("fish").arg("--version").output().is_err() {
+        return;
+    }
+    let (_bare, work) = setup();
+    git(work.path(), &["branch", "feature"]);
+    let bin = Path::new(env!("CARGO_BIN_EXE_perch")).parent().unwrap();
+    let completions = concat!(env!("CARGO_MANIFEST_DIR"), "/completions/perch.fish");
+    let script = format!("source \"{completions}\"\ncomplete -C 'perch br rm -- '\n");
+
+    let output = Command::new("fish")
+        .args(["-c", &script])
+        .current_dir(work.path())
+        .env(
+            "PATH",
+            format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
+        )
+        .env("PERCH_NO_HOOKS", "1")
+        .output()
+        .expect("failed to run fish completion");
+
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+    let completions = stdout_str(&output);
+    assert!(
+        !completions.lines().any(|line| line.starts_with("feature")),
+        "br rm rejects `--`, so fish must not offer a target after it: {completions}"
+    );
 }
 
 /// Regression, in both halves. Git permits `$`, backticks and `${IFS}` in a ref
@@ -1272,6 +1334,26 @@ fn help_flag_prints_usage() {
         out.contains("PERCH_NO_SHORTCUTS"),
         "expected the shell shortcut footer in help, got: {out}"
     );
+}
+
+#[test]
+fn help_pages_remain_exact_static_text() {
+    let dir = TempDir::new().unwrap();
+    for (args, expected) in [
+        (&["--help"][..], include_str!("fixtures/help/main.txt")),
+        (
+            &["br", "--help"][..],
+            include_str!("fixtures/help/branch.txt"),
+        ),
+        (
+            &["wt", "--help"][..],
+            include_str!("fixtures/help/worktree.txt"),
+        ),
+    ] {
+        let output = perch_args(dir.path(), args);
+        assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+        assert_eq!(stdout_str(&output), expected);
+    }
 }
 
 #[test]
@@ -1806,6 +1888,54 @@ fn wt_rm_removes_worktree_and_deletes_branch() {
         "branch should be deleted; got: {}",
         stdout_str(&branches)
     );
+}
+
+#[test]
+fn wt_rm_rejects_malformed_invocations_before_removing_anything() {
+    let (_bare, parent, work) = setup_with_parent();
+    let path = add_worktree(&work, &parent, "feature");
+    let cases: &[(&[&str], &str)] = &[
+        (
+            &["wt", "rm", "--remote", "feature"],
+            "unknown option '--remote'",
+        ),
+        (
+            &["wt", "rm", "-f", "--force", "feature"],
+            "duplicate option '--force'",
+        ),
+        (
+            &["wt", "rm", "--", "feature", "other"],
+            "unexpected extra target 'other'",
+        ),
+    ];
+
+    for (args, expected) in cases {
+        let output = perch_args(&work, args);
+        assert!(!output.status.success(), "{args:?} should fail");
+        assert!(
+            stderr_str(&output).contains(expected),
+            "{args:?} should report {expected:?}; got: {}",
+            stderr_str(&output)
+        );
+        assert!(path.exists(), "{args:?} must not remove the worktree");
+    }
+}
+
+#[test]
+fn wt_rm_double_dash_allows_a_target_named_like_an_option() {
+    let (_bare, parent, work) = setup_with_parent();
+    git(&work, &["branch", "feature"]);
+    let path = parent.path().join("worktrees").join("repo").join("--force");
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    git(
+        &work,
+        &["worktree", "add", path.to_str().unwrap(), "feature"],
+    );
+
+    let output = perch_args(&work, &["wt", "rm", "--force", "--", "--force"]);
+
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+    assert!(!path.exists(), "the escaped target should be removed");
 }
 
 /// Risk is judged from the main worktree, so the delete must run there too.
@@ -2917,6 +3047,22 @@ fn wt_rm_reports_failure_and_keeps_branch_when_worktree_is_locked() {
 }
 
 #[test]
+fn wt_rm_from_inside_locked_worktree_hands_off_to_main() {
+    let (_bare, parent, work) = setup_with_parent();
+    let path = add_worktree(&work, &parent, "feature");
+    git(&work, &["worktree", "lock", path.to_str().unwrap()]);
+
+    let output = perch_args(&path, &["wt", "rm", "feature", "--force"]);
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+
+    let printed = stdout_str(&output).trim().to_string();
+    assert!(
+        Path::new(&printed).is_dir() && printed.ends_with("repo"),
+        "stdout should be the main worktree path; got: {printed}"
+    );
+}
+
+#[test]
 fn wt_rm_clears_missing_detached_worktree_by_dir_name() {
     let (_bare, parent, work) = setup_with_parent();
 
@@ -3878,6 +4024,27 @@ fn br_rm_does_not_fire_the_worktree_removal_hook() {
     assert!(
         !log.exists(),
         "br rm must not masquerade as worktree removal"
+    );
+}
+
+#[test]
+fn wt_rm_reports_the_removal_before_the_hook_runs() {
+    let (_bare, parent, work) = setup_with_parent();
+    add_worktree(&work, &parent, "feature");
+    git(
+        &work,
+        &["config", "perch.hook.removed", "printf 'HOOK-RAN\\n' >&2"],
+    );
+
+    let output = perch_hooked(&work, &["wt", "rm", "feature", "--force"]);
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+
+    let stderr = stderr_str(&output);
+    let removal = stderr.find("removed worktree").expect("removal report");
+    let hook = stderr.find("HOOK-RAN").expect("hook output");
+    assert!(
+        removal < hook,
+        "the removal report must precede its hook output; got: {stderr}"
     );
 }
 

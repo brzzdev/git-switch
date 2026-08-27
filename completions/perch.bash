@@ -47,14 +47,25 @@ _perch_reply() {
   done
 }
 
-# `wt rm` reads its target as the first word after `rm` that isn't an option,
-# and takes its `--force` in either order, so a flag or a `--` leaves the slot
-# open while a bare word closes it. Words typed after a target are ignored.
-# Takes those in-between words as its arguments.
+# True while a removal still wants its one target. `wt rm --` closes option
+# parsing, so the following word counts as the target even when it begins with
+# `-`; `br rm` rejects that spelling. Takes the verb, then the words already
+# typed after `rm`.
 _perch_rm_wants_target() {
-  local word
+  local verb=$1 word reads_options=1
+  shift
   for word in "$@"; do
-    [[ "$word" == -* ]] || return 1
+    if (( reads_options )) && [[ "$word" == -- ]]; then
+      if [[ "$verb" == wt ]]; then
+        reads_options=0
+      else
+        return 1
+      fi
+    elif (( reads_options )) && [[ "$word" == -* ]]; then
+      continue
+    else
+      return 1
+    fi
   done
   return 0
 }
@@ -86,7 +97,7 @@ _perch_completions() {
 
   if [[ "$verb" == "br" && "$subverb" == "rm" ]] && (( pos >= 3 )); then
     COMPREPLY=()
-    if _perch_rm_wants_target "${cmdline[@]:3:pos-3}"; then
+    if _perch_rm_wants_target br "${cmdline[@]:3:pos-3}"; then
       _perch_reply "$cur" < <(printf '%s\n' --upstream --force; _perch_offers br rm)
     else
       _perch_reply "$cur" < <(printf '%s\n' --upstream --force)
@@ -95,7 +106,7 @@ _perch_completions() {
   fi
 
   if [[ "$verb" == "wt" && "$subverb" == "rm" ]] && (( pos >= 3 )); then
-    if _perch_rm_wants_target "${cmdline[@]:3:pos-3}"; then
+    if _perch_rm_wants_target wt "${cmdline[@]:3:pos-3}"; then
       COMPREPLY=()
       _perch_reply "$cur" < <(_perch_offers wt rm)
     fi

@@ -67,7 +67,7 @@ What permits forcing: the markers already shown to the user, the separate upstre
 _Avoid_: Permission, approval, consent
 
 **Removal**:
-Destroying a local branch, an upstream branch, a worktree, or a local branch together with the worktree holding it. A worktree goes before the local branch it holds; an upstream branch goes only after its selected local branch, and only while the upstream still stands at the tip the user was shown.
+Destroying a local branch, an upstream branch, a worktree, or a local branch together with the worktree holding it. Every destructive path first *assesses* repository facts, then records the user's *choice*, and only then *finishes* the chosen work. Assessment makes no destructive change; any Git objects it creates are unreachable and have no user-visible effect. Abandoning a pending removal cancels it. A worktree goes before the local branch it holds; an upstream branch goes only after its selected local branch, and only while the upstream still stands at the tip the user was shown.
 _Avoid_: Deletion (reserved for branches), cleanup, teardown
 
 ### Targets
@@ -91,6 +91,10 @@ _Avoid_: Missing (reserved for worktrees), gone (reserved for a *Ground*), unava
 **Subverb**:
 A word a *Verb* reads before it reads a branch name. `br` reads `rm`; `wt` reads `ls` and `rm`, plus the retired `list` and `remove`, which are refused rather than taken for branches. Collision is positional, and `--` is needed wherever the dispatcher would eat the spelling: after `br` or `wt` for a subverb, at the top level for a *Verb*. Everywhere else the bare name reaches the branch, so `perch list`, `perch br list` and `perch br wt` all work as written.
 _Avoid_: Subcommand (reserved for the *Verb*), flag, option
+
+**Grammar**:
+The rules that decide whether each command word names a *Verb*, *Subverb*, option, or branch. At the top level and after `br` or `wt`, `--` stops command-word reading so the next word names a branch. Inside `wt rm`, it stops option reading so the next word names the target even when it begins with `-`; `br rm` does not accept it. Destructive forms reject duplicate options, unknown options, and extra targets rather than ignoring them.
+_Avoid_: Dispatch, parsing
 
 **`.`**:
 The one you're in. `perch .` refreshes the current branch; `perch wt rm .` removes the current worktree. `br rm .` has no special meaning because a branch cannot delete itself out from under its worktree.
