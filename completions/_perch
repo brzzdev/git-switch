@@ -22,11 +22,18 @@ _perch_offers() {
 }
 
 _perch() {
-  local -a subcommands worktree_subs worktree_options cmdline
+  local -a subcommands branch_subs branch_rm_options worktree_subs worktree_options cmdline
   local pos
   subcommands=(
     'br:Check a branch out here'
     'wt:Worktree commands'
+  )
+  branch_subs=(
+    'rm:Remove local branches'
+  )
+  branch_rm_options=(
+    '--upstream:Also remove explicitly configured same-named upstreams'
+    '--force:Skip destructive confirmations'
   )
   worktree_subs=(
     'ls:List worktrees'
@@ -50,6 +57,19 @@ _perch() {
     br|wt) cmdline=(perch "$service" "${(@)words[2,-1]}"); (( pos = CURRENT + 1 )) ;;
     *)     cmdline=("${(@)words}"); pos=$CURRENT ;;
   esac
+
+  # `br rm` is strict but takes its flags in either order around one target.
+  if (( pos >= 4 )) && [[ "$cmdline[2]" == br && "$cmdline[3]" == rm ]]; then
+    local word target_seen=0
+    for word in "${(@)cmdline[4,pos-1]}"; do
+      [[ "$word" == -* ]] || (( target_seen = 1 ))
+    done
+    _describe -t options 'option' branch_rm_options
+    if (( ! target_seen )); then
+      _perch_offers branches 'local branch' br rm
+    fi
+    return
+  fi
 
   # `wt rm` reads its target as the first word after `rm` that isn't an option,
   # and takes its `--force` in either order, so a flag or a `--` leaves the slot
@@ -88,8 +108,9 @@ _perch() {
     elif [[ "$cmdline[3]" != (ls|rm|list|remove|--) ]]; then
       _describe -t options 'option' worktree_options
     fi
-  # `br` reads everything after it as a branch, so nothing is filtered here.
+  # `br` reads `rm` before a branch name.
   elif (( pos == 3 )) && [[ "$cmdline[2]" == br ]]; then
+    _describe -t subverbs 'branch subverb' branch_subs
     _perch_offers branches 'branch' br
   fi
 }

@@ -2,8 +2,8 @@
 //! on the way there.
 //!
 //! [`removal`](super::removal) decides what happens; this decides how it reads.
-//! Both destruction flows — the stale-branch prompt that follows a switch, and
-//! `perch wt rm` — hand their [`removal::Report`] to [`removal_outcome`]
+//! All local destruction flows — the stale-branch prompt that follows a switch,
+//! `perch br rm`, and `perch wt rm` — hand their [`removal::Report`] to [`removal_outcome`]
 //! and print what comes back, so the answer never depends on which command you
 //! arrived through. The *Marker* glyphs a picker row draws instead belong to
 //! [`marker`](super::marker).
@@ -60,6 +60,49 @@ pub(crate) fn describe(risk: Risk, subject: &str, path: &Path) -> Vec<String> {
         None => {}
     }
     lines
+}
+
+/// The warning that licenses deleting a shared upstream ref. It is deliberately
+/// separate from [`warnings`]: local merged-ness assumes the upstream remains,
+/// so no local `Risk` or marker can speak for deleting it too.
+pub(crate) fn upstream_warning(upstream: &git::RemoteBranch) -> String {
+    format!(
+        "{} deleting {}/{} removes a shared upstream ref and may remove the last name for its commits",
+        warn(),
+        upstream.remote,
+        upstream.branch,
+    )
+}
+
+pub(crate) fn upstream_outcome(
+    upstream: &git::RemoteBranch,
+    outcome: &git::RemoteBranchDeleteOutcome,
+) -> String {
+    let name = format!("{}/{}", upstream.remote, upstream.branch);
+    match outcome {
+        git::RemoteBranchDeleteOutcome::Deleted => {
+            format!("{} deleted upstream {name}", done())
+        }
+        git::RemoteBranchDeleteOutcome::AlreadyAbsent => {
+            format!("{} upstream {name} was already absent", done())
+        }
+        git::RemoteBranchDeleteOutcome::Moved { expected, now } => format!(
+            "{} kept upstream {name}: it moved from {expected} to {now} after it was shown",
+            warn(),
+        ),
+        git::RemoteBranchDeleteOutcome::Failed(detail) => {
+            format!("{} could not delete upstream {name}: {detail}", warn())
+        }
+    }
+}
+
+pub(crate) fn upstream_kept_local(upstream: &git::RemoteBranch) -> String {
+    format!(
+        "{} kept upstream {}/{} because the local branch still exists",
+        warn(),
+        upstream.remote,
+        upstream.branch,
+    )
 }
 
 /// What a removal did, as the lines to print — the target says which steps could

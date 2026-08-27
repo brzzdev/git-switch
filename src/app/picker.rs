@@ -821,8 +821,7 @@ fn render_line(line: &str) {
 enum MultiMsg {
     Accepted,
     AllSelected,
-    /// Settles on no rows, which is indistinguishable from accepting an empty
-    /// tick list — as it has always been, since both mean "remove nothing".
+    /// Cancels the picker, distinct from accepting an empty tick list.
     Escaped,
     NoneSelected,
     SteppedDown,
@@ -849,22 +848,32 @@ fn multi_msg(key: &Key) -> Option<MultiMsg> {
 /// with the caller.
 struct MultiModel {
     cursor: usize,
+    disabled: Vec<bool>,
     selected: Vec<bool>,
 }
 
 impl MultiModel {
-    fn new(defaults: &[bool]) -> Self {
+    fn new(items: &[MultiItem]) -> Self {
+        let selected = items
+            .iter()
+            .map(|item| item.selected && !item.disabled)
+            .collect();
         Self {
             cursor: 0,
-            selected: defaults.to_vec(),
+            disabled: items.iter().map(|item| item.disabled).collect(),
+            selected,
         }
     }
 
-    fn update(&mut self, msg: MultiMsg) -> Flow<Vec<usize>> {
+    fn update(&mut self, msg: MultiMsg) -> Flow<Option<Vec<usize>>> {
         match msg {
-            MultiMsg::Accepted => return Flow::Stop(self.ticked()),
-            MultiMsg::AllSelected => self.selected.fill(true),
-            MultiMsg::Escaped => return Flow::Stop(Vec::new()),
+            MultiMsg::Accepted => return Flow::Stop(Some(self.ticked())),
+            MultiMsg::AllSelected => {
+                for (selected, disabled) in self.selected.iter_mut().zip(&self.disabled) {
+                    *selected = !disabled;
+                }
+            }
+            MultiMsg::Escaped => return Flow::Stop(None),
             MultiMsg::NoneSelected => self.selected.fill(false),
             // Unlike the single-select, this is a fixed list of things to act
             // on rather than a ring: running off an end stays put, where
@@ -876,7 +885,9 @@ impl MultiModel {
             }
             MultiMsg::SteppedUp => self.cursor = self.cursor.saturating_sub(1),
             MultiMsg::Toggled => {
-                if let Some(row) = self.selected.get_mut(self.cursor) {
+                if !self.disabled.get(self.cursor).copied().unwrap_or(true)
+                    && let Some(row) = self.selected.get_mut(self.cursor)
+                {
                     *row = !*row;
                 }
             }
@@ -894,24 +905,26 @@ impl MultiModel {
     }
 }
 
-/// The multi-select picker. `legend` is an optional dim line under the prompt,
-/// for glossing anything in the rows that isn't self-explanatory; callers pass
-/// `None` where nothing needs it, so a plain list stays plain. `keys` is taken
-/// by value for the same reason as [`pick`]: raw mode ends with the call, not
-/// with the caller's scope.
+pub(crate) struct MultiItem {
+    pub(crate) label: String,
+    pub(crate) selected: bool,
+    pub(crate) disabled: bool,
+}
+
+/// The multi-select picker. Escape returns `None`; accepting returns `Some` with
+/// the selected indices, including an empty vector when no rows are selected.
+/// `legend` is an optional dim line under the prompt, for glossing anything in
+/// the rows that isn't self-explanatory; callers pass `None` where nothing needs
+/// it, so a plain list stays plain. `keys` is taken by value for the same reason
+/// as [`pick`]: raw mode ends with the call, not with the caller's scope.
 pub(crate) fn multi_select(
     prompt: &str,
     legend: Option<&str>,
-    items: &[String],
-    defaults: &[bool],
+    items: &[MultiItem],
     mut keys: impl KeySource,
-) -> AppResult<Vec<usize>> {
-    // The model is sized from `defaults` but the rows are drawn from `items`,
-    // so the cursor is only in bounds for both while the two agree.
-    debug_assert_eq!(items.len(), defaults.len());
-
+) -> AppResult<Option<Vec<usize>>> {
     let term = Term::stderr();
-    let mut model = MultiModel::new(defaults);
+    let mut model = MultiModel::new(items);
     let header = format!("{} {}", style("?").green().bold(), style(prompt).bold());
     let legend = legend.map(|l| format!("  {}", style(l).dim()));
 
@@ -941,7 +954,12 @@ pub(crate) fn multi_select(
         for i in scroll..end {
             let arrow = if i == cursor { ">" } else { " " };
             let check = if selected[i] { "[x]" } else { "[ ]" };
-            let line = format!("  {arrow} {check} {}", items[i]);
+            let line = format!("  {arrow} {check} {}", items[i].label);
+            let line = if items[i].disabled {
+                style(line).dim().to_string()
+            } else {
+                line
+            };
             rows += visual_rows(&line, width);
             render_line(&line);
         }
@@ -958,9 +976,9 @@ pub(crate) fn multi_select(
         let Some(msg) = multi_msg(&keys.read_key()?) else {
             continue;
         };
-        if let Flow::Stop(ticked) = model.update(msg) {
+        if let Flow::Stop(selection) = model.update(msg) {
             clear(drawn);
-            return Ok(ticked);
+            return Ok(selection);
         }
 
         clear(drawn);
@@ -1221,7 +1239,11 @@ mod tests {
     /// this guards is a select-all that also flips the current row back.
     #[test]
     fn toggling_flips_only_the_row_under_the_cursor() {
-        let mut model = MultiModel::new(&[false, false, false]);
+        let mut model = MultiModel::new(&multi_items(
+            &["a", "b", "c"],
+            &[false, false, false],
+            &[false, false, false],
+        ));
         model.update(MultiMsg::SteppedDown);
         model.update(MultiMsg::Toggled);
         assert_eq!(model.selected, vec![false, true, false]);
@@ -1232,7 +1254,8 @@ mod tests {
     /// space would then tick something the user never looked at.
     #[test]
     fn multi_select_stepping_stops_at_both_ends() {
-        let mut model = MultiModel::new(&[false, false]);
+        let mut model =
+            MultiModel::new(&multi_items(&["a", "b"], &[false, false], &[false, false]));
         model.update(MultiMsg::SteppedUp);
         assert_eq!(model.cursor, 0);
         model.update(MultiMsg::SteppedDown);
@@ -1270,10 +1293,36 @@ mod tests {
         assert_eq!(picked_name(sel).as_deref(), Some("l1"));
     }
 
-    fn run_multi_select(items: &[&str], defaults: &[bool], keys: Vec<Key>) -> Vec<usize> {
-        let items: Vec<String> = items.iter().map(|s| (*s).to_string()).collect();
-        multi_select("Test", None, &items, defaults, ScriptedKeys::new(keys))
-            .expect("multi_select should not error")
+    fn run_multi_select_with_disabled(
+        items: &[&str],
+        defaults: &[bool],
+        disabled: &[bool],
+        keys: Vec<Key>,
+    ) -> Option<Vec<usize>> {
+        multi_select(
+            "Test",
+            None,
+            &multi_items(items, defaults, disabled),
+            ScriptedKeys::new(keys),
+        )
+        .expect("multi_select should not error")
+    }
+
+    fn run_multi_select(items: &[&str], defaults: &[bool], keys: Vec<Key>) -> Option<Vec<usize>> {
+        run_multi_select_with_disabled(items, defaults, &vec![false; items.len()], keys)
+    }
+
+    fn multi_items(items: &[&str], selected: &[bool], disabled: &[bool]) -> Vec<MultiItem> {
+        items
+            .iter()
+            .zip(selected)
+            .zip(disabled)
+            .map(|((label, selected), disabled)| MultiItem {
+                label: (*label).to_string(),
+                selected: *selected,
+                disabled: *disabled,
+            })
+            .collect()
     }
 
     #[test]
@@ -1289,7 +1338,7 @@ mod tests {
                 Key::Enter,
             ],
         );
-        assert_eq!(got, vec![0, 2]);
+        assert_eq!(got, Some(vec![0, 2]));
     }
 
     #[test]
@@ -1299,19 +1348,41 @@ mod tests {
             &[false, false],
             vec![Key::ArrowRight, Key::Enter],
         );
-        assert_eq!(got, vec![0, 1]);
+        assert_eq!(got, Some(vec![0, 1]));
+    }
+
+    #[test]
+    fn multi_select_cannot_toggle_a_disabled_row() {
+        let got = run_multi_select_with_disabled(
+            &["held", "free"],
+            &[false, false],
+            &[true, false],
+            vec![Key::Char(' '), Key::Enter],
+        );
+        assert_eq!(got, Some(Vec::new()));
+    }
+
+    #[test]
+    fn multi_select_all_skips_disabled_rows() {
+        let got = run_multi_select_with_disabled(
+            &["held", "free"],
+            &[false, false],
+            &[true, false],
+            vec![Key::ArrowRight, Key::Enter],
+        );
+        assert_eq!(got, Some(vec![1]));
     }
 
     #[test]
     fn multi_select_left_selects_none() {
         let got = run_multi_select(&["a", "b"], &[true, true], vec![Key::ArrowLeft, Key::Enter]);
-        assert!(got.is_empty());
+        assert_eq!(got, Some(Vec::new()));
     }
 
     #[test]
-    fn multi_select_escape_returns_empty() {
+    fn multi_select_escape_cancels() {
         let got = run_multi_select(&["a", "b"], &[true, true], vec![Key::Escape]);
-        assert!(got.is_empty());
+        assert_eq!(got, None);
     }
 
     /// One list, whichever verb is picking: every branch is on it, in the same

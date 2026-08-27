@@ -2,8 +2,8 @@
 //! holding it — the one place the rules of [ADR
 //! 0001](../../docs/adr/0001-warned-means-forceable.md) live.
 //!
-//! Both destruction flows — the stale-branch prompt that follows a switch, and
-//! `perch wt rm` — come through [`remove`]. It performs the steps in the
+//! All local destruction flows — the stale-branch prompt that follows a switch,
+//! `perch br rm`, and `perch wt rm` — come through [`remove`]. It performs the steps in the
 //! only order that works, forces only what its [`License`] covers, and returns
 //! what happened. It prints nothing: the wording belongs to
 //! [`reporting`](super::reporting), which the [`Report`] is handed to whole.
@@ -101,7 +101,7 @@ impl License {
         }
     }
 
-    /// `wt rm --force`, blanket over both steps.
+    /// An explicit removal `--force`, blanket over both local steps.
     pub(crate) fn forced() -> Self {
         Self {
             worktree: true,
@@ -127,6 +127,17 @@ impl Report<'_> {
     /// directory to report gone.
     pub(crate) fn worktree_removed(&self) -> bool {
         matches!(self.worktree, Some(git::WorktreeRemoveOutcome::Removed))
+    }
+
+    pub(crate) fn branch_removed(&self) -> bool {
+        matches!(
+            self.branch,
+            Some(
+                git::BranchDeleteOutcome::Deleted
+                    | git::BranchDeleteOutcome::DeletedLeavingConfig(_)
+                    | git::BranchDeleteOutcome::DeletedConfigUnverified(_)
+            )
+        )
     }
 }
 

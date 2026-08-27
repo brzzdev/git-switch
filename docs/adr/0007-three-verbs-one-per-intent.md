@@ -1,5 +1,7 @@
 # Three verbs, one per intent
 
+> The consequence that `br` gets no `rm` is superseded by [ADR 0009](./0009-branch-removal-earns-a-subverb.md). The three navigation intents remain unchanged.
+
 Branches and worktrees are two modes of one job — get me onto that code — but the command surface privileged the first and buried the second under a subcommand. Promoting worktrees to a peer subcommand only moves the problem, leaving the user to choose a mode where they had an intent. So name the three things a user can mean: `perch <name>` goes to the branch wherever it lives, `perch br <name>` checks it out in the worktree they are standing in, and `perch wt <name>` insists the branch get a worktree of its own.
 
 The bare verb needs no mode prompt, because git already refuses the ambiguity:

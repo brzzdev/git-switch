@@ -5,10 +5,13 @@ use std::path::{Path, PathBuf};
 use console::{measure_text_width, style};
 use indicatif::ProgressBar;
 
-use super::picker::{PickerOptions, Selection, align_labels, interactive_keys, multi_select, pick};
+use super::picker::{
+    MultiItem, PickerOptions, Selection, align_labels, interactive_keys, multi_select, pick,
+};
 use super::{
-    CursorGuard, Risk, Verb, build_catalogue, confirm, display_path, fetch_and_ff, handoff_cd,
-    hook, marker, picker, prompt_delete_stale_branches, removal, report_update, reporting,
+    Confirmation, CursorGuard, Risk, Verb, build_catalogue, confirm, display_path, fetch_and_ff,
+    handoff_cd, hook, marker, picker, prompt_delete_stale_branches, removal, report_update,
+    reporting,
 };
 use crate::{AppResult, Error, git};
 
@@ -311,22 +314,31 @@ fn select_for_removal(
         let Some(keys) = interactive_keys() else {
             return Ok(vec![]);
         };
-        let items = align_labels(
+        let labels = align_labels(
             &removable
                 .iter()
                 .enumerate()
                 .map(|(i, w)| (rm_label(w, current == Some(i)), marker::markers(risks[i])))
                 .collect::<Vec<_>>(),
         );
-        let defaults = vec![false; items.len()];
+        let items: Vec<MultiItem> = labels
+            .into_iter()
+            .map(|label| MultiItem {
+                label,
+                selected: false,
+                disabled: false,
+            })
+            .collect();
         let legend = super::risk_legend(risks);
-        return multi_select(
+        // Cancelling and accepting no rows both stop before any removal here,
+        // so this first-stage picker can safely collapse them to an empty set.
+        return Ok(multi_select(
             "Remove worktrees (space to toggle, →/← all/none)",
             legend.as_deref(),
             &items,
-            &defaults,
             keys,
-        );
+        )?
+        .unwrap_or_default());
     };
 
     // `.` means the worktree the cwd sits in, matching `perch .` for the
@@ -543,7 +555,7 @@ fn confirm_removal(wt: &git::Worktree, risk: Risk, force: bool) -> AppResult<boo
         Some(branch) => format!("Remove the worktree and delete {branch} anyway?"),
         None => "Remove the worktree anyway?".to_string(),
     };
-    confirm(&question, false)
+    Ok(confirm(&question, false)? == Confirmation::Accepted)
 }
 
 /// Picker label for a removable worktree: its branch when it has one, else the

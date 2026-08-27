@@ -2,7 +2,7 @@ use std::process;
 
 use perch::app::complete::{self, Position};
 use perch::app::{
-    Verb,
+    Verb, br,
     wt::{ShellHandoff, Subverb},
 };
 
@@ -64,8 +64,16 @@ fn dispatch_br(args: &[String]) -> perch::AppResult<()> {
         }
         Some("--complete") => complete::run(Position::Br),
         Some("--") => escaped(args.get(1).map(String::as_str), perch::app::run_br),
+        Some(name) if br::Subverb::parse(name).is_some() => dispatch_br_rm(&args[1..]),
         name => perch::app::run_br(name),
     }
+}
+
+fn dispatch_br_rm(args: &[String]) -> perch::AppResult<()> {
+    if args == ["--complete"] {
+        return br::run_rm_complete();
+    }
+    br::run_rm(&br::RmOptions::parse(args)?)
 }
 
 fn dispatch_wt(args: &[String]) -> perch::AppResult<()> {
@@ -163,6 +171,7 @@ fn print_help() {
     println!();
     println!("       perch .                Refresh the current branch from its remote");
     println!("       perch -- <branch>      Go to a branch named br/wt");
+    println!("       perch br rm [<branch>] Remove local branches");
     println!("       perch wt ls            List worktrees");
     println!("       perch wt rm [<branch>|.]");
     println!();
@@ -172,6 +181,13 @@ fn print_help() {
 
 fn print_br_help() {
     println!("Usage: perch br [<branch>]    Check the branch out here");
+    println!("       perch br rm [<branch>] [--upstream] [--force]");
+    println!("                                  Remove local branches");
+    println!("       perch br -- <branch>   Check out a branch named rm");
+    println!();
+    println!("Options:");
+    println!("      --upstream  Also offer the branch's same-named upstream for removal");
+    println!("      --force     Skip destructive confirmations");
 }
 
 fn print_wt_help() {

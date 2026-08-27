@@ -5,6 +5,7 @@ use indicatif::ProgressBar;
 
 use crate::{AppResult, Error, git};
 
+pub mod br;
 pub mod complete;
 pub(crate) mod hook;
 pub(crate) mod marker;
@@ -14,7 +15,8 @@ pub(crate) mod reporting;
 pub mod wt;
 
 use picker::{
-    Catalogue, PickerOptions, Selection, align_labels, interactive_keys, multi_select, pick,
+    Catalogue, MultiItem, PickerOptions, Selection, align_labels, interactive_keys, multi_select,
+    pick,
 };
 
 pub(crate) struct CursorGuard(Term);
@@ -439,7 +441,7 @@ fn reconcile_diverged(branch: &str, remote: &str) -> AppResult<()> {
     let remote_ref = format!("{remote}/{branch}");
     eprintln!("Local branch has diverged from {remote_ref}.");
 
-    if !confirm(&format!("Rebase onto {remote_ref}?"), false)? {
+    if confirm(&format!("Rebase onto {remote_ref}?"), false)? != Confirmation::Accepted {
         eprintln!("{}", reconcile_hint(&remote_ref));
         return Err(Error::Diverged);
     }
@@ -478,11 +480,31 @@ fn aborted_rebase_hint(remote_ref: &str) -> String {
     )
 }
 
-pub(crate) fn confirm(prompt: &str, default_yes: bool) -> AppResult<bool> {
+/// The distinct ways a yes/no prompt can end, so a destructive caller can
+/// preserve Escape as cancellation instead of treating it as an explicit no.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Confirmation {
+    Accepted,
+    Cancelled,
+    Declined,
+}
+
+/// Reads a yes/no confirmation. An explicit answer returns `Accepted` or
+/// `Declined`, Escape returns `Cancelled`, and a non-interactive call resolves
+/// to the answer selected by `default_yes`.
+pub(crate) fn confirm(prompt: &str, default_yes: bool) -> AppResult<Confirmation> {
     let Some(term) = interactive_term() else {
-        return Ok(default_yes);
+        return Ok(if default_yes {
+            Confirmation::Accepted
+        } else {
+            Confirmation::Declined
+        });
     };
-    let hint = if default_yes { "[Y/n]" } else { "[y/N]" };
+    let hint = if default_yes {
+        "[Y/n] / esc"
+    } else {
+        "[y/N] / esc"
+    };
     eprint!(
         "{} {} {} ",
         style("?").green().bold(),
@@ -492,12 +514,20 @@ pub(crate) fn confirm(prompt: &str, default_yes: bool) -> AppResult<bool> {
     let _cursor_guard = CursorGuard::hide();
     loop {
         let answer = match term.read_key()? {
-            Key::Char('y' | 'Y') => true,
-            Key::Char('n' | 'N') | Key::Escape => false,
-            Key::Enter => default_yes,
+            Key::Char('y' | 'Y') => Confirmation::Accepted,
+            Key::Escape => Confirmation::Cancelled,
+            Key::Enter if default_yes => Confirmation::Accepted,
+            Key::Char('n' | 'N') | Key::Enter => Confirmation::Declined,
             _ => continue,
         };
-        eprintln!("{}", if answer { "y" } else { "n" });
+        eprintln!(
+            "{}",
+            match answer {
+                Confirmation::Accepted => "y",
+                Confirmation::Cancelled => "cancel",
+                Confirmation::Declined => "n",
+            }
+        );
         return Ok(answer);
     }
 }
@@ -678,7 +708,16 @@ pub(crate) fn prompt_delete_stale_branches(
         .iter()
         .map(|r| old_branch.is_some_and(|old| old == r.branch))
         .collect();
-    let items = align_labels(&rows.iter().map(stale_label).collect::<Vec<_>>());
+    let labels = align_labels(&rows.iter().map(stale_label).collect::<Vec<_>>());
+    let items: Vec<MultiItem> = labels
+        .into_iter()
+        .zip(defaults)
+        .map(|(label, selected)| MultiItem {
+            label,
+            selected,
+            disabled: false,
+        })
+        .collect();
 
     // The terminal was checked at the top, so this is acquisition rather than a
     // second guard — raw mode is taken here and not a moment earlier, so it is
@@ -687,13 +726,15 @@ pub(crate) fn prompt_delete_stale_branches(
         return Ok(());
     };
     let legend = risk_legend(&rows.iter().map(|r| r.risk).collect::<Vec<_>>());
-    let selections = multi_select(
+    let Some(selections) = multi_select(
         "Delete stale branches (space to toggle, →/← all/none)",
         legend.as_deref(),
         &items,
-        &defaults,
         keys,
-    )?;
+    )?
+    else {
+        return Ok(());
+    };
 
     // Delete from the main worktree, the same HEAD the risk was judged against.
     let mut steps = removal::GitSteps::at_main(main_dir.as_deref());

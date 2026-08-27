@@ -51,7 +51,7 @@ _perch_reply() {
 # and takes its `--force` in either order, so a flag or a `--` leaves the slot
 # open while a bare word closes it. Words typed after a target are ignored.
 # Takes those in-between words as its arguments.
-_perch_wt_rm_wants_target() {
+_perch_rm_wants_target() {
   local word
   for word in "$@"; do
     [[ "$word" == -* ]] || return 1
@@ -84,8 +84,18 @@ _perch_completions() {
   local verb="${cmdline[1]}"
   local subverb="${cmdline[2]}"
 
+  if [[ "$verb" == "br" && "$subverb" == "rm" ]] && (( pos >= 3 )); then
+    COMPREPLY=()
+    if _perch_rm_wants_target "${cmdline[@]:3:pos-3}"; then
+      _perch_reply "$cur" < <(printf '%s\n' --upstream --force; _perch_offers br rm)
+    else
+      _perch_reply "$cur" < <(printf '%s\n' --upstream --force)
+    fi
+    return
+  fi
+
   if [[ "$verb" == "wt" && "$subverb" == "rm" ]] && (( pos >= 3 )); then
-    if _perch_wt_rm_wants_target "${cmdline[@]:3:pos-3}"; then
+    if _perch_rm_wants_target "${cmdline[@]:3:pos-3}"; then
       COMPREPLY=()
       _perch_reply "$cur" < <(_perch_offers wt rm)
     fi
@@ -119,7 +129,7 @@ _perch_completions() {
       if [[ "$verb" == "wt" ]]; then
         _perch_reply "$cur" < <(printf '%s\n' ls rm --no-switch; _perch_offers wt)
       elif [[ "$verb" == "br" ]]; then
-        _perch_reply "$cur" < <(_perch_offers br)
+        _perch_reply "$cur" < <(printf '%s\n' rm; _perch_offers br)
       fi
       ;;
     3)

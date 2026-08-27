@@ -69,6 +69,100 @@ pub fn local_branches() -> AppResult<Vec<String>> {
     Ok(branches)
 }
 
+/// The explicitly configured upstream of a local branch, where it is published
+/// under the same name. A branch tracking `origin/main` as its base is not the
+/// upstream removal candidate for a local branch named `feature`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UpstreamRef {
+    pub remote: String,
+    pub branch: String,
+}
+
+/// A live upstream ref, including the server tip a leased deletion must still
+/// find when it runs.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RemoteBranch {
+    pub remote: String,
+    pub branch: String,
+    pub tip: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum UpstreamInspection {
+    Absent(UpstreamRef),
+    Default(UpstreamRef),
+    DefaultUnknown(UpstreamRef),
+    Removable(RemoteBranch),
+}
+
+/// The same-named, explicitly configured upstream of `branch`. No fallback
+/// remote is guessed: a fetch default is not authority to delete a shared ref.
+pub fn same_named_upstream(branch: &str) -> AppResult<Option<UpstreamRef>> {
+    let local_ref = format!("refs/heads/{branch}");
+    let output = run(&[
+        "for-each-ref",
+        "--format=%(refname:short)%09%(upstream:remotename)%09%(upstream:remoteref)",
+        &local_ref,
+    ])?;
+    let expected_remote_ref = format!("refs/heads/{branch}");
+
+    Ok(output.lines().find_map(|line| {
+        let mut parts = line.split('\t');
+        let name = parts.next()?;
+        let remote = parts.next()?;
+        let upstream_ref = parts.next()?;
+        (name == branch
+            && !remote.is_empty()
+            && remote != "."
+            && upstream_ref == expected_remote_ref)
+            .then(|| UpstreamRef {
+                remote: remote.to_string(),
+                branch: branch.to_string(),
+            })
+    }))
+}
+
+/// Reads an upstream from the server rather than trusting a possibly stale
+/// remote-tracking ref. The same call obtains the server's default branch so it
+/// can never be offered for deletion.
+pub fn inspect_upstream(upstream: &UpstreamRef) -> AppResult<UpstreamInspection> {
+    let refname = format!("refs/heads/{}", upstream.branch);
+    let output = run(&[
+        "ls-remote",
+        "--symref",
+        "--",
+        &upstream.remote,
+        "HEAD",
+        &refname,
+    ])?;
+    let mut default = None;
+    let mut tip = None;
+    for line in output.lines() {
+        if let Some(rest) = line.strip_prefix("ref: ")
+            && let Some((target, "HEAD")) = rest.split_once('\t')
+        {
+            default = Some(target);
+        } else if let Some((oid, found)) = line.split_once('\t')
+            && found == refname
+        {
+            tip = Some(oid);
+        }
+    }
+
+    let Some(tip) = tip else {
+        return Ok(UpstreamInspection::Absent(upstream.clone()));
+    };
+    match default {
+        Some(default) if default == refname => Ok(UpstreamInspection::Default(upstream.clone())),
+        Some(_) => Ok(UpstreamInspection::Removable(RemoteBranch {
+            remote: upstream.remote.clone(),
+            branch: upstream.branch.clone(),
+            tip: tip.to_string(),
+        })),
+        None => Ok(UpstreamInspection::DefaultUnknown(upstream.clone())),
+    }
+}
+
 pub fn remote_only_branches(local: &[String], remote: &str) -> AppResult<Vec<String>> {
     let prefix = format!("refs/remotes/{remote}/");
     let strip = format!("{remote}/");
@@ -1312,6 +1406,50 @@ pub enum BranchDeleteOutcome {
     /// Kept because it has commits not merged into its upstream or HEAD.
     NotMerged,
     Failed(String),
+}
+
+/// What became of a selected upstream deletion. The lease-specific outcome is
+/// distinct from a server refusal because retrying the latter unchanged may make
+/// sense, while a moved ref must be inspected before anything tries again.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub enum RemoteBranchDeleteOutcome {
+    Deleted,
+    AlreadyAbsent,
+    Moved { expected: String, now: String },
+    Failed(String),
+}
+
+/// Deletes `upstream` only while the server still has the tip shown to the user.
+/// A failed push is followed by one live read so a lease refusal and an already
+/// completed deletion are not reported as a generic transport failure.
+pub fn delete_remote_branch(upstream: &RemoteBranch) -> AppResult<RemoteBranchDeleteOutcome> {
+    let refname = format!("refs/heads/{}", upstream.branch);
+    let lease = format!("--force-with-lease={refname}:{}", upstream.tip);
+    let delete = format!(":{refname}");
+    let output = git_cmd(None)
+        .args(["push", "--quiet", &lease, "--", &upstream.remote, &delete])
+        .output()?;
+    if output.status.success() {
+        return Ok(RemoteBranchDeleteOutcome::Deleted);
+    }
+
+    let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let read = run(&["ls-remote", "--heads", "--", &upstream.remote, &refname]);
+    let Ok(read) = read else {
+        return Ok(RemoteBranchDeleteOutcome::Failed(detail));
+    };
+    let now = read
+        .lines()
+        .filter_map(|line| line.split_once('\t'))
+        .find_map(|(oid, found)| (found == refname).then_some(oid));
+    Ok(match now {
+        None => RemoteBranchDeleteOutcome::AlreadyAbsent,
+        Some(now) if now != upstream.tip => RemoteBranchDeleteOutcome::Moved {
+            expected: upstream.tip.clone(),
+            now: now.to_string(),
+        },
+        Some(_) => RemoteBranchDeleteOutcome::Failed(detail),
+    })
 }
 
 /// Whether a worktree was seen holding a branch, or only failed to be ruled out.
