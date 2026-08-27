@@ -6,7 +6,7 @@
 //! mutate Git state. Outcome wording, Hook eligibility, partial failures, and a
 //! current-worktree Handoff stay behind the same seam.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::env;
 use std::path::{Path, PathBuf};
 
@@ -45,8 +45,8 @@ impl Risk {
 
 /// One Removal request, before any warning has licensed mutation.
 pub(crate) enum Request {
-    Stale(StaleRequest),
     Branches(BranchRequest),
+    Stale(StaleRequest),
     Worktrees(WorktreeRequest),
 }
 
@@ -180,8 +180,8 @@ impl NamedOffer {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RequestKind {
-    Stale,
     Branches,
+    Stale,
     Worktrees,
 }
 
@@ -376,8 +376,8 @@ impl Assessment {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Authority {
-    Shown,
     Forced,
+    Shown,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -479,9 +479,9 @@ pub(crate) struct Pending {
 
 enum UpstreamPreparation {
     Candidate(git::RemoteBranch),
-    Notice(String),
     Failure(String),
     None,
+    Notice(String),
 }
 
 fn prepare_upstream(
@@ -607,7 +607,21 @@ impl Pending {
         Ok(())
     }
 
-    pub(crate) fn finish(self, upstream: UpstreamChoice) -> AppResult<Outcome> {
+    pub(crate) fn finish(
+        self,
+        upstream: UpstreamChoice,
+        emit: impl FnMut(&str),
+    ) -> AppResult<Outcome> {
+        let mut steps = GitSteps::at_main(self.main.as_deref());
+        self.finish_with_steps(upstream, &mut steps, emit)
+    }
+
+    fn finish_with_steps(
+        self,
+        upstream: UpstreamChoice,
+        steps: &mut impl Steps,
+        mut emit: impl FnMut(&str),
+    ) -> AppResult<Outcome> {
         let selected: HashSet<UpstreamId> = upstream.ids.into_iter().collect();
         let cwd_will_vanish = self.locals.iter().any(|local| local.contains_cwd);
         if cwd_will_vanish && let Some(main) = &self.main {
@@ -619,30 +633,38 @@ impl Pending {
             failed: false,
             handoff: cwd_will_vanish.then(|| self.main.clone()).flatten(),
         };
-        let mut steps = GitSteps::at_main(self.main.as_deref());
         for local in self.locals {
             let display_name = local.target.name().unwrap_or("this worktree").to_string();
             if let Some(error) = local.preparation_failure {
-                outcome.lines.push(format!(
-                    "{} could not prepare upstream removal for {display_name}: {error}; kept the local branch",
-                    style("!").yellow().bold(),
-                ));
+                outcome.report(
+                    format!(
+                        "{} could not prepare upstream removal for {display_name}: {error}; kept the local branch",
+                        style("!").yellow().bold(),
+                    ),
+                    &mut emit,
+                );
                 outcome.failed = true;
                 continue;
             }
 
-            let report = match remove(local.target.borrowed(), &local.license, &mut steps) {
+            let report = match remove(local.target.borrowed(), &local.license, steps) {
                 Ok(report) => report,
+                Err(error) if self.kind == RequestKind::Worktrees => return Err(error),
                 Err(error) => {
-                    outcome.lines.push(format!(
-                        "{} could not remove {display_name}: {error}",
-                        style("!").yellow().bold(),
-                    ));
+                    outcome.report(
+                        format!(
+                            "{} could not remove {display_name}: {error}",
+                            style("!").yellow().bold(),
+                        ),
+                        &mut emit,
+                    );
                     outcome.failed = true;
                     continue;
                 }
             };
-            outcome.lines.extend(reporting::removal_outcome(&report));
+            for line in reporting::removal_outcome(&report) {
+                outcome.report(line, &mut emit);
+            }
 
             if report.worktree_removed()
                 && let (Some(path), Some(main)) = (local.target.path(), self.main.as_deref())
@@ -664,26 +686,30 @@ impl Pending {
             };
             let local_ref = format!("refs/heads/{display_name}");
             if !local_deleted || git::resolve(None, &local_ref).is_some() {
-                outcome.lines.push(reporting::upstream_kept_local(upstream));
+                outcome.report(reporting::upstream_kept_local(upstream), &mut emit);
                 outcome.failed = true;
                 continue;
             }
             let remote_outcome = match git::delete_remote_branch(upstream) {
                 Ok(remote_outcome) => remote_outcome,
                 Err(error) => {
-                    outcome.lines.push(format!(
-                        "{} could not delete upstream {}/{}: {error}",
-                        style("!").yellow().bold(),
-                        upstream.remote,
-                        upstream.branch,
-                    ));
+                    outcome.report(
+                        format!(
+                            "{} could not delete upstream {}/{}: {error}",
+                            style("!").yellow().bold(),
+                            upstream.remote,
+                            upstream.branch,
+                        ),
+                        &mut emit,
+                    );
                     outcome.failed = true;
                     continue;
                 }
             };
-            outcome
-                .lines
-                .push(reporting::upstream_outcome(upstream, &remote_outcome));
+            outcome.report(
+                reporting::upstream_outcome(upstream, &remote_outcome),
+                &mut emit,
+            );
             if !matches!(
                 remote_outcome,
                 git::RemoteBranchDeleteOutcome::Deleted
@@ -718,6 +744,12 @@ pub(crate) struct Outcome {
 }
 
 impl Outcome {
+    fn report(&mut self, line: String, emit: &mut impl FnMut(&str)) {
+        emit(&line);
+        self.lines.push(line);
+    }
+
+    #[cfg(test)]
     pub(crate) fn lines(&self) -> &[String] {
         &self.lines
     }
@@ -778,6 +810,16 @@ fn assess_stale(request: StaleRequest) -> Assessment {
         })
         .collect();
     let equivalent = git::equivalent_branches(main.as_deref(), &request.remote, &candidates);
+    build_stale_assessment(request, main, &unmerged, &equivalent, git::worktree_dirty)
+}
+
+fn build_stale_assessment(
+    request: StaleRequest,
+    main: Option<PathBuf>,
+    unmerged: &HashMap<String, git::Unmerged>,
+    equivalent: &HashMap<String, git::Proof>,
+    dirty: impl Fn(&Path) -> bool,
+) -> Assessment {
     let mut raw = Vec::new();
     let mut locals = Vec::new();
     for stale in request
@@ -790,7 +832,7 @@ fn assess_stale(request: StaleRequest) -> Assessment {
         let risk = Risk {
             dirty: worktree
                 .as_ref()
-                .is_some_and(|worktree| !worktree.prunable && git::worktree_dirty(&worktree.path)),
+                .is_some_and(|worktree| !worktree.prunable && dirty(&worktree.path)),
             unmerged: proof
                 .is_none()
                 .then(|| unmerged.get(&stale.name).copied())
@@ -1408,6 +1450,261 @@ mod tests {
         assert!(Risk::default().markers().is_empty());
     }
 
+    #[test]
+    fn stale_removal_never_offers_the_handoff_destination() {
+        let assessment = build_stale_assessment(
+            StaleRequest::new(
+                vec![
+                    git::StaleBranch {
+                        ground: git::Ground::Landed,
+                        name: "feature".to_string(),
+                    },
+                    git::StaleBranch {
+                        ground: git::Ground::Landed,
+                        name: "fix/typo".to_string(),
+                    },
+                ],
+                Vec::new(),
+                "origin",
+                None,
+                Some("feature"),
+            ),
+            None,
+            &HashMap::new(),
+            &HashMap::new(),
+            |_| false,
+        );
+
+        let names: Vec<&str> = assessment
+            .locals
+            .iter()
+            .filter_map(|local| local.target.name())
+            .collect();
+        assert_eq!(names, ["fix/typo"]);
+    }
+
+    fn test_worktree(branch: &str, path: &str) -> git::Worktree {
+        git::Worktree {
+            path: PathBuf::from(path),
+            branch: Some(branch.to_string()),
+            is_main: false,
+            prunable: false,
+        }
+    }
+
+    #[test]
+    fn stale_ground_without_following_detail_has_no_trailing_padding() {
+        let assessment = build_stale_assessment(
+            StaleRequest::new(
+                vec![git::StaleBranch {
+                    ground: git::Ground::Landed,
+                    name: "fix/typo".to_string(),
+                }],
+                Vec::new(),
+                "origin",
+                None,
+                None,
+            ),
+            None,
+            &HashMap::new(),
+            &HashMap::new(),
+            |_| false,
+        );
+
+        let label = console::strip_ansi_codes(&assessment.offers[0].label).into_owned();
+        assert!(label.ends_with("landed"), "ground-only row: {label:?}");
+        assert_eq!(label.trim_end(), label);
+    }
+
+    #[test]
+    fn stale_label_marks_a_missing_worktree() {
+        let mut missing = test_worktree("old/thing", "/tmp/missing");
+        missing.prunable = true;
+        let assessment = build_stale_assessment(
+            StaleRequest::new(
+                vec![git::StaleBranch {
+                    ground: git::Ground::Landed,
+                    name: "old/thing".to_string(),
+                }],
+                vec![missing],
+                "origin",
+                None,
+                None,
+            ),
+            None,
+            &HashMap::new(),
+            &HashMap::new(),
+            |_| false,
+        );
+
+        let label = console::strip_ansi_codes(&assessment.offers[0].label).into_owned();
+        assert!(
+            label.contains("landed (+ worktree, missing)"),
+            "missing worktree label: {label:?}"
+        );
+    }
+
+    #[test]
+    fn stale_labels_align_each_ground_before_the_worktree_detail() {
+        let assessment = build_stale_assessment(
+            StaleRequest::new(
+                vec![
+                    git::StaleBranch {
+                        ground: git::Ground::Gone,
+                        name: "gone-held".to_string(),
+                    },
+                    git::StaleBranch {
+                        ground: git::Ground::Landed,
+                        name: "landed-held".to_string(),
+                    },
+                ],
+                vec![
+                    test_worktree("gone-held", "/tmp/gone"),
+                    test_worktree("landed-held", "/tmp/landed"),
+                ],
+                "origin",
+                None,
+                None,
+            ),
+            None,
+            &HashMap::new(),
+            &HashMap::new(),
+            |_| false,
+        );
+
+        let labels: Vec<String> = assessment
+            .offers
+            .iter()
+            .map(|offer| console::strip_ansi_codes(&offer.label).into_owned())
+            .collect();
+        assert!(
+            labels[0].contains("gone   (+ worktree)") && labels[1].contains("landed (+ worktree)"),
+            "grounds should align their following detail: {labels:?}"
+        );
+    }
+
+    #[test]
+    fn stale_label_places_worktree_and_branch_risks_after_the_ground() {
+        let assessment = build_stale_assessment(
+            StaleRequest::new(
+                vec![git::StaleBranch {
+                    ground: git::Ground::Landed,
+                    name: "feature".to_string(),
+                }],
+                vec![test_worktree("feature", "/tmp/feature")],
+                "origin",
+                None,
+                None,
+            ),
+            None,
+            &HashMap::from([("feature".to_string(), git::Unmerged::Ahead(2))]),
+            &HashMap::new(),
+            |path| path == Path::new("/tmp/feature"),
+        );
+
+        let label = console::strip_ansi_codes(&assessment.offers[0].label).into_owned();
+        assert!(
+            label.contains("landed (+ worktree ●) ↑2"),
+            "ground and risks should keep their established order: {label}"
+        );
+    }
+
+    #[test]
+    fn risk_legend_names_only_the_markers_present() {
+        let dirty = Risk {
+            dirty: true,
+            unmerged: None,
+        };
+        let unmerged = Risk {
+            dirty: false,
+            unmerged: Some(git::Unmerged::NoUpstream),
+        };
+        assert_eq!(
+            console::strip_ansi_codes(&risk_legend([dirty]).expect("dirty risk has a legend")),
+            "● uncommitted changes"
+        );
+        assert_eq!(
+            console::strip_ansi_codes(
+                &risk_legend([unmerged]).expect("unmerged risk has a legend")
+            ),
+            "↑ unmerged commits"
+        );
+
+        let legend = risk_legend([dirty, unmerged]).expect("visible risks have a legend");
+
+        assert_eq!(
+            console::strip_ansi_codes(&legend),
+            "● uncommitted changes   ↑ unmerged commits"
+        );
+    }
+
+    #[test]
+    fn risk_legend_is_absent_when_no_row_is_at_risk() {
+        assert!(risk_legend([Risk::default(), Risk::default()]).is_none());
+    }
+
+    #[test]
+    fn equivalent_stale_branch_keeps_its_proof_without_an_unmerged_risk() {
+        let proof = git::Proof {
+            anchor_ref: "refs/heads/main".to_string(),
+            anchor_tip: "def".to_string(),
+            tip: "abc".to_string(),
+        };
+        let assessment = build_stale_assessment(
+            StaleRequest::new(
+                vec![git::StaleBranch {
+                    ground: git::Ground::Landed,
+                    name: "shipped".to_string(),
+                }],
+                Vec::new(),
+                "origin",
+                None,
+                None,
+            ),
+            None,
+            &HashMap::from([("shipped".to_string(), git::Unmerged::NoUpstream)]),
+            &HashMap::from([("shipped".to_string(), proof.clone())]),
+            |_| false,
+        );
+
+        let local = &assessment.locals[0];
+        assert_eq!(
+            (local.proof.as_ref(), local.risk.unmerged),
+            (Some(&proof), None)
+        );
+    }
+
+    #[test]
+    fn worktree_target_does_not_match_a_partial_branch_path() {
+        let assessment = Assessment {
+            kind: RequestKind::Worktrees,
+            offers: Vec::new(),
+            locals: vec![AssessedLocal {
+                target: OwnedTarget::Held {
+                    name: "feat/login".to_string(),
+                    path: PathBuf::from("/tmp/worktrees/repo/feat/login"),
+                },
+                risk: Risk::default(),
+                proof: None,
+                named_error: None,
+                picker_eligible: true,
+                contains_cwd: false,
+            }],
+            legend: None,
+            main: None,
+            current: None,
+            upstream: UpstreamInterest::None,
+        };
+
+        let Err(error) = assessment.named("feat") else {
+            panic!("a path segment is not a complete worktree target");
+        };
+        assert_eq!(
+            error.to_string(),
+            "git worktree remove: no worktree matching 'feat'"
+        );
+    }
+
     /// One recorded call, as the rules care about it: which step, and whether it
     /// was forced.
     #[derive(Debug, PartialEq, Eq)]
@@ -1428,6 +1725,7 @@ mod tests {
     /// do, so ordering and licensing can be asserted without a repo on disk.
     struct FakeSteps {
         worktree: git::WorktreeRemoveOutcome,
+        worktree_error: bool,
         branch: git::BranchDeleteOutcome,
         /// What the refs read when [`remove`] asks. The proof tests move one out
         /// from under the license and leave the other where it was.
@@ -1441,6 +1739,7 @@ mod tests {
         fn new() -> Self {
             Self {
                 worktree: git::WorktreeRemoveOutcome::Removed,
+                worktree_error: false,
                 branch: git::BranchDeleteOutcome::Deleted,
                 refs: HashMap::from([
                     ("refs/heads/feature".to_string(), PROVEN_TIP.to_string()),
@@ -1502,6 +1801,12 @@ mod tests {
             force: bool,
         ) -> AppResult<git::WorktreeRemoveOutcome> {
             self.calls.push(Call::RemoveWorktree { force });
+            if self.worktree_error {
+                return Err(Error::Git {
+                    command: "worktree remove".to_string(),
+                    message: "could not start git".to_string(),
+                });
+            }
             Ok(self.worktree.clone())
         }
     }
@@ -1538,7 +1843,7 @@ mod tests {
             .choose(LocalChoice::forced(named.id()))
             .expect("pending Removal");
         let outcome = pending
-            .finish(UpstreamChoice::keep())
+            .finish(UpstreamChoice::keep(), |_| {})
             .expect("Removal outcome");
 
         assert_eq!(plain(outcome.lines()), ["✓ deleted feature"]);
@@ -1576,7 +1881,7 @@ mod tests {
             .choose(LocalChoice::forced_picked(vec![id]))
             .expect("pending Removal");
         let outcome = pending
-            .finish(UpstreamChoice::keep())
+            .finish(UpstreamChoice::keep(), |_| {})
             .expect("Removal outcome");
 
         assert_eq!(
@@ -1603,6 +1908,38 @@ mod tests {
                 Call::RemoveWorktree { force: false },
                 Call::DeleteBranch { force: false },
             ]
+        );
+    }
+
+    #[test]
+    fn a_fatal_worktree_error_escapes_the_staged_removal() {
+        let pending = Pending {
+            kind: RequestKind::Worktrees,
+            locals: vec![PlannedLocal {
+                target: OwnedTarget::Held {
+                    name: "feature".to_string(),
+                    path: PathBuf::from("/tmp/wt"),
+                },
+                license: License::forced(),
+                preparation_failure: None,
+                contains_cwd: false,
+                upstream: None,
+            }],
+            main: None,
+            upstream_offers: Vec::new(),
+            notices: Vec::new(),
+        };
+        let mut steps = FakeSteps::new();
+        steps.worktree_error = true;
+
+        let Err(error) = pending.finish_with_steps(UpstreamChoice::keep(), &mut steps, |_| {})
+        else {
+            panic!("process-level git errors stay fatal");
+        };
+
+        assert_eq!(
+            error.to_string(),
+            "git worktree remove: could not start git"
         );
     }
 

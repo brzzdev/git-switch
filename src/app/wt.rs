@@ -190,10 +190,7 @@ pub(crate) fn run_rm(options: &WorktreeRemoval) -> AppResult<()> {
         return Ok(());
     };
     let pending = assessment.choose(choice)?;
-    let outcome = pending.finish(removal::UpstreamChoice::keep())?;
-    for line in outcome.lines() {
-        eprintln!("{line}");
-    }
+    let outcome = pending.finish(removal::UpstreamChoice::keep(), |line| eprintln!("{line}"))?;
     if let Some(path) = outcome.handoff() {
         handoff_cd(path);
     }
@@ -206,8 +203,8 @@ pub(crate) fn run_rm(options: &WorktreeRemoval) -> AppResult<()> {
 ///
 /// `.` is the one accepted target left off. It is a single character, every
 /// shell already completes it as a path, and it names the worktree the cwd sits
-/// in rather than any worktree in particular — [`select_for_removal`] resolves
-/// it from the cwd, and [`rm_names`] never sees it.
+/// in rather than any worktree in particular. Removal resolves it from the cwd,
+/// and [`rm_names`] never sees it.
 ///
 /// This returns unique raw names in worktree order. Grammar renders the
 /// newline-separated answer after Git facts return to it.

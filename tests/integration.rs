@@ -1126,6 +1126,12 @@ fn bash_br_rm_completion_offers_one_target_and_only_long_flags() {
     assert!(!after_target.lines().any(|line| line == "feature"));
     assert!(after_target.lines().any(|line| line == "--upstream"));
     assert!(after_target.lines().any(|line| line == "--force"));
+
+    let after_rejected_escape = complete("perch br rm -- ''", 4);
+    assert!(
+        !after_rejected_escape.lines().any(|line| line == "feature"),
+        "br rm rejects `--`, so completion must not offer a target after it: {after_rejected_escape}"
+    );
 }
 
 /// Regression, in both halves. Git permits `$`, backticks and `${IFS}` in a ref
@@ -3926,6 +3932,27 @@ fn br_rm_does_not_fire_the_worktree_removal_hook() {
     assert!(
         !log.exists(),
         "br rm must not masquerade as worktree removal"
+    );
+}
+
+#[test]
+fn wt_rm_reports_the_removal_before_the_hook_runs() {
+    let (_bare, parent, work) = setup_with_parent();
+    add_worktree(&work, &parent, "feature");
+    git(
+        &work,
+        &["config", "perch.hook.removed", "printf 'HOOK-RAN\\n' >&2"],
+    );
+
+    let output = perch_hooked(&work, &["wt", "rm", "feature", "--force"]);
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+
+    let stderr = stderr_str(&output);
+    let removal = stderr.find("removed worktree").expect("removal report");
+    let hook = stderr.find("HOOK-RAN").expect("hook output");
+    assert!(
+        removal < hook,
+        "the removal report must precede its hook output; got: {stderr}"
     );
 }
 

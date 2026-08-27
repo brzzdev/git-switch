@@ -117,10 +117,7 @@ fn select_upstream(
 }
 
 fn finish(pending: removal::Pending, upstream: removal::UpstreamChoice) -> AppResult<()> {
-    let outcome = pending.finish(upstream)?;
-    for line in outcome.lines() {
-        eprintln!("{line}");
-    }
+    let outcome = pending.finish(upstream, |line| eprintln!("{line}"))?;
     if outcome.failed() {
         Err(Error::RemovalFailed)
     } else {

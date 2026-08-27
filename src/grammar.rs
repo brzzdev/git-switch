@@ -1,12 +1,12 @@
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum Invocation {
+    Complete(Completion),
+    Help(HelpPage),
+    ListWorktrees,
     Navigate(Navigation),
     RemoveBranches(BranchRemoval),
-    ListWorktrees,
     RemoveWorktrees(WorktreeRemoval),
-    Help(HelpPage),
     Version,
-    Complete(Completion),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -71,8 +71,8 @@ impl WorktreeRemoval {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum HelpPage {
-    Main,
     Branch,
+    Main,
     Worktree,
 }
 
@@ -88,8 +88,8 @@ impl HelpPage {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum CompletionSource {
-    ReachableBranches,
     LocalBranches,
+    ReachableBranches,
     Worktrees,
 }
 
@@ -97,9 +97,9 @@ pub(crate) enum CompletionSource {
 enum Position {
     Bare,
     Branch,
-    Worktree,
     Escaped,
     Removal,
+    Worktree,
 }
 
 impl Position {
@@ -145,8 +145,8 @@ enum GrammarErrorKind {
     #[error("invalid `perch br rm` invocation: {0}")]
     BranchRemoval(String),
 
-    #[error("invalid `perch wt rm` invocation: {0}")]
-    WorktreeRemoval(String),
+    #[error("`--no-switch` does not apply to `perch wt {subverb}`")]
+    NoSwitchWithSubverb { subverb: String },
 
     #[error(
         "`perch wt {word}` is gone; use `perch wt {keep}`, or `perch wt -- {word}` for a branch by that name"
@@ -156,8 +156,8 @@ enum GrammarErrorKind {
         keep: &'static str,
     },
 
-    #[error("`--no-switch` does not apply to `perch wt {subverb}`")]
-    NoSwitchWithSubverb { subverb: String },
+    #[error("invalid `perch wt rm` invocation: {0}")]
+    WorktreeRemoval(String),
 }
 
 impl GrammarError {
