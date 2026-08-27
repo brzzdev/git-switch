@@ -3047,6 +3047,22 @@ fn wt_rm_reports_failure_and_keeps_branch_when_worktree_is_locked() {
 }
 
 #[test]
+fn wt_rm_from_inside_locked_worktree_hands_off_to_main() {
+    let (_bare, parent, work) = setup_with_parent();
+    let path = add_worktree(&work, &parent, "feature");
+    git(&work, &["worktree", "lock", path.to_str().unwrap()]);
+
+    let output = perch_args(&path, &["wt", "rm", "feature", "--force"]);
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+
+    let printed = stdout_str(&output).trim().to_string();
+    assert!(
+        Path::new(&printed).is_dir() && printed.ends_with("repo"),
+        "stdout should be the main worktree path; got: {printed}"
+    );
+}
+
+#[test]
 fn wt_rm_clears_missing_detached_worktree_by_dir_name() {
     let (_bare, parent, work) = setup_with_parent();
 

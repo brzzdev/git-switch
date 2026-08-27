@@ -623,14 +623,19 @@ impl Pending {
         mut emit: impl FnMut(String),
     ) -> Result<Outcome, FinishFailure> {
         let selected: HashSet<UpstreamId> = upstream.ids.into_iter().collect();
-        let cwd_will_vanish = self.locals.iter().any(|local| local.contains_cwd);
-        if cwd_will_vanish && let Some(main) = &self.main {
+        let handoff = self
+            .locals
+            .iter()
+            .any(|local| local.contains_cwd)
+            .then(|| self.main.clone())
+            .flatten();
+        if let Some(main) = &handoff {
             env::set_current_dir(main).map_err(|error| FinishFailure::new(error.into(), None))?;
         }
 
         let mut outcome = Outcome {
             failed: false,
-            handoff: None,
+            handoff,
         };
         for local in self.locals {
             let display_name = local.target.name().unwrap_or("this worktree").to_string();
@@ -645,17 +650,13 @@ impl Pending {
 
             let report = match remove(local.target.borrowed(), &local.license, steps) {
                 Ok(report) => report,
-                Err(failure) if self.kind != RequestKind::Branches => {
-                    let RemovalFailure { error, report } = *failure;
-                    let removed_cwd_worktree = local.contains_cwd && report.worktree_removed();
-                    let handoff = outcome
-                        .handoff
-                        .take()
-                        .or_else(|| removed_cwd_worktree.then(|| self.main.clone()).flatten());
+                Err(error) if self.kind != RequestKind::Branches => {
+                    // The process moved before removal began. Move its pending
+                    // handoff into the error so the caller emits it exactly once.
+                    let handoff = outcome.handoff.take();
                     return Err(FinishFailure::new(error, handoff));
                 }
-                Err(failure) => {
-                    let RemovalFailure { error, .. } = *failure;
+                Err(error) => {
                     emit(format!(
                         "{} could not remove {display_name}: {error}",
                         style("!").yellow().bold(),
@@ -667,10 +668,6 @@ impl Pending {
             for line in reporting::removal_outcome(&report) {
                 emit(line);
             }
-            if local.contains_cwd && report.worktree_removed() {
-                outcome.handoff.clone_from(&self.main);
-            }
-
             if report.worktree_removed()
                 && let (Some(path), Some(main)) = (local.target.path(), self.main.as_deref())
             {
@@ -1210,12 +1207,6 @@ struct Report<'a> {
     branch: Option<git::BranchDeleteOutcome>,
 }
 
-#[derive(Debug)]
-struct RemovalFailure<'a> {
-    error: Error,
-    report: Report<'a>,
-}
-
 impl Report<'_> {
     /// Whether the worktree itself went. False covers both a target that never
     /// had one and one git refused to remove — in either case there is no
@@ -1323,7 +1314,7 @@ fn remove<'a>(
     target: Target<'a>,
     license: &License,
     steps: &mut impl Steps,
-) -> Result<Report<'a>, Box<RemovalFailure<'a>>> {
+) -> AppResult<Report<'a>> {
     let mut report = Report {
         target,
         worktree: None,
@@ -1331,10 +1322,7 @@ fn remove<'a>(
     };
 
     if let Some(path) = target.path() {
-        report.worktree = match steps.remove_worktree(path, license.worktree) {
-            Ok(outcome) => Some(outcome),
-            Err(error) => return Err(Box::new(RemovalFailure { error, report })),
-        };
+        report.worktree = Some(steps.remove_worktree(path, license.worktree)?);
         if !report.worktree_removed() {
             return Ok(report);
         }
@@ -1366,10 +1354,7 @@ fn remove<'a>(
             }
             BranchLicense::None | BranchLicense::Proven(_) => steps.delete_branch(branch, false),
         };
-        report.branch = match outcome {
-            Ok(outcome) => Some(outcome),
-            Err(error) => return Err(Box::new(RemovalFailure { error, report })),
-        };
+        report.branch = Some(outcome?);
     }
 
     Ok(report)
