@@ -500,7 +500,11 @@ pub(crate) fn confirm(prompt: &str, default_yes: bool) -> AppResult<Confirmation
             Confirmation::Declined
         });
     };
-    let hint = if default_yes { "[Y/n]" } else { "[y/N]" };
+    let hint = if default_yes {
+        "[Y/n] / esc"
+    } else {
+        "[y/N] / esc"
+    };
     eprint!(
         "{} {} {} ",
         style("?").green().bold(),

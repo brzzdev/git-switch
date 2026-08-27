@@ -2377,6 +2377,24 @@ fn br_rm_upstream_flag_preselects_the_named_confirmation() {
 }
 
 #[test]
+fn br_rm_named_upstream_confirmation_advertises_escape() {
+    let (_bare, work) = setup();
+    git(work.path(), &["branch", "feature"]);
+    git(work.path(), &["push", "-u", "origin", "feature"]);
+
+    let output = drive_escape_confirmation(
+        work.path(),
+        &["br", "rm", "feature", "--upstream"],
+        "Delete upstream origin/feature too?",
+    );
+
+    assert!(
+        output.contains("[Y/n] / esc"),
+        "the confirmation should advertise its cancellation key; got: {output}",
+    );
+}
+
+#[test]
 fn br_rm_escape_from_named_upstream_confirmation_cancels_every_removal() {
     let (_bare, work) = setup();
     git(work.path(), &["branch", "feature"]);
