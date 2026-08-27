@@ -5,13 +5,10 @@ use std::path::{Path, PathBuf};
 use console::{measure_text_width, style};
 use indicatif::ProgressBar;
 
-use super::picker::{
-    MultiItem, PickerOptions, Selection, align_labels, interactive_keys, multi_select, pick,
-};
+use super::picker::{MultiItem, PickerOptions, Selection, interactive_keys, multi_select, pick};
 use super::{
-    Confirmation, CursorGuard, Risk, Verb, build_catalogue, confirm, display_path, fetch_and_ff,
+    Confirmation, CursorGuard, Verb, build_catalogue, confirm, display_path, fetch_and_ff,
     handoff_cd, hook, marker, picker, prompt_delete_stale_branches, removal, report_update,
-    reporting,
 };
 use crate::{AppResult, Error, git};
 
@@ -196,80 +193,73 @@ pub fn run_ls() -> AppResult<()> {
 
 pub fn run_rm(target: Option<&str>, force: bool) -> AppResult<()> {
     let worktrees = git::worktree_list()?;
-    let main = main_of(&worktrees)?.clone();
-    let removable: Vec<git::Worktree> = removable(&worktrees).cloned().collect();
-
-    if removable.is_empty() {
+    let cwd = env::current_dir()
+        .ok()
+        .and_then(|dir| dir.canonicalize().ok());
+    let assessment = removal::assess(removal::Request::Worktrees(removal::WorktreeRequest::new(
+        worktrees, cwd,
+    )))?;
+    if assessment.offers().is_empty() {
         eprintln!("No worktrees to remove.");
         return Ok(());
     }
-
-    // Canonicalize both sides: `env::current_dir()` and git's reported path can
-    // disagree on symlinks (e.g. macOS /var vs /private/var), which would let a
-    // plain `starts_with` miss a cwd that really is inside a doomed worktree.
-    let cwd = env::current_dir().ok().and_then(|c| c.canonicalize().ok());
-    let contains_cwd = |w: &git::Worktree| {
-        let wt_path = w.path.canonicalize().unwrap_or_else(|_| w.path.clone());
-        cwd.as_ref().is_some_and(|c| c.starts_with(&wt_path))
-    };
-
-    // The worktree the cwd sits in, for the `(current)` picker marker. Longest
-    // path wins so a nested worktree beats its enclosing one.
-    let current = removable
-        .iter()
-        .enumerate()
-        .filter(|(_, w)| contains_cwd(w))
-        .max_by_key(|(_, w)| w.path.as_os_str().len())
-        .map(|(i, _)| i);
-
-    // Judge merged-ness from the main worktree: it's the HEAD that will be
-    // current when the branch delete runs, and it can't be one of the branches
-    // being removed. Asking from a doomed worktree would call its own branch
-    // merged and skip the warning.
-    let unmerged = git::unmerged_branches(Some(&main.path)).unwrap_or_default();
-    let risks: Vec<Risk> = removable
-        .iter()
-        .map(|w| Risk {
-            dirty: !w.prunable && git::worktree_dirty(&w.path),
-            unmerged: w.branch.as_deref().and_then(|b| unmerged.get(b).copied()),
-        })
-        .collect();
-
-    let selected_indices = select_for_removal(&removable, &risks, current, target, force)?;
-    if selected_indices.is_empty() {
-        return Ok(());
-    }
-
-    let cwd_will_vanish = selected_indices
-        .iter()
-        .any(|&i| contains_cwd(&removable[i]));
-
-    if cwd_will_vanish {
-        env::set_current_dir(&main.path)?;
-    }
-
-    // Delete from the same worktree the risk was judged in, so `-d`'s idea of
-    // merged matches the marker that licensed the removal.
-    let mut steps = removal::GitSteps::at_main(Some(&main.path));
-    for &i in &selected_indices {
-        let wt = &removable[i];
-        // Once per worktree and only where it actually went: a hook told about
-        // a removal git refused would be describing something still on disk.
-        // It fires after the branch delete rather than between the two steps,
-        // so the repo a hook shells into is the one the removal leaves behind
-        // — `PERCH_BRANCH` names a branch that has already gone with it.
-        if remove_one(&mut steps, wt, risks[i], force)? {
-            hook::fire(
-                hook::Event::Removed,
-                &wt.path,
-                wt.branch.as_deref(),
-                &main.path,
-            );
+    let choice = if let Some(name) = target {
+        let named = assessment.named(name)?;
+        if force {
+            removal::LocalChoice::forced(named.id())
+        } else if named.warnings().is_empty() {
+            removal::LocalChoice::named(named.id())
+        } else {
+            if !super::is_interactive() {
+                return Err(Error::Unconfirmed(named.refusal().to_string()));
+            }
+            for warning in named.warnings() {
+                eprintln!("{warning}");
+            }
+            if confirm(named.question(), false)? != Confirmation::Accepted {
+                return Ok(());
+            }
+            removal::LocalChoice::named(named.id())
         }
+    } else {
+        let Some(keys) = interactive_keys() else {
+            return Ok(());
+        };
+        let items: Vec<MultiItem> = assessment
+            .offers()
+            .iter()
+            .map(|offer| MultiItem {
+                label: offer.label().to_string(),
+                selected: offer.selected(),
+                disabled: offer.disabled(),
+            })
+            .collect();
+        let Some(selected) = multi_select(
+            "Remove worktrees (space to toggle, →/← all/none)",
+            assessment.legend(),
+            &items,
+            keys,
+        )?
+        else {
+            return Ok(());
+        };
+        let ids = selected
+            .into_iter()
+            .map(|index| assessment.offers()[index].id())
+            .collect();
+        if force {
+            removal::LocalChoice::forced_picked(ids)
+        } else {
+            removal::LocalChoice::picked(ids)
+        }
+    };
+    let pending = assessment.choose(choice)?;
+    let outcome = pending.finish(removal::UpstreamChoice::keep())?;
+    for line in outcome.lines() {
+        eprintln!("{line}");
     }
-
-    if cwd_will_vanish {
-        handoff_cd(&main.path);
+    if let Some(path) = outcome.handoff() {
+        handoff_cd(path);
     }
     Ok(())
 }
@@ -297,108 +287,6 @@ pub fn run_rm_complete() -> AppResult<()> {
         println!("{name}");
     }
     Ok(())
-}
-
-/// Resolves which worktrees to remove: a single named target (`.` for the one
-/// the cwd sits in), or a multi-select whose rows carry risk markers.
-fn select_for_removal(
-    removable: &[git::Worktree],
-    risks: &[Risk],
-    current: Option<usize>,
-    target: Option<&str>,
-    force: bool,
-) -> AppResult<Vec<usize>> {
-    let Some(name) = target else {
-        // Non-interactive (piped/CI): we can't prompt, so remove nothing rather
-        // than blocking on key input.
-        let Some(keys) = interactive_keys() else {
-            return Ok(vec![]);
-        };
-        let labels = align_labels(
-            &removable
-                .iter()
-                .enumerate()
-                .map(|(i, w)| (rm_label(w, current == Some(i)), marker::markers(risks[i])))
-                .collect::<Vec<_>>(),
-        );
-        let items: Vec<MultiItem> = labels
-            .into_iter()
-            .map(|label| MultiItem {
-                label,
-                selected: false,
-                disabled: false,
-            })
-            .collect();
-        let legend = super::risk_legend(risks);
-        // Cancelling and accepting no rows both stop before any removal here,
-        // so this first-stage picker can safely collapse them to an empty set.
-        return Ok(multi_select(
-            "Remove worktrees (space to toggle, →/← all/none)",
-            legend.as_deref(),
-            &items,
-            keys,
-        )?
-        .unwrap_or_default());
-    };
-
-    // `.` means the worktree the cwd sits in, matching `perch .` for the
-    // current branch. The main worktree isn't removable, so standing in it
-    // leaves nothing for `.` to name.
-    let i = if name == "." {
-        current.ok_or_else(|| Error::Git {
-            command: "worktree remove".into(),
-            message: "the main worktree cannot be removed".into(),
-        })?
-    } else {
-        removable
-            .iter()
-            .position(|w| rm_matches(w, name))
-            .ok_or_else(|| Error::Git {
-                command: "worktree remove".into(),
-                message: format!("no worktree matching '{name}'"),
-            })?
-    };
-
-    // A named target never passed through a picker, so no marker warned about
-    // what it would destroy; the confirmation stands in for one.
-    Ok(if confirm_removal(&removable[i], risks[i], force)? {
-        vec![i]
-    } else {
-        vec![]
-    })
-}
-
-/// Removes one worktree and, when it has a branch, deletes that too, then prints
-/// what happened. The ordering and the licensing rule belong to [`removal`], the
-/// wording to [`reporting`] — which is what makes the answer here word for word
-/// the stale-branch prompt's, so it doesn't depend on how you got here.
-///
-/// Returns whether the worktree itself went. Git refusing is an outcome rather
-/// than an error, so the caller can't read that off the `Result`.
-fn remove_one(
-    steps: &mut impl removal::Steps,
-    wt: &git::Worktree,
-    risk: Risk,
-    force: bool,
-) -> AppResult<bool> {
-    let target = match wt.branch.as_deref() {
-        Some(name) => removal::Target::Held {
-            name,
-            path: &wt.path,
-        },
-        None => removal::Target::Worktree { path: &wt.path },
-    };
-    let license = if force {
-        removal::License::forced()
-    } else {
-        removal::License::shown(risk)
-    };
-    let report = removal::remove(target, &license, steps)?;
-
-    for line in reporting::removal_outcome(&report) {
-        eprintln!("{line}");
-    }
-    Ok(report.worktree_removed())
 }
 
 /// Fetch + fast-forward `branch` in the worktree at `path`. Unlike the in-place
@@ -529,53 +417,6 @@ fn resolve_target(
     Ok(Action::CreateNewBranch(name.to_string()))
 }
 
-/// Gate for a worktree named on the command line, where there is no picker row
-/// to carry a marker. Nothing at risk means no prompt at all — `wt rm .` on a
-/// clean, merged worktree is silent. Otherwise the risks are named and
-/// confirmed, `--force` waives the prompt, and a run with no terminal to ask in
-/// refuses rather than destroying anything unwarned.
-fn confirm_removal(wt: &git::Worktree, risk: Risk, force: bool) -> AppResult<bool> {
-    if force || !risk.any() {
-        return Ok(true);
-    }
-
-    let subject = wt.branch.as_deref().unwrap_or("this worktree");
-
-    if !super::is_interactive() {
-        return Err(Error::Unconfirmed(format!(
-            "{}; not removing. Rerun in a terminal to confirm, or pass --force.",
-            reporting::describe(risk, subject, &wt.path).join(" and ")
-        )));
-    }
-
-    for line in reporting::warnings(risk, subject, &wt.path) {
-        eprintln!("{line}");
-    }
-    let question = match wt.branch.as_deref() {
-        Some(branch) => format!("Remove the worktree and delete {branch} anyway?"),
-        None => "Remove the worktree anyway?".to_string(),
-    };
-    Ok(confirm(&question, false)? == Confirmation::Accepted)
-}
-
-/// Picker label for a removable worktree: its branch when it has one, else the
-/// path (detached HEAD). Missing-on-disk worktrees are flagged so the user knows
-/// the entry is a leftover registration; the worktree the cwd sits in is marked
-/// `(current)` so it's identifiable even though it's labelled by branch.
-fn rm_label(w: &git::Worktree, is_current: bool) -> String {
-    let mut label = match &w.branch {
-        Some(branch) => branch.clone(),
-        None => display_path(&w.path),
-    };
-    if w.prunable {
-        label.push_str(" (missing)");
-    }
-    if is_current {
-        label.push_str(" (current)");
-    }
-    label
-}
-
 /// Every name `wt rm` accepts for one worktree: its branch, and the final
 /// component of its path — the latter lets you name a detached/missing worktree.
 /// A worktree whose directory was renamed, or whose branch nests (`feat/x` under
@@ -589,11 +430,6 @@ fn rm_names(w: &git::Worktree) -> impl Iterator<Item = &str> {
         .as_deref()
         .into_iter()
         .chain(w.path.file_name().and_then(|n| n.to_str()))
-}
-
-/// Whether a `wt rm <name>` target names this worktree.
-fn rm_matches(w: &git::Worktree, name: &str) -> bool {
-    rm_names(w).any(|n| n == name)
 }
 
 /// The worktrees `wt rm` can act on: every one but the main worktree, which git
@@ -665,9 +501,6 @@ mod tests {
     fn a_worktree_answers_to_its_branch_and_to_its_directory() {
         let w = worktree(Some("feat/login"), "/tmp/worktrees/repo/feat/login");
         assert_eq!(rm_names(&w).collect::<Vec<_>>(), ["feat/login", "login"]);
-        assert!(rm_matches(&w, "feat/login"));
-        assert!(rm_matches(&w, "login"));
-        assert!(!rm_matches(&w, "feat"));
     }
 
     /// A detached or missing worktree has no branch, which is exactly when the

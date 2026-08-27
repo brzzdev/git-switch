@@ -18,7 +18,6 @@ use std::fmt;
 
 use console::style;
 
-use super::Risk;
 use crate::git;
 
 /// The rendering of a *Risk*, or of a worktree's position against its upstream.
@@ -66,12 +65,12 @@ fn join(markers: &[Marker]) -> String {
 /// The markers for a picker row: `●` for a dirty worktree, `↑N` for an unmerged
 /// branch. Empty when there is nothing to lose, which is what keeps a non-empty
 /// column meaningful — and what withholds the license to force.
-pub(crate) fn markers(risk: Risk) -> String {
+pub(crate) fn markers(dirty: bool, unmerged: Option<git::Unmerged>) -> String {
     let mut marks = Vec::new();
-    if risk.dirty {
+    if dirty {
         marks.push(Marker::Dirty);
     }
-    match risk.unmerged {
+    match unmerged {
         Some(git::Unmerged::Ahead(n)) => marks.push(Marker::Unmerged(Some(n))),
         Some(git::Unmerged::NoUpstream) => marks.push(Marker::Unmerged(None)),
         None => {}
@@ -108,29 +107,21 @@ mod tests {
     /// a row at risk both ways carries both glyphs.
     #[test]
     fn markers_render_a_dirty_worktree_and_an_unmerged_branch() {
-        let risk = Risk {
-            dirty: true,
-            unmerged: Some(git::Unmerged::Ahead(2)),
-        };
-        assert_eq!(plain(&markers(risk)), "● ↑2");
+        assert_eq!(plain(&markers(true, Some(git::Unmerged::Ahead(2)))), "● ↑2");
     }
 
     /// With no upstream there is no count to give, but the risk is real — so the
     /// glyph still appears rather than being dropped for want of a number.
     #[test]
     fn unmerged_without_upstream_renders_a_bare_arrow() {
-        let risk = Risk {
-            dirty: false,
-            unmerged: Some(git::Unmerged::NoUpstream),
-        };
-        assert_eq!(plain(&markers(risk)), "↑");
+        assert_eq!(plain(&markers(false, Some(git::Unmerged::NoUpstream))), "↑");
     }
 
     /// An empty marker column is what keeps a non-empty one meaningful — and per
     /// ADR 0001 it is also what withholds the license to force.
     #[test]
     fn no_risk_renders_no_markers() {
-        assert!(markers(Risk::default()).is_empty());
+        assert!(markers(false, None).is_empty());
     }
 
     /// `wt ls` draws the same glyphs as the pickers, plus the one only it has.

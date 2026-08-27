@@ -11,12 +11,10 @@ pub(crate) mod hook;
 pub(crate) mod marker;
 pub(crate) mod picker;
 pub(crate) mod removal;
-pub(crate) mod reporting;
 pub mod wt;
 
 use picker::{
-    Catalogue, MultiItem, PickerOptions, Selection, align_labels, interactive_keys, multi_select,
-    pick,
+    Catalogue, MultiItem, PickerOptions, Selection, interactive_keys, multi_select, pick,
 };
 
 pub(crate) struct CursorGuard(Term);
@@ -612,45 +610,6 @@ pub(crate) fn build_catalogue(
     })
 }
 
-/// What removing something would irreversibly destroy.
-///
-/// The project rule is *warned means forceable*: a destructive step may skip
-/// confirmation only where the user was shown the specific risk first. In a
-/// picker the row markers are that warning; for a target named on the command
-/// line no marker is possible, so a confirmation naming these risks stands in
-/// for it. Either way, a `Risk` the user has seen licenses forcing — it is not
-/// the only thing that can: proof that a branch is *Equivalent* licenses
-/// discarding its commits without any warning being shown, per [ADR
-/// 0005](../docs/adr/0005-proof-of-equivalence-is-a-license.md). What a risk
-/// governs is what a *warning* buys.
-#[derive(Default, Clone, Copy)]
-pub(crate) struct Risk {
-    /// The worktree holds uncommitted or untracked changes.
-    pub(crate) dirty: bool,
-    /// The branch has commits `git branch -d` would refuse to discard.
-    pub(crate) unmerged: Option<git::Unmerged>,
-}
-
-impl Risk {
-    pub(crate) fn any(self) -> bool {
-        self.dirty || self.unmerged.is_some()
-    }
-}
-
-/// A stale branch, together with the ground it is offered on, the worktree
-/// holding it (if any) and what deleting it would destroy.
-struct StaleRow {
-    branch: String,
-    ground: git::Ground,
-    worktree: Option<git::Worktree>,
-    risk: Risk,
-    /// What proved this branch *Equivalent*, where anything did. It rides here
-    /// rather than on the `Risk` because it is not a risk: it is what licenses
-    /// the delete in the absence of one, and it names the commits it was
-    /// established on so the delete can check they still stand.
-    proven: Option<git::Proof>,
-}
-
 /// Offers to delete stale branches, and the worktrees holding them.
 ///
 /// `old_branch` is pre-ticked, being the branch just switched away from.
@@ -669,53 +628,24 @@ pub(crate) fn prompt_delete_stale_branches(
         return Ok(());
     }
 
-    let stale = git::stale_branches(remote)?;
-    let worktrees = git::worktree_list().unwrap_or_default();
-    // Judge risk — and later delete — from the main worktree, where HEAD is
-    // normally the branch staleness was measured against. Asking from the
-    // current worktree would call a branch merged into the anchor "unmerged"
-    // whenever that worktree sits on something unrelated, and per ADR 0001 the
-    // marker would then license a force-delete it never warned about.
-    let main_dir = worktrees.iter().find(|w| w.is_main).map(|w| w.path.clone());
-    let unmerged = git::unmerged_branches(main_dir.as_deref()).unwrap_or_default();
-    // A branch whose work landed by squash merge is unmerged by every test git
-    // offers, and warning about it warns of nothing. Ask only where a warning
-    // would otherwise be drawn — a branch both stale and unmerged, and on offer
-    // at all — since equivalence subtracts a warning and never adds one. The
-    // handoff destination is dropped here for the same reason `stale_rows` drops
-    // it: no row is ever drawn for it, so there is nothing to subtract from.
-    let candidates: Vec<&str> = stale
-        .iter()
-        .map(|b| b.name.as_str())
-        .filter(|name| unmerged.contains_key(*name) && destination != Some(name))
-        .collect();
-    let equivalent = git::equivalent_branches(main_dir.as_deref(), remote, &candidates);
-    let rows = stale_rows(
-        stale,
-        &worktrees,
-        &unmerged,
-        &equivalent,
+    let assessment = removal::assess(removal::Request::Stale(removal::StaleRequest::new(
+        git::stale_branches(remote)?,
+        git::worktree_list().unwrap_or_default(),
+        remote,
+        old_branch,
         destination,
-        &|path| git::worktree_dirty(path),
-    );
-    if rows.is_empty() {
+    )))?;
+    if assessment.offers().is_empty() {
         return Ok(());
     }
 
-    // A branch held by a worktree is never the one just left — git forbids the
-    // same branch in two worktrees — so worktree rows always start unticked.
-    let defaults: Vec<bool> = rows
+    let items: Vec<MultiItem> = assessment
+        .offers()
         .iter()
-        .map(|r| old_branch.is_some_and(|old| old == r.branch))
-        .collect();
-    let labels = align_labels(&rows.iter().map(stale_label).collect::<Vec<_>>());
-    let items: Vec<MultiItem> = labels
-        .into_iter()
-        .zip(defaults)
-        .map(|(label, selected)| MultiItem {
-            label,
-            selected,
-            disabled: false,
+        .map(|offer| MultiItem {
+            label: offer.label().to_string(),
+            selected: offer.selected(),
+            disabled: offer.disabled(),
         })
         .collect();
 
@@ -725,10 +655,9 @@ pub(crate) fn prompt_delete_stale_branches(
     let Some(keys) = interactive_keys() else {
         return Ok(());
     };
-    let legend = risk_legend(&rows.iter().map(|r| r.risk).collect::<Vec<_>>());
     let Some(selections) = multi_select(
         "Delete stale branches (space to toggle, →/← all/none)",
-        legend.as_deref(),
+        assessment.legend(),
         &items,
         keys,
     )?
@@ -736,162 +665,16 @@ pub(crate) fn prompt_delete_stale_branches(
         return Ok(());
     };
 
-    // Delete from the main worktree, the same HEAD the risk was judged against.
-    let mut steps = removal::GitSteps::at_main(main_dir.as_deref());
-    for &i in &selections {
-        delete_stale_row(&mut steps, &rows[i], main_dir.as_deref())?;
-    }
-
-    Ok(())
-}
-
-/// Builds the picker rows, pairing each stale branch with the worktree holding
-/// it and what deleting it would destroy. `equivalent` maps a branch proven
-/// equivalent to the [`git::Proof`] made of it, and a proof is subtracted here —
-/// before the `Risk` is built, so a proven branch is simply not unmerged and no
-/// row can carry both a proof and the marker it defeats. `dirty` is injected so
-/// the rule can be tested without a repo on disk.
-fn stale_rows(
-    stale: Vec<git::StaleBranch>,
-    worktrees: &[git::Worktree],
-    unmerged: &std::collections::HashMap<String, git::Unmerged>,
-    equivalent: &std::collections::HashMap<String, git::Proof>,
-    destination: Option<&str>,
-    dirty: &dyn Fn(&Path) -> bool,
-) -> Vec<StaleRow> {
-    stale
+    let ids = selections
         .into_iter()
-        .filter(|b| destination != Some(b.name.as_str()))
-        .map(|b| {
-            let worktree = git::worktree_for_branch(worktrees, &b.name);
-            let proven = equivalent.get(&b.name).cloned();
-            let risk = Risk {
-                dirty: worktree
-                    .as_ref()
-                    .is_some_and(|w| !w.prunable && dirty(&w.path)),
-                unmerged: proven
-                    .is_none()
-                    .then(|| unmerged.get(&b.name).copied())
-                    .flatten(),
-            };
-            StaleRow {
-                branch: b.name,
-                ground: b.ground,
-                worktree,
-                risk,
-                proven,
-            }
-        })
-        .collect()
-}
-
-/// Glosses the *Marker* glyphs these rows actually carry, or `None` where they
-/// carry none. Only what is on screen is explained: a legend for a glyph nobody
-/// can see is noise, and the common riskless list gets no legend at all. Grounds
-/// need no gloss — they are already words.
-pub(crate) fn risk_legend(risks: &[Risk]) -> Option<String> {
-    let mut parts = Vec::new();
-    if risks.iter().any(|r| r.dirty) {
-        parts.push(format!("{} uncommitted changes", marker::Marker::Dirty));
-    }
-    if risks.iter().any(|r| r.unmerged.is_some()) {
-        parts.push(format!(
-            "{} unmerged commits",
-            marker::Marker::Unmerged(None)
-        ));
-    }
-    (!parts.is_empty()).then(|| parts.join("   "))
-}
-
-/// The *Ground* a row is offered on, as the word the glossary uses. Dim, and
-/// deliberately not a [`marker::Marker`]: a ground warns of no loss, and per ADR
-/// 0001 only a marker licenses forcing. See [ADR
-/// 0004](../docs/adr/0004-a-ground-is-not-a-marker.md).
-///
-/// `padded` widens a shorter ground to the widest one, so annotations after it
-/// share a column down the list. Only ever true where something follows: the
-/// padding exists for that something, and a trailing run of spaces on a
-/// ground-only row is exactly what [`align_labels`] avoids.
-fn ground_label(ground: git::Ground, padded: bool) -> String {
-    let word = match ground {
-        git::Ground::Gone => "gone",
-        git::Ground::Landed => "landed",
-    };
-    // Named rather than a bare 6, so the widest ground stays visible as a fact
-    // about the words above and not a constant to remember to update.
-    let width = if padded { "landed".len() } else { 0 };
-    style(format!("{word:<width$}")).dim().to_string()
-}
-
-/// The picker row for a stale branch, as a (name, annotation) pair for
-/// [`align_labels`]. The ground leads, answering why the row is here at all;
-/// the risks follow, answering what deleting it would cost. Dirtiness belongs to
-/// the worktree so it sits inside the parentheses; unmerged commits belong to
-/// the branch so they sit outside. The worktree's path is deliberately absent —
-/// it appears in the outcome line.
-fn stale_label(row: &StaleRow) -> (String, String) {
-    let worktree = match &row.worktree {
-        None => String::new(),
-        Some(w) if w.prunable => "(+ worktree, missing)".to_string(),
-        Some(_) if row.risk.dirty => {
-            format!("(+ worktree {})", marker::Marker::Dirty)
-        }
-        Some(_) => "(+ worktree)".to_string(),
-    };
-    let branch_risk = marker::markers(Risk {
-        dirty: false,
-        ..row.risk
-    });
-
-    let follows = !worktree.is_empty() || !branch_risk.is_empty();
-    let annotation = [ground_label(row.ground, follows), worktree, branch_risk]
-        .into_iter()
-        .filter(|p| !p.is_empty())
-        .collect::<Vec<_>>()
-        .join(" ");
-    (row.branch.clone(), annotation)
-}
-
-/// Removes a ticked stale row and prints what happened. The ordering, and what
-/// licenses forcing — a shown marker, or proof that the branch is *Equivalent* —
-/// belong to [`removal`]; the wording belongs to [`reporting`]. This is what's left: which target the row
-/// describes, and telling the [`hook`] about a worktree that went with it — a
-/// held stale branch takes its worktree along, which is as much a removal as
-/// `wt rm` is. A hook mirrors what happened to the repo, not which command you
-/// happened to type.
-fn delete_stale_row(
-    steps: &mut impl removal::Steps,
-    row: &StaleRow,
-    main: Option<&Path>,
-) -> AppResult<()> {
-    let target = match &row.worktree {
-        Some(wt) => removal::Target::Held {
-            name: &row.branch,
-            path: &wt.path,
-        },
-        None => removal::Target::Branch { name: &row.branch },
-    };
-    // A proven branch draws no marker, so the proof is the only thing that could
-    // license discarding its commits — and it licenses them only while what it
-    // was established on still stands.
-    let license = match &row.proven {
-        Some(proof) => removal::License::proven(row.risk, proof),
-        None => removal::License::shown(row.risk),
-    };
-    let report = removal::remove(target, &license, steps)?;
-
-    for line in reporting::removal_outcome(&report) {
+        .map(|index| assessment.offers()[index].id())
+        .collect();
+    let pending = assessment.choose(removal::LocalChoice::picked(ids))?;
+    let outcome = pending.finish(removal::UpstreamChoice::keep())?;
+    for line in outcome.lines() {
         eprintln!("{line}");
     }
 
-    // Only where a worktree was really there and really went. `main` is the
-    // worktree the deletes ran from, and the one a hook is run from.
-    if let Some(wt) = &row.worktree
-        && report.worktree_removed()
-        && let Some(main) = main
-    {
-        hook::fire(hook::Event::Removed, &wt.path, Some(&row.branch), main);
-    }
     Ok(())
 }
 
@@ -963,44 +746,6 @@ pub(crate) fn handoff_cd(path: &std::path::Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// A row stale on the *Landed* ground, which the label tests take as given
-    /// so they can hold the risk half still — `ground_label_names_each_ground`
-    /// covers the other one.
-    fn stale_row(branch: &str, worktree: Option<git::Worktree>, risk: Risk) -> StaleRow {
-        StaleRow {
-            branch: branch.to_string(),
-            ground: git::Ground::Landed,
-            worktree,
-            risk,
-            proven: None,
-        }
-    }
-
-    /// Builds the input `stale_rows` now takes, all on one ground.
-    fn landed(names: &[&str]) -> Vec<git::StaleBranch> {
-        names
-            .iter()
-            .map(|n| git::StaleBranch {
-                ground: git::Ground::Landed,
-                name: (*n).to_string(),
-            })
-            .collect()
-    }
-
-    fn worktree(prunable: bool) -> git::Worktree {
-        git::Worktree {
-            path: PathBuf::from("/tmp/wt"),
-            branch: None,
-            is_main: false,
-            prunable,
-        }
-    }
-
-    /// Strips ANSI styling so assertions read as the user sees the row.
-    fn plain(s: &str) -> String {
-        console::strip_ansi_codes(s).into_owned()
-    }
 
     #[test]
     fn reconcile_hint_names_both_ways_out() {
@@ -1081,216 +826,5 @@ mod tests {
     #[test]
     fn an_escaped_branch_is_still_shell_quoted() {
         assert_eq!(go_there_argument("a b"), "'a b'");
-    }
-
-    /// The ground is on every row: a branch with nothing at stake still owes the
-    /// user an answer to "why is this being offered at all?".
-    #[test]
-    fn stale_label_without_worktree_carries_only_its_ground() {
-        let row = stale_row("fix/typo", None, Risk::default());
-        let (name, annotation) = stale_label(&row);
-        assert_eq!(name, "fix/typo");
-        assert_eq!(plain(&annotation), "landed");
-    }
-
-    #[test]
-    fn ground_label_names_each_ground() {
-        assert_eq!(plain(&ground_label(git::Ground::Gone, false)), "gone");
-        assert_eq!(plain(&ground_label(git::Ground::Landed, false)), "landed");
-    }
-
-    /// The grounds are different widths, so a shorter one is padded out to keep
-    /// what follows it in a column — `(+ worktree)` starting two characters
-    /// apart down a mixed list is the whole reason this pads at all.
-    #[test]
-    fn a_shorter_ground_is_padded_so_what_follows_lines_up() {
-        let gone = stale_label(&StaleRow {
-            ground: git::Ground::Gone,
-            ..stale_row("gone-held", Some(worktree(false)), Risk::default())
-        });
-        let landed = stale_label(&stale_row(
-            "landed-held",
-            Some(worktree(false)),
-            Risk::default(),
-        ));
-        assert_eq!(plain(&gone.1), "gone   (+ worktree)");
-        assert_eq!(plain(&landed.1), "landed (+ worktree)");
-        assert_eq!(
-            plain(&gone.1).find('('),
-            plain(&landed.1).find('('),
-            "both annotations should open the parenthesis at the same column"
-        );
-    }
-
-    /// Padding only ever buys alignment for something that follows. A row whose
-    /// whole annotation is its ground gets none, because `align_labels` works
-    /// hard to leave no trailing whitespace and this must not undo that.
-    #[test]
-    fn a_ground_with_nothing_after_it_is_not_padded() {
-        let (_, annotation) = stale_label(&stale_row("fix/typo", None, Risk::default()));
-        assert_eq!(plain(&annotation), "landed");
-    }
-
-    #[test]
-    fn stale_label_marks_a_dirty_worktree_inside_the_parens() {
-        let row = stale_row(
-            "chore/deps",
-            Some(worktree(false)),
-            Risk {
-                dirty: true,
-                unmerged: None,
-            },
-        );
-        assert_eq!(plain(&stale_label(&row).1), "landed (+ worktree ●)");
-    }
-
-    #[test]
-    fn stale_label_marks_a_missing_worktree() {
-        let row = stale_row("old/thing", Some(worktree(true)), Risk::default());
-        assert_eq!(plain(&stale_label(&row).1), "landed (+ worktree, missing)");
-    }
-
-    /// The ground leads — why the row is here — and the risks follow: what it
-    /// would cost. Dirtiness belongs to the worktree, unmerged commits to the
-    /// branch, so one sits inside the parentheses and the other outside.
-    #[test]
-    fn stale_label_leads_with_the_ground_then_the_risks() {
-        let row = stale_row(
-            "spike/abandoned",
-            Some(worktree(false)),
-            Risk {
-                dirty: true,
-                unmerged: Some(git::Unmerged::Ahead(2)),
-            },
-        );
-        assert_eq!(plain(&stale_label(&row).1), "landed (+ worktree ●) ↑2");
-    }
-
-    /// Grounds are words already, so the legend glosses only glyphs — and only
-    /// the glyphs some row actually carries.
-    #[test]
-    fn risk_legend_glosses_only_the_glyphs_on_screen() {
-        let dirty = Risk {
-            dirty: true,
-            unmerged: None,
-        };
-        let unmerged = Risk {
-            dirty: false,
-            unmerged: Some(git::Unmerged::Ahead(2)),
-        };
-        assert_eq!(
-            risk_legend(&[dirty]).as_deref().map(plain).as_deref(),
-            Some("● uncommitted changes")
-        );
-        assert_eq!(
-            risk_legend(&[unmerged]).as_deref().map(plain).as_deref(),
-            Some("↑ unmerged commits")
-        );
-        assert_eq!(
-            risk_legend(&[dirty, unmerged]).as_deref().map(plain),
-            Some("● uncommitted changes   ↑ unmerged commits".to_string())
-        );
-    }
-
-    /// The common case is a list with nothing at stake, which earns no legend.
-    #[test]
-    fn risk_legend_is_absent_when_nothing_is_at_risk() {
-        assert!(risk_legend(&[Risk::default(), Risk::default()]).is_none());
-    }
-
-    /// Nothing to lose is what lets a removal skip the prompt entirely, so the
-    /// default has to answer no.
-    #[test]
-    fn a_default_risk_has_nothing_to_lose() {
-        assert!(!Risk::default().any());
-    }
-
-    fn named_worktree(branch: &str, path: &str) -> git::Worktree {
-        git::Worktree {
-            path: PathBuf::from(path),
-            branch: Some(branch.to_string()),
-            is_main: false,
-            prunable: false,
-        }
-    }
-
-    fn names(rows: &[StaleRow]) -> Vec<&str> {
-        rows.iter().map(|r| r.branch.as_str()).collect()
-    }
-
-    /// Regression: the caller hands the shell off into a worktree right after
-    /// this prompt. Offering that worktree for deletion means a `→` select-all
-    /// removes the directory we're about to `cd` into.
-    #[test]
-    fn stale_rows_never_offer_the_handoff_destination() {
-        let worktrees = vec![named_worktree("feature", "/tmp/wt")];
-        let stale = landed(&["feature", "fix/typo"]);
-        let rows = stale_rows(
-            stale,
-            &worktrees,
-            &std::collections::HashMap::new(),
-            &std::collections::HashMap::new(),
-            Some("feature"),
-            &|_| false,
-        );
-        assert_eq!(names(&rows), vec!["fix/typo"]);
-    }
-
-    #[test]
-    fn stale_rows_without_a_destination_offer_everything() {
-        let worktrees = vec![named_worktree("feature", "/tmp/wt")];
-        let stale = landed(&["feature", "fix/typo"]);
-        let rows = stale_rows(
-            stale,
-            &worktrees,
-            &std::collections::HashMap::new(),
-            &std::collections::HashMap::new(),
-            None,
-            &|_| false,
-        );
-        assert_eq!(names(&rows), vec!["feature", "fix/typo"]);
-    }
-
-    #[test]
-    fn stale_rows_flag_a_dirty_held_worktree() {
-        let worktrees = vec![named_worktree("feature", "/tmp/wt")];
-        let rows = stale_rows(
-            landed(&["feature"]),
-            &worktrees,
-            &std::collections::HashMap::new(),
-            &std::collections::HashMap::new(),
-            None,
-            &|path| path == Path::new("/tmp/wt"),
-        );
-        assert!(rows[0].risk.dirty);
-        assert!(rows[0].worktree.is_some());
-    }
-
-    /// A proof is not a risk: it says what may be destroyed *without* asking,
-    /// so it rides on the row beside the risk rather than inside it. Subtracting
-    /// it here, before the `Risk` is built, is what leaves the row unmarked.
-    #[test]
-    fn a_proven_branch_carries_its_proof_and_no_unmerged_risk() {
-        let proof = git::Proof {
-            anchor_ref: "refs/heads/main".to_string(),
-            anchor_tip: "def".to_string(),
-            tip: "abc".to_string(),
-        };
-        let equivalent = std::collections::HashMap::from([("shipped".to_string(), proof.clone())]);
-        let rows = stale_rows(
-            landed(&["shipped"]),
-            &[],
-            &std::collections::HashMap::from([("shipped".to_string(), git::Unmerged::NoUpstream)]),
-            &equivalent,
-            None,
-            &|_| false,
-        );
-        assert_eq!(rows[0].proven.as_ref(), Some(&proof));
-        assert!(rows[0].risk.unmerged.is_none());
-        assert!(
-            !rows[0].risk.any(),
-            "nothing to warn about, so nothing to ask"
-        );
-        assert_eq!(plain(&stale_label(&rows[0]).1), "landed");
     }
 }

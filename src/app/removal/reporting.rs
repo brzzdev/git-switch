@@ -16,7 +16,8 @@ use std::path::Path;
 
 use console::{StyledObject, style};
 
-use super::{Risk, display_path, removal, shell_quote};
+use crate::app::removal::Risk;
+use crate::app::{display_path, removal, shell_quote};
 use crate::git;
 
 /// The glyph fronting a line that reports something going wrong, or a risk about
@@ -32,7 +33,7 @@ fn done() -> StyledObject<&'static str> {
 
 /// The risks as they are *shown*, one warning line each — what stands in for the
 /// markers when a target was named on the command line and no row was ever
-/// drawn. Per [ADR 0001](../../docs/adr/0001-warned-means-forceable.md) this is
+/// drawn. Per [ADR 0001](../../../docs/adr/0001-warned-means-forceable.md) this is
 /// the warning that licenses the forcing the confirmation then asks about.
 pub(crate) fn warnings(risk: Risk, subject: &str, path: &Path) -> Vec<String> {
     describe(risk, subject, path)

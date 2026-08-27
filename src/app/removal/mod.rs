@@ -1,0 +1,1691 @@
+//! The warning-to-outcome lifecycle for branch and worktree Removal.
+//!
+//! Every destructive flow enters through [`assess`]. An [`Assessment`] owns the
+//! safety facts and display-ready offers, [`Assessment::choose`] issues the
+//! narrow License earned by the user's choice, and [`Pending::finish`] alone may
+//! mutate Git state. Outcome wording, Hook eligibility, partial failures, and a
+//! current-worktree Handoff stay behind the same seam.
+
+use std::collections::{HashMap, HashSet};
+use std::env;
+use std::path::{Path, PathBuf};
+
+use console::style;
+
+use super::{display_path, hook, marker, picker, shell_quote};
+use crate::{AppResult, Error, git};
+
+mod reporting;
+
+/// What Removal would irreversibly destroy. It remains private to the Removal
+/// module's implementation once callers have been migrated to display-ready
+/// offers.
+#[derive(Default, Clone, Copy)]
+struct Risk {
+    dirty: bool,
+    unmerged: Option<git::Unmerged>,
+}
+
+/// One Removal request, before any warning has licensed mutation.
+pub(crate) enum Request {
+    Stale(StaleRequest),
+    Branches(BranchRequest),
+    Worktrees(WorktreeRequest),
+}
+
+pub(crate) struct StaleRequest {
+    stale: Vec<git::StaleBranch>,
+    worktrees: Vec<git::Worktree>,
+    remote: String,
+    old_branch: Option<String>,
+    destination: Option<String>,
+}
+
+impl StaleRequest {
+    pub(crate) fn new(
+        stale: Vec<git::StaleBranch>,
+        worktrees: Vec<git::Worktree>,
+        remote: &str,
+        old_branch: Option<&str>,
+        destination: Option<&str>,
+    ) -> Self {
+        Self {
+            stale,
+            worktrees,
+            remote: remote.to_string(),
+            old_branch: old_branch.map(str::to_string),
+            destination: destination.map(str::to_string),
+        }
+    }
+}
+
+/// Whether branch Removal should ignore upstreams, offer them, or require that
+/// every eligible upstream is put before the user.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum UpstreamInterest {
+    None,
+    Offer,
+    Requested,
+}
+
+pub(crate) struct BranchRequest {
+    branches: Vec<String>,
+    worktrees: Vec<git::Worktree>,
+    current: Option<String>,
+    remote: String,
+    upstream: UpstreamInterest,
+}
+
+impl BranchRequest {
+    pub(crate) fn new(
+        branches: Vec<String>,
+        worktrees: Vec<git::Worktree>,
+        current: Option<&str>,
+        remote: &str,
+        upstream: UpstreamInterest,
+    ) -> Self {
+        Self {
+            branches,
+            worktrees,
+            current: current.map(str::to_string),
+            remote: remote.to_string(),
+            upstream,
+        }
+    }
+}
+
+pub(crate) struct WorktreeRequest {
+    worktrees: Vec<git::Worktree>,
+    cwd: Option<PathBuf>,
+}
+
+impl WorktreeRequest {
+    pub(crate) fn new(worktrees: Vec<git::Worktree>, cwd: Option<PathBuf>) -> Self {
+        Self { worktrees, cwd }
+    }
+}
+
+/// An opaque identity returned with an offer and accepted back as a choice.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) struct LocalId(usize);
+
+/// A display-ready local Removal offer. The caller renders it and returns only
+/// its opaque identity; it never reconstructs the safety facts behind the row.
+pub(crate) struct Offer {
+    id: LocalId,
+    label: String,
+    selected: bool,
+    disabled: bool,
+}
+
+impl Offer {
+    pub(crate) fn id(&self) -> LocalId {
+        self.id
+    }
+
+    pub(crate) fn label(&self) -> &str {
+        &self.label
+    }
+
+    pub(crate) fn selected(&self) -> bool {
+        self.selected
+    }
+
+    pub(crate) fn disabled(&self) -> bool {
+        self.disabled
+    }
+}
+
+/// The warning material for a named target. An empty warning list means the
+/// target is safe enough to choose without confirmation.
+pub(crate) struct NamedOffer {
+    id: LocalId,
+    warnings: Vec<String>,
+    refusal: String,
+    question: String,
+}
+
+impl NamedOffer {
+    pub(crate) fn id(&self) -> LocalId {
+        self.id
+    }
+
+    pub(crate) fn warnings(&self) -> &[String] {
+        &self.warnings
+    }
+
+    pub(crate) fn refusal(&self) -> &str {
+        &self.refusal
+    }
+
+    pub(crate) fn question(&self) -> &str {
+        &self.question
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RequestKind {
+    Stale,
+    Branches,
+    Worktrees,
+}
+
+#[derive(Clone, Debug)]
+enum OwnedTarget {
+    Branch { name: String },
+    Held { name: String, path: PathBuf },
+    Worktree { path: PathBuf },
+}
+
+impl OwnedTarget {
+    fn borrowed(&self) -> Target<'_> {
+        match self {
+            Self::Branch { name } => Target::Branch { name },
+            Self::Held { name, path } => Target::Held { name, path },
+            Self::Worktree { path } => Target::Worktree { path },
+        }
+    }
+
+    fn name(&self) -> Option<&str> {
+        match self {
+            Self::Branch { name } | Self::Held { name, .. } => Some(name),
+            Self::Worktree { .. } => None,
+        }
+    }
+
+    fn path(&self) -> Option<&Path> {
+        match self {
+            Self::Branch { .. } => None,
+            Self::Held { path, .. } | Self::Worktree { path } => Some(path),
+        }
+    }
+}
+
+struct AssessedLocal {
+    target: OwnedTarget,
+    risk: Risk,
+    proof: Option<git::Proof>,
+    named_error: Option<NamedError>,
+    picker_eligible: bool,
+    contains_cwd: bool,
+}
+
+enum NamedError {
+    Held(git::Worktree),
+}
+
+/// A stable safety snapshot and its display-ready offers. It cannot mutate the
+/// repository; choosing consumes it and prepares a [`Pending`] Removal.
+pub(crate) struct Assessment {
+    kind: RequestKind,
+    offers: Vec<Offer>,
+    locals: Vec<AssessedLocal>,
+    legend: Option<String>,
+    main: Option<PathBuf>,
+    current: Option<LocalId>,
+    upstream: UpstreamInterest,
+}
+
+impl Assessment {
+    pub(crate) fn offers(&self) -> &[Offer] {
+        &self.offers
+    }
+
+    pub(crate) fn legend(&self) -> Option<&str> {
+        self.legend.as_deref()
+    }
+
+    pub(crate) fn named(&self, name: &str) -> AppResult<NamedOffer> {
+        let id = match self.kind {
+            RequestKind::Stale => self
+                .locals
+                .iter()
+                .position(|local| local.target.name() == Some(name)),
+            RequestKind::Branches => self
+                .locals
+                .iter()
+                .position(|local| local.target.name() == Some(name)),
+            RequestKind::Worktrees if name == "." => self.current.map(|id| id.0),
+            RequestKind::Worktrees => self.locals.iter().position(|local| {
+                local.target.path().is_some_and(|path| {
+                    local.target.name() == Some(name)
+                        || path.file_name().and_then(|part| part.to_str()) == Some(name)
+                })
+            }),
+        };
+        let Some(index) = id else {
+            return Err(match self.kind {
+                RequestKind::Branches | RequestKind::Stale => Error::LocalBranchNotFound {
+                    branch: name.to_string(),
+                },
+                RequestKind::Worktrees if name == "." => Error::Git {
+                    command: "worktree remove".into(),
+                    message: "the main worktree cannot be removed".into(),
+                },
+                RequestKind::Worktrees => Error::Git {
+                    command: "worktree remove".into(),
+                    message: format!("no worktree matching '{name}'"),
+                },
+            });
+        };
+        let local = &self.locals[index];
+        if let Some(NamedError::Held(holder)) = &local.named_error {
+            let branch = local.target.name().unwrap_or(name);
+            let hint = if holder.is_main {
+                "check out another branch in the main worktree first".into()
+            } else {
+                format!(
+                    "remove that worktree with `perch wt rm {}`",
+                    shell_quote(branch)
+                )
+            };
+            return Err(Error::HeldForRemoval {
+                branch: branch.to_string(),
+                path: display_path(&holder.path),
+                hint,
+            });
+        }
+
+        let (subject, path, separator, question) = match (&self.kind, &local.target) {
+            (RequestKind::Branches, OwnedTarget::Branch { name }) => (
+                name.as_str(),
+                self.main.as_deref().unwrap_or_else(|| Path::new(".")),
+                "; ",
+                format!("Delete {name} anyway?"),
+            ),
+            (RequestKind::Worktrees, OwnedTarget::Held { name, path }) => (
+                name.as_str(),
+                path.as_path(),
+                " and ",
+                format!("Remove the worktree and delete {name} anyway?"),
+            ),
+            (RequestKind::Worktrees, OwnedTarget::Worktree { path }) => (
+                "this worktree",
+                path.as_path(),
+                " and ",
+                "Remove the worktree anyway?".to_string(),
+            ),
+            _ => unreachable!("named confirmation is not used for stale Removal"),
+        };
+        let warnings = reporting::warnings(local.risk, subject, path);
+        let reason = reporting::describe(local.risk, subject, path).join(separator);
+        let refusal =
+            format!("{reason}; not removing. Rerun in a terminal to confirm, or pass --force.");
+        Ok(NamedOffer {
+            id: LocalId(index),
+            warnings,
+            refusal,
+            question,
+        })
+    }
+
+    pub(crate) fn choose(self, choice: LocalChoice) -> AppResult<Pending> {
+        let (ids, authority, source) = choice.into_parts();
+        let mut locals = Vec::with_capacity(ids.len());
+        for id in ids {
+            let Some(local) = self.locals.get(id.0) else {
+                continue;
+            };
+            if source == ChoiceSource::Picker && !local.picker_eligible {
+                continue;
+            }
+            let license = match authority {
+                Authority::Forced => License::forced(),
+                Authority::Shown => match &local.proof {
+                    Some(proof) => License::proven(local.risk, proof),
+                    None => License::shown(local.risk),
+                },
+            };
+            locals.push(PlannedLocal {
+                row: id.0,
+                target: local.target.clone(),
+                license,
+                preparation_failure: None,
+                contains_cwd: local.contains_cwd,
+            });
+        }
+
+        let mut pending = Pending {
+            kind: self.kind,
+            locals,
+            main: self.main,
+            upstream_offers: Vec::new(),
+            upstream_by_row: HashMap::new(),
+            notices: Vec::new(),
+        };
+        if self.kind == RequestKind::Branches && self.upstream != UpstreamInterest::None {
+            pending.prepare_upstreams(self.upstream, source)?;
+        }
+        Ok(pending)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Authority {
+    Shown,
+    Forced,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ChoiceSource {
+    Named,
+    Picker,
+}
+
+/// The single choice vocabulary used by named, picker, and forced Removal.
+pub(crate) struct LocalChoice {
+    ids: Vec<LocalId>,
+    authority: Authority,
+    source: ChoiceSource,
+}
+
+impl LocalChoice {
+    pub(crate) fn picked(ids: Vec<LocalId>) -> Self {
+        Self {
+            ids,
+            authority: Authority::Shown,
+            source: ChoiceSource::Picker,
+        }
+    }
+
+    pub(crate) fn forced_picked(ids: Vec<LocalId>) -> Self {
+        Self {
+            ids,
+            authority: Authority::Forced,
+            source: ChoiceSource::Picker,
+        }
+    }
+
+    pub(crate) fn named(id: LocalId) -> Self {
+        Self {
+            ids: vec![id],
+            authority: Authority::Shown,
+            source: ChoiceSource::Named,
+        }
+    }
+
+    pub(crate) fn forced(id: LocalId) -> Self {
+        Self {
+            ids: vec![id],
+            authority: Authority::Forced,
+            source: ChoiceSource::Named,
+        }
+    }
+
+    fn into_parts(self) -> (Vec<LocalId>, Authority, ChoiceSource) {
+        (self.ids, self.authority, self.source)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) struct UpstreamId(usize);
+
+pub(crate) struct UpstreamOffer {
+    id: UpstreamId,
+    label: String,
+    warning: String,
+    question: String,
+}
+
+impl UpstreamOffer {
+    pub(crate) fn id(&self) -> UpstreamId {
+        self.id
+    }
+
+    pub(crate) fn label(&self) -> &str {
+        &self.label
+    }
+
+    pub(crate) fn warning(&self) -> &str {
+        &self.warning
+    }
+
+    pub(crate) fn question(&self) -> &str {
+        &self.question
+    }
+}
+
+struct PlannedLocal {
+    row: usize,
+    target: OwnedTarget,
+    license: License,
+    preparation_failure: Option<String>,
+    contains_cwd: bool,
+}
+
+/// A fully chosen Removal. Dropping it is cancellation; only [`Self::finish`]
+/// can cross the mutation point.
+pub(crate) struct Pending {
+    kind: RequestKind,
+    locals: Vec<PlannedLocal>,
+    main: Option<PathBuf>,
+    upstream_offers: Vec<UpstreamOffer>,
+    upstream_by_row: HashMap<usize, (UpstreamId, git::RemoteBranch)>,
+    notices: Vec<String>,
+}
+
+enum UpstreamPreparation {
+    Candidate(git::RemoteBranch),
+    Notice(String),
+    Failure(String),
+    None,
+}
+
+fn prepare_upstream(
+    branch: &str,
+    interest: UpstreamInterest,
+    source: ChoiceSource,
+) -> AppResult<UpstreamPreparation> {
+    let requested = interest == UpstreamInterest::Requested;
+    let named = source == ChoiceSource::Named;
+    let upstream = match git::same_named_upstream(branch) {
+        Ok(upstream) => upstream,
+        Err(error) if requested && named => return Err(error),
+        Err(error) if requested => return Ok(UpstreamPreparation::Failure(error.to_string())),
+        Err(error) => {
+            return Ok(UpstreamPreparation::Notice(format!(
+                "{} could not read the upstream of {branch}: {error}; offering local removal only",
+                style("!").yellow().bold(),
+            )));
+        }
+    };
+    let Some(upstream) = upstream else {
+        if requested && named {
+            return Err(Error::NoRemovableUpstream {
+                branch: branch.to_string(),
+                reason: "it has no explicit same-named upstream".into(),
+            });
+        }
+        return Ok(UpstreamPreparation::None);
+    };
+
+    match git::inspect_upstream(&upstream) {
+        Ok(git::UpstreamInspection::Removable(upstream)) => {
+            Ok(UpstreamPreparation::Candidate(upstream))
+        }
+        Ok(git::UpstreamInspection::Absent(upstream)) if named => {
+            Ok(UpstreamPreparation::Notice(format!(
+                "{} upstream {}/{} is already absent",
+                style("!").yellow().bold(),
+                upstream.remote,
+                upstream.branch,
+            )))
+        }
+        Ok(git::UpstreamInspection::Default(upstream)) if requested && named => {
+            Err(Error::NoRemovableUpstream {
+                branch: branch.to_string(),
+                reason: format!(
+                    "{}/{} is the remote's default branch",
+                    upstream.remote, upstream.branch
+                ),
+            })
+        }
+        Ok(git::UpstreamInspection::Absent(_) | git::UpstreamInspection::Default(_)) => {
+            Ok(UpstreamPreparation::None)
+        }
+        Ok(git::UpstreamInspection::DefaultUnknown(upstream)) => {
+            let reason = format!(
+                "could not establish the default branch of {}",
+                upstream.remote
+            );
+            let error = Error::NoRemovableUpstream {
+                branch: branch.to_string(),
+                reason: reason.clone(),
+            };
+            if requested && named {
+                Err(error)
+            } else if requested {
+                Ok(UpstreamPreparation::Failure(error.to_string()))
+            } else {
+                Ok(UpstreamPreparation::Notice(format!(
+                    "{} {reason}; offering local removal only",
+                    style("!").yellow().bold()
+                )))
+            }
+        }
+        Err(error) if requested && named => Err(error),
+        Err(error) if requested => Ok(UpstreamPreparation::Failure(error.to_string())),
+        Err(error) => Ok(UpstreamPreparation::Notice(format!(
+            "{} could not inspect the upstream of {branch}: {error}; offering local removal only",
+            style("!").yellow().bold(),
+        ))),
+    }
+}
+
+impl Pending {
+    pub(crate) fn notices(&self) -> &[String] {
+        &self.notices
+    }
+
+    pub(crate) fn upstream_offers(&self) -> &[UpstreamOffer] {
+        &self.upstream_offers
+    }
+
+    fn prepare_upstreams(
+        &mut self,
+        interest: UpstreamInterest,
+        source: ChoiceSource,
+    ) -> AppResult<()> {
+        for local in &mut self.locals {
+            let Some(branch) = local.target.name() else {
+                continue;
+            };
+            match prepare_upstream(branch, interest, source)? {
+                UpstreamPreparation::Candidate(upstream) => {
+                    let id = UpstreamId(self.upstream_offers.len());
+                    self.upstream_offers.push(UpstreamOffer {
+                        id,
+                        label: format!("{}/{}", upstream.remote, upstream.branch),
+                        warning: reporting::upstream_warning(&upstream),
+                        question: format!(
+                            "Delete upstream {}/{} too?",
+                            upstream.remote, upstream.branch
+                        ),
+                    });
+                    self.upstream_by_row.insert(local.row, (id, upstream));
+                }
+                UpstreamPreparation::Notice(notice) => self.notices.push(notice),
+                UpstreamPreparation::Failure(error) => {
+                    local.preparation_failure = Some(error);
+                }
+                UpstreamPreparation::None => {}
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn finish(self, upstream: UpstreamChoice) -> AppResult<Outcome> {
+        let selected: HashSet<UpstreamId> = upstream.ids.into_iter().collect();
+        let cwd_will_vanish = self.locals.iter().any(|local| local.contains_cwd);
+        if cwd_will_vanish && let Some(main) = &self.main {
+            env::set_current_dir(main)?;
+        }
+
+        let mut outcome = Outcome {
+            lines: Vec::new(),
+            failed: false,
+            handoff: cwd_will_vanish.then(|| self.main.clone()).flatten(),
+        };
+        let mut steps = GitSteps::at_main(self.main.as_deref());
+        for local in self.locals {
+            let display_name = local.target.name().unwrap_or("this worktree").to_string();
+            if let Some(error) = local.preparation_failure {
+                outcome.lines.push(format!(
+                    "{} could not prepare upstream removal for {display_name}: {error}; kept the local branch",
+                    style("!").yellow().bold(),
+                ));
+                outcome.failed = true;
+                continue;
+            }
+
+            let report = match remove(local.target.borrowed(), &local.license, &mut steps) {
+                Ok(report) => report,
+                Err(error) => {
+                    outcome.lines.push(format!(
+                        "{} could not remove {display_name}: {error}",
+                        style("!").yellow().bold(),
+                    ));
+                    outcome.failed = true;
+                    continue;
+                }
+            };
+            outcome.lines.extend(reporting::removal_outcome(&report));
+
+            if report.worktree_removed()
+                && let (Some(path), Some(main)) = (local.target.path(), self.main.as_deref())
+            {
+                hook::fire(hook::Event::Removed, path, local.target.name(), main);
+            }
+
+            let local_deleted = report.branch_removed();
+            let selected_upstream = self
+                .upstream_by_row
+                .get(&local.row)
+                .filter(|(id, _)| selected.contains(id))
+                .map(|(_, candidate)| candidate);
+            let Some(upstream) = selected_upstream else {
+                if self.kind == RequestKind::Branches && !local_deleted {
+                    outcome.failed = true;
+                }
+                continue;
+            };
+            let local_ref = format!("refs/heads/{display_name}");
+            if !local_deleted || git::resolve(None, &local_ref).is_some() {
+                outcome.lines.push(reporting::upstream_kept_local(upstream));
+                outcome.failed = true;
+                continue;
+            }
+            let remote_outcome = match git::delete_remote_branch(upstream) {
+                Ok(remote_outcome) => remote_outcome,
+                Err(error) => {
+                    outcome.lines.push(format!(
+                        "{} could not delete upstream {}/{}: {error}",
+                        style("!").yellow().bold(),
+                        upstream.remote,
+                        upstream.branch,
+                    ));
+                    outcome.failed = true;
+                    continue;
+                }
+            };
+            outcome
+                .lines
+                .push(reporting::upstream_outcome(upstream, &remote_outcome));
+            if !matches!(
+                remote_outcome,
+                git::RemoteBranchDeleteOutcome::Deleted
+                    | git::RemoteBranchDeleteOutcome::AlreadyAbsent
+            ) {
+                outcome.failed = true;
+            }
+        }
+        Ok(outcome)
+    }
+}
+
+pub(crate) struct UpstreamChoice {
+    ids: Vec<UpstreamId>,
+}
+
+impl UpstreamChoice {
+    pub(crate) fn keep() -> Self {
+        Self { ids: Vec::new() }
+    }
+
+    pub(crate) fn selected(ids: Vec<UpstreamId>) -> Self {
+        Self { ids }
+    }
+}
+
+/// Everything the caller must render or perform after mutation.
+pub(crate) struct Outcome {
+    lines: Vec<String>,
+    failed: bool,
+    handoff: Option<PathBuf>,
+}
+
+impl Outcome {
+    pub(crate) fn lines(&self) -> &[String] {
+        &self.lines
+    }
+
+    pub(crate) fn failed(&self) -> bool {
+        self.failed
+    }
+
+    pub(crate) fn handoff(&self) -> Option<&Path> {
+        self.handoff.as_deref()
+    }
+}
+
+pub(crate) fn assess(request: Request) -> AppResult<Assessment> {
+    match request {
+        Request::Stale(request) => Ok(assess_stale(request)),
+        Request::Branches(request) => assess_branches(request),
+        Request::Worktrees(request) => assess_worktrees(request),
+    }
+}
+
+fn risk_legend(risks: impl IntoIterator<Item = Risk>) -> Option<String> {
+    let risks: Vec<Risk> = risks.into_iter().collect();
+    let mut parts = Vec::new();
+    if risks.iter().any(|risk| risk.dirty) {
+        parts.push(format!("{} uncommitted changes", marker::Marker::Dirty));
+    }
+    if risks.iter().any(|risk| risk.unmerged.is_some()) {
+        parts.push(format!(
+            "{} unmerged commits",
+            marker::Marker::Unmerged(None)
+        ));
+    }
+    (!parts.is_empty()).then(|| parts.join("   "))
+}
+
+fn assess_stale(request: StaleRequest) -> Assessment {
+    let main = request
+        .worktrees
+        .iter()
+        .find(|worktree| worktree.is_main)
+        .map(|worktree| worktree.path.clone());
+    let unmerged = git::unmerged_branches(main.as_deref()).unwrap_or_default();
+    let candidates: Vec<&str> = request
+        .stale
+        .iter()
+        .map(|branch| branch.name.as_str())
+        .filter(|name| {
+            unmerged.contains_key(*name) && request.destination.as_deref() != Some(*name)
+        })
+        .collect();
+    let equivalent = git::equivalent_branches(main.as_deref(), &request.remote, &candidates);
+    let mut raw = Vec::new();
+    let mut locals = Vec::new();
+    for stale in request
+        .stale
+        .into_iter()
+        .filter(|branch| request.destination.as_deref() != Some(branch.name.as_str()))
+    {
+        let worktree = git::worktree_for_branch(&request.worktrees, &stale.name);
+        let proof = equivalent.get(&stale.name).cloned();
+        let risk = Risk {
+            dirty: worktree
+                .as_ref()
+                .is_some_and(|worktree| !worktree.prunable && git::worktree_dirty(&worktree.path)),
+            unmerged: proof
+                .is_none()
+                .then(|| unmerged.get(&stale.name).copied())
+                .flatten(),
+        };
+        let worktree_label = match &worktree {
+            None => String::new(),
+            Some(worktree) if worktree.prunable => "(+ worktree, missing)".to_string(),
+            Some(_) if risk.dirty => format!("(+ worktree {})", marker::Marker::Dirty),
+            Some(_) => "(+ worktree)".to_string(),
+        };
+        let branch_risk = marker::markers(false, risk.unmerged);
+        let ground = match stale.ground {
+            git::Ground::Gone => "gone",
+            git::Ground::Landed => "landed",
+        };
+        let follows = !worktree_label.is_empty() || !branch_risk.is_empty();
+        let ground = style(format!(
+            "{ground:<width$}",
+            width = if follows { 6 } else { 0 }
+        ))
+        .dim()
+        .to_string();
+        let annotation = [ground, worktree_label, branch_risk]
+            .into_iter()
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ");
+        raw.push((stale.name.clone(), annotation));
+        let target = match worktree {
+            Some(worktree) => OwnedTarget::Held {
+                name: stale.name,
+                path: worktree.path,
+            },
+            None => OwnedTarget::Branch { name: stale.name },
+        };
+        locals.push(AssessedLocal {
+            target,
+            risk,
+            proof,
+            named_error: None,
+            picker_eligible: true,
+            contains_cwd: false,
+        });
+    }
+    let labels = picker::align_labels(&raw);
+    let offers: Vec<Offer> = labels
+        .into_iter()
+        .enumerate()
+        .map(|(index, label)| Offer {
+            id: LocalId(index),
+            selected: request.old_branch.as_deref() == locals[index].target.name(),
+            disabled: false,
+            label,
+        })
+        .collect();
+    let legend = risk_legend(locals.iter().map(|local| local.risk));
+    Assessment {
+        kind: RequestKind::Stale,
+        offers,
+        locals,
+        legend,
+        main,
+        current: None,
+        upstream: UpstreamInterest::None,
+    }
+}
+
+fn assess_branches(request: BranchRequest) -> AppResult<Assessment> {
+    let main = request
+        .worktrees
+        .iter()
+        .find(|worktree| worktree.is_main)
+        .ok_or_else(|| Error::Git {
+            command: "worktree list".into(),
+            message: "main worktree not found".into(),
+        })?
+        .path
+        .clone();
+    let kept: HashSet<String> = git::pinned_branches(&request.remote).into_iter().collect();
+    let unmerged = git::unmerged_branches(Some(&main)).unwrap_or_default();
+    let mut raw = Vec::new();
+    let mut locals = Vec::new();
+    for name in request.branches {
+        let holder = git::worktree_for_branch(&request.worktrees, &name);
+        let is_kept = kept.contains(&name);
+        let risk = Risk {
+            dirty: false,
+            unmerged: unmerged.get(&name).copied(),
+        };
+        let annotation = if request.current.as_deref() == Some(&name) {
+            "current".to_string()
+        } else if let Some(holder) = &holder {
+            let path = display_path(&holder.path);
+            if holder.is_main {
+                format!("main worktree at {path}")
+            } else if holder.prunable {
+                format!("missing worktree at {path}; use wt rm")
+            } else {
+                format!("{path}; use wt rm")
+            }
+        } else if is_kept {
+            "kept".to_string()
+        } else {
+            String::new()
+        };
+        let disabled = holder.is_some() || is_kept;
+        let markers = if disabled {
+            String::new()
+        } else {
+            marker::markers(risk.dirty, risk.unmerged)
+        };
+        let detail = [annotation, markers]
+            .into_iter()
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ");
+        raw.push((name.clone(), detail));
+        locals.push(AssessedLocal {
+            target: OwnedTarget::Branch { name },
+            risk,
+            proof: None,
+            named_error: holder.map(NamedError::Held),
+            picker_eligible: !disabled,
+            contains_cwd: false,
+        });
+    }
+    let labels = picker::align_labels(&raw);
+    let offers: Vec<Offer> = labels
+        .into_iter()
+        .enumerate()
+        .map(|(index, label)| Offer {
+            id: LocalId(index),
+            label,
+            selected: false,
+            disabled: locals[index].named_error.is_some()
+                || kept.contains(locals[index].target.name().unwrap_or_default()),
+        })
+        .collect();
+    let legend = risk_legend(
+        locals
+            .iter()
+            .zip(offers.iter())
+            .filter(|(_, offer)| !offer.disabled)
+            .map(|(local, _)| local.risk),
+    );
+    Ok(Assessment {
+        kind: RequestKind::Branches,
+        offers,
+        locals,
+        legend,
+        main: Some(main),
+        current: None,
+        upstream: request.upstream,
+    })
+}
+
+fn assess_worktrees(request: WorktreeRequest) -> AppResult<Assessment> {
+    let main = request
+        .worktrees
+        .iter()
+        .find(|worktree| worktree.is_main)
+        .ok_or_else(|| Error::Git {
+            command: "worktree list".into(),
+            message: "no main worktree found".into(),
+        })?
+        .path
+        .clone();
+    let removable: Vec<git::Worktree> = request
+        .worktrees
+        .into_iter()
+        .filter(|worktree| !worktree.is_main)
+        .collect();
+    let contains_cwd = |worktree: &git::Worktree| {
+        let path = worktree
+            .path
+            .canonicalize()
+            .unwrap_or_else(|_| worktree.path.clone());
+        request
+            .cwd
+            .as_ref()
+            .is_some_and(|cwd| cwd.starts_with(path))
+    };
+    let current = removable
+        .iter()
+        .enumerate()
+        .filter(|(_, worktree)| contains_cwd(worktree))
+        .max_by_key(|(_, worktree)| worktree.path.as_os_str().len())
+        .map(|(index, _)| LocalId(index));
+    let unmerged = git::unmerged_branches(Some(&main)).unwrap_or_default();
+    let mut raw = Vec::new();
+    let mut locals = Vec::new();
+    for (index, worktree) in removable.into_iter().enumerate() {
+        let risk = Risk {
+            dirty: !worktree.prunable && git::worktree_dirty(&worktree.path),
+            unmerged: worktree
+                .branch
+                .as_deref()
+                .and_then(|branch| unmerged.get(branch).copied()),
+        };
+        let mut name = worktree
+            .branch
+            .clone()
+            .unwrap_or_else(|| display_path(&worktree.path));
+        if worktree.prunable {
+            name.push_str(" (missing)");
+        }
+        if current == Some(LocalId(index)) {
+            name.push_str(" (current)");
+        }
+        raw.push((name, marker::markers(risk.dirty, risk.unmerged)));
+        let contains_cwd = contains_cwd(&worktree);
+        let target = match worktree.branch {
+            Some(name) => OwnedTarget::Held {
+                name,
+                path: worktree.path,
+            },
+            None => OwnedTarget::Worktree {
+                path: worktree.path,
+            },
+        };
+        locals.push(AssessedLocal {
+            target,
+            risk,
+            proof: None,
+            named_error: None,
+            picker_eligible: true,
+            contains_cwd,
+        });
+    }
+    let labels = picker::align_labels(&raw);
+    let offers = labels
+        .into_iter()
+        .enumerate()
+        .map(|(index, label)| Offer {
+            id: LocalId(index),
+            label,
+            selected: false,
+            disabled: false,
+        })
+        .collect();
+    let legend = risk_legend(locals.iter().map(|local| local.risk));
+    Ok(Assessment {
+        kind: RequestKind::Worktrees,
+        offers,
+        locals,
+        legend,
+        main: Some(main),
+        current,
+        upstream: UpstreamInterest::None,
+    })
+}
+
+/// What is being removed. Every case names something real, so "neither a branch
+/// nor a worktree" cannot be asked for. It borrows from the row or worktree the
+/// caller is already holding to render the outcome from, and travels on in the
+/// [`Report`] so the wording never has to be told twice which steps could run.
+#[derive(Clone, Copy, Debug)]
+enum Target<'a> {
+    /// A branch no worktree holds.
+    Branch { name: &'a str },
+    /// A branch and the worktree *holding* it, which go together.
+    Held { name: &'a str, path: &'a Path },
+    /// A worktree with no branch to delete alongside it (a detached one).
+    Worktree { path: &'a Path },
+}
+
+impl<'a> Target<'a> {
+    fn branch(self) -> Option<&'a str> {
+        match self {
+            Target::Branch { name } | Target::Held { name, .. } => Some(name),
+            Target::Worktree { .. } => None,
+        }
+    }
+
+    fn path(self) -> Option<&'a Path> {
+        match self {
+            Target::Branch { .. } => None,
+            Target::Held { path, .. } | Target::Worktree { path } => Some(path),
+        }
+    }
+}
+
+/// The branch half of a [`License`]: on what authority the delete may discard
+/// commits. The worktree half needs no such thing — only a warning ever licenses
+/// discarding files.
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum BranchLicense {
+    /// Nothing licenses it, so git's own guard decides.
+    None,
+    /// Licensed outright, on something already settled before the delete began:
+    /// a *Marker* the user has seen, or an explicit `--force`. The two are
+    /// distinct sources of *License* in the glossary and this does not conflate
+    /// them — it says only that neither is conditional on anything still true.
+    Outright,
+    /// Proof that the branch is *Equivalent*, which is conditional: per [ADR
+    /// 0005](../../../docs/adr/0005-proof-of-equivalence-is-a-license.md) a license
+    /// covers what was established and nothing more, so it lapses the moment
+    /// either the branch or the anchor moves off what was proven.
+    Proven(git::Proof),
+}
+
+/// What licenses forcing: a warning the user has already seen (ADR 0001), proof
+/// that a branch is *Equivalent* (ADR 0005), or an explicit `--force`. It has no
+/// public fields and exactly three constructors, so forcing something nobody was
+/// warned about and nothing was proven of is unrepresentable rather than merely
+/// against convention.
+struct License {
+    worktree: bool,
+    branch: BranchLicense,
+}
+
+impl License {
+    /// The risk the user was warned about — as row markers in a picker, or as
+    /// the confirmation that stands in for them where a target was named on the
+    /// command line. A *dirty* worktree licenses discarding its files, an
+    /// *unmerged* branch its commits, and nothing licenses anything else: a risk
+    /// that arose after the warning was given is absent here, so git's own guard
+    /// refuses instead.
+    pub(crate) fn shown(risk: Risk) -> Self {
+        Self {
+            worktree: risk.dirty,
+            branch: if risk.unmerged.is_some() {
+                BranchLicense::Outright
+            } else {
+                BranchLicense::None
+            },
+        }
+    }
+
+    /// A branch proven *Equivalent*, with the worktree half still answering to
+    /// the risk shown. Nothing was warned of about the branch — that is the
+    /// point of the proof — so the proof stands in for the marker, and only for
+    /// as long as what it was established on still holds.
+    pub(crate) fn proven(risk: Risk, proof: &git::Proof) -> Self {
+        Self {
+            branch: BranchLicense::Proven(proof.clone()),
+            ..Self::shown(risk)
+        }
+    }
+
+    /// An explicit removal `--force`, blanket over both local steps.
+    pub(crate) fn forced() -> Self {
+        Self {
+            worktree: true,
+            branch: BranchLicense::Outright,
+        }
+    }
+}
+
+/// What happened, one field per step. `None` means the step never ran: because
+/// the target had nothing for it to act on, or — for the branch — because the
+/// worktree refused to go and left it alone. It carries the [`Target`] so
+/// [`reporting`](super::reporting) can word the outcome from the report alone.
+#[derive(Debug)]
+struct Report<'a> {
+    target: Target<'a>,
+    worktree: Option<git::WorktreeRemoveOutcome>,
+    branch: Option<git::BranchDeleteOutcome>,
+}
+
+impl Report<'_> {
+    /// Whether the worktree itself went. False covers both a target that never
+    /// had one and one git refused to remove — in either case there is no
+    /// directory to report gone.
+    pub(crate) fn worktree_removed(&self) -> bool {
+        matches!(self.worktree, Some(git::WorktreeRemoveOutcome::Removed))
+    }
+
+    pub(crate) fn branch_removed(&self) -> bool {
+        matches!(
+            self.branch,
+            Some(
+                git::BranchDeleteOutcome::Deleted
+                    | git::BranchDeleteOutcome::DeletedLeavingConfig(_)
+                    | git::BranchDeleteOutcome::DeletedConfigUnverified(_)
+            )
+        )
+    }
+}
+
+/// What a removal asks of git: the two operations it performs, and the one
+/// question it asks before deciding to force. Putting them behind a trait lets
+/// the ordering and licensing rules be driven by scripted outcomes in tests,
+/// exactly as the key source drives the interactive pickers; [`GitSteps`] is the
+/// real implementation.
+trait Steps {
+    /// What `refname` points at *now* — asked to check a proof still covers what
+    /// it was established on, so it must read the repo rather than anything
+    /// remembered.
+    fn resolve(&mut self, refname: &str) -> Option<String>;
+
+    fn delete_branch(&mut self, branch: &str, force: bool) -> AppResult<git::BranchDeleteOutcome>;
+
+    /// Delete `branch` only while it still stands at `expected`, in one
+    /// operation. `None` means it had moved and nothing was deleted.
+    fn delete_branch_at(
+        &mut self,
+        branch: &str,
+        expected: &str,
+    ) -> AppResult<Option<git::BranchDeleteOutcome>>;
+
+    fn remove_worktree(
+        &mut self,
+        path: &Path,
+        force: bool,
+    ) -> AppResult<git::WorktreeRemoveOutcome>;
+}
+
+/// The real steps, run against the repo on disk.
+///
+/// It carries the main worktree so no call site has to remember to: `git branch
+/// -d` judges merged-ness against the HEAD it runs under, and the main worktree
+/// is both where the markers were measured from and the one worktree that can
+/// never be the one being removed.
+struct GitSteps {
+    main: Option<PathBuf>,
+}
+
+impl GitSteps {
+    fn at_main(main: Option<&Path>) -> Self {
+        Self {
+            main: main.map(Path::to_path_buf),
+        }
+    }
+}
+
+impl Steps for GitSteps {
+    fn resolve(&mut self, refname: &str) -> Option<String> {
+        git::resolve(self.main.as_deref(), refname)
+    }
+
+    fn delete_branch(&mut self, branch: &str, force: bool) -> AppResult<git::BranchDeleteOutcome> {
+        let dir = self.main.as_deref();
+        if force {
+            git::force_delete_branch(dir, branch)
+        } else {
+            git::delete_branch_if_merged(dir, branch)
+        }
+    }
+
+    fn delete_branch_at(
+        &mut self,
+        branch: &str,
+        expected: &str,
+    ) -> AppResult<Option<git::BranchDeleteOutcome>> {
+        git::delete_branch_at(self.main.as_deref(), branch, expected)
+    }
+
+    fn remove_worktree(
+        &mut self,
+        path: &Path,
+        force: bool,
+    ) -> AppResult<git::WorktreeRemoveOutcome> {
+        git::worktree_remove(path, force)
+    }
+}
+
+/// Removes `target`, forcing only what `license` covers.
+///
+/// The worktree goes first — git will not delete a branch something still holds
+/// — and one that refuses to go leaves its branch alone, which the returned
+/// [`Report`] shows as an absent branch step. Git refusing is a value either
+/// way; only a git process that cannot be spawned is an error.
+fn remove<'a>(
+    target: Target<'a>,
+    license: &License,
+    steps: &mut impl Steps,
+) -> AppResult<Report<'a>> {
+    let mut report = Report {
+        target,
+        worktree: None,
+        branch: None,
+    };
+
+    if let Some(path) = target.path() {
+        report.worktree = Some(steps.remove_worktree(path, license.worktree)?);
+        if !report.worktree_removed() {
+            return Ok(report);
+        }
+    }
+
+    if let Some(branch) = target.branch() {
+        // A proof is re-checked rather than trusted. It was established on two
+        // things — where the branch stood and what the anchor held — and a
+        // license covers both or neither: a branch that moved has work nobody
+        // proved, and an anchor rewound out from under it (by a removal hook on
+        // an earlier row, say) no longer holds the content that made the branch
+        // safe to discard. Either lapse drops to `-d`, to meet git's own guard
+        // exactly as an unmarked worktree does.
+        //
+        // The branch half is checked *by* the delete rather than before it:
+        // `delete_branch_at` compares and deletes in one operation, so a branch
+        // that grows a commit in between is not discarded unwarned. The anchor
+        // is checked here, since no single git command can speak for two refs.
+        let outcome = match &license.branch {
+            BranchLicense::Outright => steps.delete_branch(branch, true)?,
+            BranchLicense::Proven(proof)
+                if steps.resolve(&proof.anchor_ref).as_ref() == Some(&proof.anchor_tip) =>
+            {
+                match steps.delete_branch_at(branch, &proof.tip)? {
+                    Some(outcome) => outcome,
+                    None => steps.delete_branch(branch, false)?,
+                }
+            }
+            BranchLicense::None | BranchLicense::Proven(_) => steps.delete_branch(branch, false)?,
+        };
+        report.branch = Some(outcome);
+    }
+
+    Ok(report)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+    use std::env;
+    use std::fs;
+    use std::process::Command;
+    use std::sync::Mutex;
+
+    use super::*;
+    use tempfile::TempDir;
+
+    static REPO_LOCK: Mutex<()> = Mutex::new(());
+
+    struct Repo {
+        root: TempDir,
+        previous: PathBuf,
+    }
+
+    impl Repo {
+        fn new() -> Self {
+            let root = tempfile::tempdir().expect("temporary repository");
+            run_git(root.path(), &["init", "-b", "main"]);
+            run_git(root.path(), &["config", "user.email", "perch@example.test"]);
+            run_git(root.path(), &["config", "user.name", "Perch Tests"]);
+            run_git(root.path(), &["config", "perch.hook.removed", ""]);
+            fs::write(root.path().join("base.txt"), "base\n").expect("write base file");
+            run_git(root.path(), &["add", "base.txt"]);
+            run_git(root.path(), &["commit", "-m", "base"]);
+            let previous = env::current_dir().expect("current directory");
+            env::set_current_dir(root.path()).expect("enter temporary repository");
+            Self { root, previous }
+        }
+
+        fn path(&self) -> &Path {
+            self.root.path()
+        }
+
+        fn add_feature(&self) {
+            run_git(self.path(), &["checkout", "-b", "feature"]);
+            fs::write(self.path().join("feature.txt"), "feature\n").expect("write feature file");
+            run_git(self.path(), &["add", "feature.txt"]);
+            run_git(self.path(), &["commit", "-m", "feature"]);
+            run_git(self.path(), &["checkout", "main"]);
+        }
+    }
+
+    impl Drop for Repo {
+        fn drop(&mut self) {
+            env::set_current_dir(&self.previous).expect("restore current directory");
+        }
+    }
+
+    fn run_git(dir: &Path, args: &[&str]) -> String {
+        let output = Command::new("git")
+            .current_dir(dir)
+            .args(args)
+            .output()
+            .expect("run git");
+        assert!(
+            output.status.success(),
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    fn plain(lines: &[String]) -> Vec<String> {
+        lines
+            .iter()
+            .map(|line| console::strip_ansi_codes(line).into_owned())
+            .collect()
+    }
+
+    /// One recorded call, as the rules care about it: which step, and whether it
+    /// was forced.
+    #[derive(Debug, PartialEq, Eq)]
+    enum Call {
+        RemoveWorktree {
+            force: bool,
+        },
+        DeleteBranch {
+            force: bool,
+        },
+        /// The pinned delete, and whether the branch was still there to take it.
+        DeleteBranchAt {
+            hit: bool,
+        },
+    }
+
+    /// Runs the steps from scripted outcomes and records what it was asked to
+    /// do, so ordering and licensing can be asserted without a repo on disk.
+    struct FakeSteps {
+        worktree: git::WorktreeRemoveOutcome,
+        branch: git::BranchDeleteOutcome,
+        /// What the refs read when [`remove`] asks. The proof tests move one out
+        /// from under the license and leave the other where it was.
+        refs: HashMap<String, String>,
+        calls: Vec<Call>,
+    }
+
+    impl FakeSteps {
+        /// Both steps succeed and both refs sit where [`proof`] says; tests that
+        /// care about an outcome, or about something moving, override it.
+        fn new() -> Self {
+            Self {
+                worktree: git::WorktreeRemoveOutcome::Removed,
+                branch: git::BranchDeleteOutcome::Deleted,
+                refs: HashMap::from([
+                    ("refs/heads/feature".to_string(), PROVEN_TIP.to_string()),
+                    (ANCHOR_REF.to_string(), PROVEN_ANCHOR.to_string()),
+                ]),
+                calls: Vec::new(),
+            }
+        }
+
+        /// Move a ref off what the proof was established on.
+        fn moved(mut self, refname: &str) -> Self {
+            self.refs.insert(refname.to_string(), "moved".to_string());
+            self
+        }
+    }
+
+    const ANCHOR_REF: &str = "refs/heads/main";
+    /// What the proof tests establish their license on.
+    const PROVEN_TIP: &str = "abc123";
+    const PROVEN_ANCHOR: &str = "def456";
+
+    fn proof() -> git::Proof {
+        git::Proof {
+            anchor_ref: ANCHOR_REF.to_string(),
+            anchor_tip: PROVEN_ANCHOR.to_string(),
+            tip: PROVEN_TIP.to_string(),
+        }
+    }
+
+    impl Steps for FakeSteps {
+        fn resolve(&mut self, refname: &str) -> Option<String> {
+            self.refs.get(refname).cloned()
+        }
+
+        fn delete_branch(
+            &mut self,
+            _branch: &str,
+            force: bool,
+        ) -> AppResult<git::BranchDeleteOutcome> {
+            self.calls.push(Call::DeleteBranch { force });
+            Ok(self.branch.clone())
+        }
+
+        /// Answers as git's pinned delete does: it goes through only while the
+        /// branch still stands where the caller expects.
+        fn delete_branch_at(
+            &mut self,
+            branch: &str,
+            expected: &str,
+        ) -> AppResult<Option<git::BranchDeleteOutcome>> {
+            let hit = self.resolve(&format!("refs/heads/{branch}")).as_deref() == Some(expected);
+            self.calls.push(Call::DeleteBranchAt { hit });
+            Ok(hit.then(|| self.branch.clone()))
+        }
+
+        fn remove_worktree(
+            &mut self,
+            _path: &Path,
+            force: bool,
+        ) -> AppResult<git::WorktreeRemoveOutcome> {
+            self.calls.push(Call::RemoveWorktree { force });
+            Ok(self.worktree.clone())
+        }
+    }
+
+    fn held() -> Target<'static> {
+        Target::Held {
+            name: "feature",
+            path: Path::new("/tmp/wt"),
+        }
+    }
+
+    #[test]
+    fn branch_removal_crosses_the_staged_interface() {
+        let _lock = REPO_LOCK.lock().expect("repository lock");
+        let repo = Repo::new();
+        repo.add_feature();
+        let worktrees = git::worktree_list().expect("worktrees");
+        let branches = git::local_branches().expect("branches");
+        let assessment = assess(Request::Branches(BranchRequest::new(
+            branches,
+            worktrees,
+            Some("main"),
+            "origin",
+            UpstreamInterest::None,
+        )))
+        .expect("assessment");
+        let named = assessment.named("feature").expect("named offer");
+        assert_eq!(
+            plain(named.warnings()),
+            ["! feature has unmerged commits and no upstream"]
+        );
+
+        let pending = assessment
+            .choose(LocalChoice::forced(named.id()))
+            .expect("pending Removal");
+        let outcome = pending
+            .finish(UpstreamChoice::keep())
+            .expect("Removal outcome");
+
+        assert_eq!(plain(outcome.lines()), ["✓ deleted feature"]);
+        assert!(!outcome.failed());
+        assert!(git::resolve(None, "refs/heads/feature").is_none());
+    }
+
+    #[test]
+    fn forced_picker_worktree_removal_returns_one_complete_outcome() {
+        let _lock = REPO_LOCK.lock().expect("repository lock");
+        let repo = Repo::new();
+        repo.add_feature();
+        let worktree_path = repo.path().join("feature-worktree");
+        let worktree_arg = worktree_path.to_string_lossy();
+        run_git(repo.path(), &["worktree", "add", &worktree_arg, "feature"]);
+        fs::write(worktree_path.join("dirty.txt"), "dirty\n").expect("dirty worktree");
+        let displayed_path = worktree_path
+            .canonicalize()
+            .expect("canonical worktree path");
+        let assessment = assess(Request::Worktrees(WorktreeRequest::new(
+            git::worktree_list().expect("worktrees"),
+            env::current_dir()
+                .ok()
+                .and_then(|dir| dir.canonicalize().ok()),
+        )))
+        .expect("assessment");
+        let id = assessment
+            .offers()
+            .iter()
+            .find(|offer| console::strip_ansi_codes(offer.label()).starts_with("feature"))
+            .map(Offer::id)
+            .expect("feature offer");
+
+        let pending = assessment
+            .choose(LocalChoice::forced_picked(vec![id]))
+            .expect("pending Removal");
+        let outcome = pending
+            .finish(UpstreamChoice::keep())
+            .expect("Removal outcome");
+
+        assert_eq!(
+            plain(outcome.lines()),
+            [format!(
+                "✓ removed worktree at {}, deleted feature",
+                display_path(&displayed_path)
+            )]
+        );
+        assert!(!outcome.failed());
+        assert!(!worktree_path.exists());
+        assert!(git::resolve(None, "refs/heads/feature").is_none());
+    }
+
+    /// Git will not delete a branch a worktree still holds, so the order is not
+    /// a preference.
+    #[test]
+    fn the_worktree_goes_before_the_branch() {
+        let mut steps = FakeSteps::new();
+        remove(held(), &License::shown(Risk::default()), &mut steps).expect("no git to fail");
+        assert_eq!(
+            steps.calls,
+            vec![
+                Call::RemoveWorktree { force: false },
+                Call::DeleteBranch { force: false },
+            ]
+        );
+    }
+
+    /// A locked worktree, say: deleting its branch would leave a directory with
+    /// nothing behind it.
+    #[test]
+    fn a_worktree_that_refuses_leaves_its_branch_alone() {
+        let mut steps = FakeSteps::new();
+        steps.worktree = git::WorktreeRemoveOutcome::Failed("locked".to_string());
+        let report = remove(held(), &License::forced(), &mut steps).expect("no git to fail");
+        assert_eq!(steps.calls, vec![Call::RemoveWorktree { force: true }]);
+        assert!(matches!(
+            report.worktree,
+            Some(git::WorktreeRemoveOutcome::Failed(_))
+        ));
+        assert!(
+            report.branch.is_none(),
+            "no branch step ran, got: {:?}",
+            report.branch
+        );
+    }
+
+    /// ADR 0001 made structural: a `●` licenses discarding files and an `↑N`
+    /// licenses discarding commits, each on its own.
+    #[test]
+    fn a_license_from_markers_forces_only_what_was_marked() {
+        let mut dirty_only = FakeSteps::new();
+        let risk = Risk {
+            dirty: true,
+            unmerged: None,
+        };
+        remove(held(), &License::shown(risk), &mut dirty_only).expect("no git to fail");
+        assert_eq!(
+            dirty_only.calls,
+            vec![
+                Call::RemoveWorktree { force: true },
+                Call::DeleteBranch { force: false },
+            ]
+        );
+
+        let mut unmerged_only = FakeSteps::new();
+        let risk = Risk {
+            dirty: false,
+            unmerged: Some(git::Unmerged::Ahead(2)),
+        };
+        remove(held(), &License::shown(risk), &mut unmerged_only).expect("no git to fail");
+        assert_eq!(
+            unmerged_only.calls,
+            vec![
+                Call::RemoveWorktree { force: false },
+                Call::DeleteBranch { force: true },
+            ]
+        );
+    }
+
+    /// `wt rm --force` stays blanket over both steps.
+    #[test]
+    fn an_explicit_force_covers_both_steps() {
+        let mut steps = FakeSteps::new();
+        remove(held(), &License::forced(), &mut steps).expect("no git to fail");
+        assert_eq!(
+            steps.calls,
+            vec![
+                Call::RemoveWorktree { force: true },
+                Call::DeleteBranch { force: true },
+            ]
+        );
+    }
+
+    /// Proof is the third source of license (ADR 0005): an equivalent branch
+    /// draws no marker, so nothing else in its license would force anything, and
+    /// the proof alone is what discards the commits git would refuse. It never
+    /// reaches `branch -D`, since what it licenses is pinned to a commit.
+    #[test]
+    fn a_proof_takes_the_pinned_delete_and_not_a_blanket_force() {
+        let mut steps = FakeSteps::new();
+        remove(
+            held(),
+            &License::proven(Risk::default(), &proof()),
+            &mut steps,
+        )
+        .expect("no git to fail");
+        assert_eq!(
+            steps.calls,
+            vec![
+                Call::RemoveWorktree { force: false },
+                Call::DeleteBranchAt { hit: true },
+            ]
+        );
+    }
+
+    /// A license covers what was established and nothing more, and equivalence
+    /// was established on two things at once. Move either — the branch grows a
+    /// commit nobody proved, or the anchor is rewound and no longer holds the
+    /// content that made the branch safe to discard — and the delete meets
+    /// git's own guard instead.
+    ///
+    /// The two lapse differently, and deliberately: a branch that moved is
+    /// caught *by* the pinned delete, which is what closes the window between
+    /// checking and deleting, while an anchor that moved is caught before it,
+    /// because no one git command can speak for two refs.
+    #[test]
+    fn a_proof_lapses_when_either_the_branch_or_the_anchor_moves() {
+        let mut branch_moved = FakeSteps::new().moved("refs/heads/feature");
+        remove(
+            held(),
+            &License::proven(Risk::default(), &proof()),
+            &mut branch_moved,
+        )
+        .expect("no git to fail");
+        assert_eq!(
+            branch_moved.calls,
+            vec![
+                Call::RemoveWorktree { force: false },
+                Call::DeleteBranchAt { hit: false },
+                Call::DeleteBranch { force: false },
+            ],
+            "the pinned delete declines, and git's own guard decides instead"
+        );
+
+        let mut anchor_moved = FakeSteps::new().moved(ANCHOR_REF);
+        remove(
+            held(),
+            &License::proven(Risk::default(), &proof()),
+            &mut anchor_moved,
+        )
+        .expect("no git to fail");
+        assert_eq!(
+            anchor_moved.calls,
+            vec![
+                Call::RemoveWorktree { force: false },
+                Call::DeleteBranch { force: false },
+            ],
+            "the content is no longer on the anchor, so nothing is pinned at all"
+        );
+    }
+}
