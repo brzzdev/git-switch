@@ -911,11 +911,12 @@ pub(crate) struct MultiItem {
     pub(crate) disabled: bool,
 }
 
-/// The multi-select picker. `legend` is an optional dim line under the prompt,
-/// for glossing anything in the rows that isn't self-explanatory; callers pass
-/// `None` where nothing needs it, so a plain list stays plain. `keys` is taken
-/// by value for the same reason as [`pick`]: raw mode ends with the call, not
-/// with the caller's scope.
+/// The multi-select picker. Escape returns `None`; accepting returns `Some` with
+/// the selected indices, including an empty vector when no rows are selected.
+/// `legend` is an optional dim line under the prompt, for glossing anything in
+/// the rows that isn't self-explanatory; callers pass `None` where nothing needs
+/// it, so a plain list stays plain. `keys` is taken by value for the same reason
+/// as [`pick`]: raw mode ends with the call, not with the caller's scope.
 pub(crate) fn multi_select(
     prompt: &str,
     legend: Option<&str>,

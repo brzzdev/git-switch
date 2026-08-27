@@ -8,7 +8,8 @@ use console::style;
 
 use super::picker::{MultiItem, align_labels, interactive_keys, multi_select};
 use super::{
-    Risk, confirm, display_path, interactive_term, marker, removal, reporting, risk_legend,
+    Confirmation, Risk, confirm, display_path, interactive_term, marker, removal, reporting,
+    risk_legend,
 };
 use crate::{AppResult, Error, git};
 
@@ -261,6 +262,8 @@ fn select_local(
             .map(|row| row.risk)
             .collect();
         let legend = risk_legend(&visible_risks);
+        // Cancelling and accepting no rows both stop before any removal here,
+        // so this first-stage picker can safely collapse them to an empty set.
         return Ok(multi_select(
             "Remove local branches (space to toggle, →/← all/none)",
             legend.as_deref(),
@@ -336,7 +339,7 @@ fn confirm_local(row: &BranchRow, main: &git::Worktree, force: bool) -> AppResul
     for warning in warnings {
         eprintln!("{warning}");
     }
-    confirm(&format!("Delete {} anyway?", row.name), false)
+    Ok(confirm(&format!("Delete {} anyway?", row.name), false)? == Confirmation::Accepted)
 }
 
 fn select_upstreams(
@@ -377,7 +380,7 @@ fn select_upstreams(
         return Ok(Some(plan_all(choices, failures)));
     }
     if selection.target_was_named {
-        return select_named_upstream(choices, failures, selection).map(Some);
+        return select_named_upstream(choices, failures, selection);
     }
 
     select_upstream_rows(choices, failures, selection.requested)
@@ -397,7 +400,7 @@ fn select_named_upstream(
     choices: Vec<UpstreamChoice>,
     failures: HashMap<usize, String>,
     selection: UpstreamSelection,
-) -> AppResult<UpstreamPlan> {
+) -> AppResult<Option<UpstreamPlan>> {
     let choice = &choices[0];
     eprintln!("{}", reporting::upstream_warning(&choice.upstream));
     if !selection.interactive {
@@ -405,19 +408,19 @@ fn select_named_upstream(
             "upstream deletion was requested without a terminal; pass --force to confirm it".into(),
         ));
     }
-    if confirm(
+    match confirm(
         &format!(
             "Delete upstream {}/{} too?",
             choice.upstream.remote, choice.upstream.branch
         ),
         selection.requested,
     )? {
-        Ok(plan_all(choices, failures))
-    } else {
-        Ok(UpstreamPlan {
+        Confirmation::Accepted => Ok(Some(plan_all(choices, failures))),
+        Confirmation::Cancelled => Ok(None),
+        Confirmation::Declined => Ok(Some(UpstreamPlan {
             selected: HashMap::new(),
             failures,
-        })
+        })),
     }
 }
 

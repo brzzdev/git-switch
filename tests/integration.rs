@@ -2377,6 +2377,28 @@ fn br_rm_upstream_flag_preselects_the_named_confirmation() {
 }
 
 #[test]
+fn br_rm_escape_from_named_upstream_confirmation_cancels_every_removal() {
+    let (_bare, work) = setup();
+    git(work.path(), &["branch", "feature"]);
+    git(work.path(), &["push", "-u", "origin", "feature"]);
+
+    drive_escape_confirmation(
+        work.path(),
+        &["br", "rm", "feature", "--upstream"],
+        "Delete upstream origin/feature too?",
+    );
+
+    assert_eq!(
+        (
+            local_branch_exists(work.path(), "feature"),
+            remote_branch_tip(work.path(), "origin", "feature").is_some(),
+        ),
+        (true, true),
+        "Escape from the named upstream confirmation must cancel the whole removal",
+    );
+}
+
+#[test]
 fn br_rm_escape_from_upstream_picker_cancels_every_removal() {
     let (_bare, work) = setup();
     for branch in ["a", "b"] {
@@ -3076,6 +3098,14 @@ fn drive_cleanup_prompt(
 }
 
 fn drive_enter_confirmation(work: &Path, args: &[&str], prompt: &str) -> String {
+    drive_confirmation(work, args, prompt, b"\r")
+}
+
+fn drive_escape_confirmation(work: &Path, args: &[&str], prompt: &str) -> String {
+    drive_confirmation(work, args, prompt, b"\x1b")
+}
+
+fn drive_confirmation(work: &Path, args: &[&str], prompt: &str, key: &[u8]) -> String {
     use portable_pty::{CommandBuilder, PtySize, native_pty_system};
     use std::io::{Read, Write};
     use std::sync::Arc;
@@ -3105,7 +3135,7 @@ fn drive_enter_confirmation(work: &Path, args: &[&str], prompt: &str) -> String 
     });
 
     wait_for(&seen, prompt);
-    writer.write_all(b"\r").unwrap();
+    writer.write_all(key).unwrap();
     writer.flush().unwrap();
 
     child.wait_bounded();
