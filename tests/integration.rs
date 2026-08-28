@@ -1,4 +1,5 @@
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::{Mutex, MutexGuard, PoisonError};
@@ -84,6 +85,21 @@ fn perch_command(dir: &Path, args: &[&str]) -> Command {
 
 fn perch(dir: &Path, branch: &str) -> Output {
     perch_args(dir, &[branch])
+}
+
+fn reclamation_record(state: &str, original: &Path, trash: &Path) -> String {
+    fn hex(path: &Path) -> String {
+        const DIGITS: &[u8; 16] = b"0123456789abcdef";
+        let bytes = path.to_str().unwrap().as_bytes();
+        let mut encoded = String::with_capacity(bytes.len() * 2);
+        for byte in bytes {
+            encoded.push(char::from(DIGITS[usize::from(byte >> 4)]));
+            encoded.push(char::from(DIGITS[usize::from(byte & 0x0f)]));
+        }
+        encoded
+    }
+
+    format!("{state}:{}:{}", hex(original), hex(trash))
 }
 
 /// Point a bare repo's HEAD at `main`.
@@ -2806,6 +2822,111 @@ fn wt_rm_refuses_dirty_worktree_non_interactively() {
     assert!(path.exists(), "worktree must survive: {}", path.display());
 }
 
+#[test]
+fn wt_rm_does_not_rename_past_gits_initialized_submodule_guard() {
+    let (_bare, parent, work) = setup_with_parent();
+    let submodule = TempDir::new().unwrap();
+    git(submodule.path(), &["init", "--initial-branch=main"]);
+    commit_in(submodule.path(), "tracked.txt", "initial submodule commit");
+    git(
+        &work,
+        &[
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            submodule.path().to_str().unwrap(),
+            "module",
+        ],
+    );
+    git(&work, &["commit", "-m", "add submodule"]);
+    let path = add_worktree(&work, &parent, "feature");
+    git(
+        &path,
+        &[
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "update",
+            "--init",
+        ],
+    );
+
+    let output = perch_args(&work, &["wt", "rm", "feature"]);
+
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+    assert!(
+        stderr_str(&output).contains("working trees containing submodules"),
+        "Git's submodule guard should speak for the refusal: {}",
+        stderr_str(&output)
+    );
+    assert!(path.exists(), "the guarded worktree must survive");
+}
+
+#[test]
+fn wt_rm_keeps_fast_reclamation_for_an_unmapped_gitlink() {
+    let (_bare, parent, work) = setup_with_parent();
+    let head = stdout_str(&git(&work, &["rev-parse", "HEAD"]))
+        .trim()
+        .to_string();
+    git(
+        &work,
+        &[
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            &format!("160000,{head},gl"),
+        ],
+    );
+    git(&work, &["commit", "-m", "add unmapped gitlink"]);
+    let path = add_worktree(&work, &parent, "feature");
+
+    let bin = parent.path().join("bin");
+    fs::create_dir(&bin).unwrap();
+    let fake_rm = bin.join("rm");
+    fs::write(
+        &fake_rm,
+        "#!/bin/sh\n\
+         : > \"$PERCH_TEST_RM_STARTED\"\n\
+         exec /bin/rm \"$@\"\n",
+    )
+    .unwrap();
+    let mut permissions = fs::metadata(&fake_rm).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&fake_rm, permissions).unwrap();
+
+    let started = parent.path().join("rm-started");
+    let path_env = std::env::join_paths(std::iter::once(bin).chain(std::env::split_paths(
+        &std::env::var_os("PATH").unwrap_or_default(),
+    )))
+    .unwrap();
+
+    let output = perch_command(&work, &["wt", "rm", "feature"])
+        .env("PERCH_NO_HOOKS", "1")
+        .env("PERCH_TEST_RM_STARTED", &started)
+        .env("PATH", path_env)
+        .output()
+        .expect("failed to run perch");
+
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+    let reclamation_started = poll_until(|| started.exists());
+    assert!(
+        reclamation_started,
+        "an unmapped gitlink should keep detached reclamation"
+    );
+    assert!(!path.exists(), "the original worktree path should be gone");
+    assert!(poll_until(|| {
+        fs::read_dir(path.parent().unwrap()).is_ok_and(|entries| {
+            entries.filter_map(Result::ok).all(|entry| {
+                !entry
+                    .file_name()
+                    .to_str()
+                    .is_some_and(|name| name.starts_with(".perch-trash."))
+            })
+        })
+    }));
+}
+
 /// `--force` waives the confirmation, discarding uncommitted changes and the
 /// unmerged branch alike.
 #[test]
@@ -2986,6 +3107,19 @@ fn wt_rm_from_inside_doomed_worktree_hands_off_to_main() {
         Path::new(&printed).is_dir() && printed.ends_with("repo"),
         "stdout should be the main worktree path; got: {printed}"
     );
+    assert!(
+        poll_until(|| {
+            fs::read_dir(path.parent().unwrap()).is_ok_and(|entries| {
+                entries.filter_map(Result::ok).all(|entry| {
+                    !entry
+                        .file_name()
+                        .to_str()
+                        .is_some_and(|name| name.starts_with(".perch-trash."))
+                })
+            })
+        }),
+        "the worker inherited the surviving main-worktree cwd and reclaimed the trash"
+    );
 }
 
 #[test]
@@ -3093,6 +3227,197 @@ fn wt_rm_clears_missing_detached_worktree_by_dir_name() {
     assert!(
         !list.contains("prunable") && !list.contains("scratch"),
         "stale registration should be cleared; got: {list}"
+    );
+}
+
+struct ReclamationGate(PathBuf);
+
+impl Drop for ReclamationGate {
+    fn drop(&mut self) {
+        let _ = fs::write(&self.0, "go\n");
+    }
+}
+
+#[test]
+fn wt_rm_returns_while_the_detached_unlink_is_still_blocked() {
+    let (_bare, parent, work) = setup_with_parent();
+    let path = add_worktree(&work, &parent, "feature");
+
+    let bin = parent.path().join("bin");
+    fs::create_dir(&bin).unwrap();
+    let fake_rm = bin.join("rm");
+    fs::write(
+        &fake_rm,
+        "#!/bin/sh\n\
+         : > \"$PERCH_TEST_RM_STARTED\"\n\
+         while [ ! -e \"$PERCH_TEST_RM_GATE\" ]; do sleep 0.01; done\n\
+         exec /bin/rm \"$@\"\n",
+    )
+    .unwrap();
+    let mut permissions = fs::metadata(&fake_rm).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&fake_rm, permissions).unwrap();
+
+    let started = parent.path().join("rm-started");
+    let gate = parent.path().join("allow-rm");
+    let _gate_guard = ReclamationGate(gate.clone());
+    let path_env = std::env::join_paths(std::iter::once(bin.clone()).chain(std::env::split_paths(
+        &std::env::var_os("PATH").unwrap_or_default(),
+    )))
+    .unwrap();
+
+    let output = perch_command(&work, &["wt", "rm", "feature"])
+        .env("PERCH_NO_HOOKS", "1")
+        .env("PERCH_TEST_RM_STARTED", &started)
+        .env("PERCH_TEST_RM_GATE", &gate)
+        .env("PATH", path_env)
+        .output()
+        .expect("failed to run perch");
+
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+    assert!(
+        poll_until(|| started.exists()),
+        "the detached deleter never reached rm"
+    );
+    assert!(!path.exists(), "the original path must already be absent");
+
+    let worktree_root = path.parent().unwrap();
+    let trash = fs::read_dir(worktree_root)
+        .unwrap()
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .find(|candidate| {
+            candidate
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with(".perch-trash."))
+        })
+        .expect("blocked unlink should leave the staged directory visible");
+    assert!(trash.exists());
+
+    let list = stdout_str(&git(&work, &["worktree", "list", "--porcelain"]));
+    assert!(!list.contains("feature"), "registration survived: {list}");
+    let branches = stdout_str(&git(&work, &["branch", "--format=%(refname:short)"]));
+    assert!(
+        !branches.lines().any(|branch| branch == "feature"),
+        "branch survived: {branches}"
+    );
+    let record = stdout_str(&git(
+        &work,
+        &["config", "--get", "perch.reclamation.worktree"],
+    ));
+    let duplicate = perch_command(&work, &[])
+        .env("PERCH_INTERNAL_RECLAMATION", record.trim())
+        .output()
+        .expect("failed to run duplicate reclamation worker");
+    assert!(
+        duplicate.status.success(),
+        "stderr: {}",
+        stderr_str(&duplicate)
+    );
+    assert!(
+        trash.exists(),
+        "a duplicate worker reclaimed a directory already owned by a worker"
+    );
+
+    fs::write(&gate, "go\n").unwrap();
+    assert!(
+        poll_until(|| !trash.exists()),
+        "the staged directory survived after releasing rm"
+    );
+}
+
+#[test]
+fn the_next_wt_command_retries_an_exact_recorded_external_trash_path() {
+    let (_bare, parent, work) = setup_with_parent();
+    let manual_parent = parent.path().join("manual-worktrees");
+    fs::create_dir(&manual_parent).unwrap();
+    let trash = manual_parent.join(".perch-trash.manual.123");
+    let original = manual_parent.join("manual");
+    fs::create_dir(&trash).unwrap();
+    fs::write(trash.join("leftover"), "content\n").unwrap();
+    let record = reclamation_record("ready", &original, &trash);
+    git(
+        &work,
+        &["config", "--add", "perch.reclamation.worktree", &record],
+    );
+
+    let output = perch_args(&work, &["wt", "ls"]);
+
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+    assert!(
+        poll_until(|| !trash.exists()),
+        "the next wt command did not retry the recorded path"
+    );
+    assert!(
+        poll_until(|| {
+            Command::new("git")
+                .args(["config", "--get-all", "perch.reclamation.worktree"])
+                .current_dir(&work)
+                .output()
+                .is_ok_and(|output| output.status.code() == Some(1))
+        }),
+        "successful reclamation should clear its durable record"
+    );
+}
+
+#[test]
+fn a_staged_record_deregisters_before_reclaiming_after_a_crash() {
+    let (_bare, parent, work) = setup_with_parent();
+    let original = add_worktree(&work, &parent, "feature");
+    let trash = original
+        .parent()
+        .unwrap()
+        .join(".perch-trash.feature.crashed");
+    fs::rename(&original, &trash).unwrap();
+    let record = reclamation_record("staged", &original, &trash);
+    git(
+        &work,
+        &["config", "--add", "perch.reclamation.worktree", &record],
+    );
+
+    let output = perch_args(&work, &["wt", "ls"]);
+
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+    assert!(
+        poll_until(|| !trash.exists()),
+        "staged crash recovery did not reclaim the directory"
+    );
+    assert!(
+        poll_until(|| {
+            !stdout_str(&git(&work, &["worktree", "list", "--porcelain"]))
+                .contains(original.to_str().unwrap())
+        }),
+        "reclamation ran before the missing registration was cleared"
+    );
+}
+
+#[test]
+fn a_staged_record_never_reclaims_an_existing_original() {
+    let (_bare, parent, work) = setup_with_parent();
+    let original = parent.path().join("manual-worktree");
+    let trash = parent.path().join(".perch-trash.manual-worktree.crashed");
+    fs::create_dir(&original).unwrap();
+    fs::write(original.join("keep"), "content\n").unwrap();
+    let record = reclamation_record("staged", &original, &trash);
+    git(
+        &work,
+        &["config", "--add", "perch.reclamation.worktree", &record],
+    );
+
+    let output = perch_args(&work, &["wt", "ls"]);
+
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+    assert!(original.join("keep").exists());
+    assert!(
+        poll_until(|| {
+            Command::new("git")
+                .args(["config", "--get-all", "perch.reclamation.worktree"])
+                .current_dir(&work)
+                .output()
+                .is_ok_and(|output| output.status.code() == Some(1))
+        }),
+        "a restored staged record should be cleared"
     );
 }
 

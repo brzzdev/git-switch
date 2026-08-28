@@ -1,6 +1,13 @@
 use std::process;
 
 fn main() {
+    if let Some(result) = perch::app::run_internal_reclamation() {
+        if result.is_err() {
+            process::exit(1);
+        }
+        return;
+    }
+
     let _ = ctrlc::set_handler(|| {
         let _ = console::Term::stderr().show_cursor();
         process::exit(130);

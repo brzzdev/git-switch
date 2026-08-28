@@ -11,6 +11,7 @@ pub mod complete;
 pub(crate) mod hook;
 pub(crate) mod marker;
 pub(crate) mod picker;
+mod reclamation;
 pub(crate) mod removal;
 pub mod wt;
 
@@ -61,6 +62,15 @@ impl Verb {
 }
 
 pub(crate) fn run_invocation(invocation: Invocation) -> AppResult<()> {
+    if matches!(
+        &invocation,
+        Invocation::Navigate(Navigation::Worktree { .. })
+            | Invocation::ListWorktrees
+            | Invocation::RemoveWorktrees(_)
+    ) {
+        reclamation::retry();
+    }
+
     match invocation {
         Invocation::Navigate(Navigation::Go(target)) => run(target.as_deref()),
         Invocation::Navigate(Navigation::Here(target)) => run_br(target.as_deref()),
@@ -81,6 +91,13 @@ pub(crate) fn run_invocation(invocation: Invocation) -> AppResult<()> {
         }
         Invocation::Complete(query) => complete::run(&query),
     }
+}
+
+/// Run the private detached reclamation mode when requested by a child process.
+/// `None` means this is an ordinary user invocation.
+#[must_use]
+pub fn run_internal_reclamation() -> Option<AppResult<()>> {
+    reclamation::run_worker()
 }
 
 /// `perch [<branch>]` — take me to the branch, wherever it lives.
