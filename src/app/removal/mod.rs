@@ -611,9 +611,10 @@ impl Pending {
         self,
         upstream: UpstreamChoice,
         emit: impl FnMut(String),
+        fire_hook: impl FnMut(hook::Event, &Path, Option<&str>, &Path),
     ) -> Result<Outcome, FinishFailure> {
         let mut steps = GitSteps::at_main(self.main.as_deref());
-        self.finish_with_steps(upstream, &mut steps, emit)
+        self.finish_with_steps(upstream, &mut steps, emit, fire_hook)
     }
 
     fn finish_with_steps(
@@ -621,6 +622,7 @@ impl Pending {
         upstream: UpstreamChoice,
         steps: &mut impl Steps,
         mut emit: impl FnMut(String),
+        mut fire_hook: impl FnMut(hook::Event, &Path, Option<&str>, &Path),
     ) -> Result<Outcome, FinishFailure> {
         let selected: HashSet<UpstreamId> = upstream.ids.into_iter().collect();
         let handoff = self
@@ -671,7 +673,7 @@ impl Pending {
             if report.worktree_removed()
                 && let (Some(path), Some(main)) = (local.target.path(), self.main.as_deref())
             {
-                hook::fire(hook::Event::Removed, path, local.target.name(), main);
+                fire_hook(hook::Event::Removed, path, local.target.name(), main);
             }
 
             let local_deleted = report.branch_removed();
@@ -1880,7 +1882,11 @@ mod tests {
             .expect("pending Removal");
         let mut lines = Vec::new();
         let outcome = pending
-            .finish(UpstreamChoice::keep(), |line| lines.push(line))
+            .finish(
+                UpstreamChoice::keep(),
+                |line| lines.push(line),
+                |_, _, _, _| {},
+            )
             .expect("Removal outcome");
 
         assert_eq!(plain(&lines), ["✓ deleted feature"]);
@@ -1919,7 +1925,11 @@ mod tests {
             .expect("pending Removal");
         let mut lines = Vec::new();
         let outcome = pending
-            .finish(UpstreamChoice::keep(), |line| lines.push(line))
+            .finish(
+                UpstreamChoice::keep(),
+                |line| lines.push(line),
+                |_, _, _, _| {},
+            )
             .expect("Removal outcome");
 
         assert_eq!(
@@ -1932,6 +1942,32 @@ mod tests {
         assert!(!outcome.failed());
         assert!(!worktree_path.exists());
         assert!(git::resolve(None, "refs/heads/feature").is_none());
+    }
+
+    #[test]
+    fn worktree_removal_emits_its_outcome_before_firing_the_hook() {
+        let pending = pending_with_local(
+            RequestKind::Worktrees,
+            OwnedTarget::Held {
+                name: "feature".to_string(),
+                path: PathBuf::from("/tmp/wt"),
+            },
+            false,
+            Some(PathBuf::from("/tmp/main")),
+        );
+        let mut steps = FakeSteps::new();
+        let events = std::cell::RefCell::new(Vec::new());
+
+        pending
+            .finish_with_steps(
+                UpstreamChoice::keep(),
+                &mut steps,
+                |_| events.borrow_mut().push("outcome"),
+                |_, _, _, _| events.borrow_mut().push("hook"),
+            )
+            .expect("Removal outcome");
+
+        assert_eq!(events.into_inner(), ["outcome", "hook"]);
     }
 
     /// Git will not delete a branch a worktree still holds, so the order is not
@@ -1963,7 +1999,8 @@ mod tests {
         let mut steps = FakeSteps::new();
         steps.worktree_error = true;
 
-        let Err(error) = pending.finish_with_steps(UpstreamChoice::keep(), &mut steps, |_| {})
+        let Err(error) =
+            pending.finish_with_steps(UpstreamChoice::keep(), &mut steps, |_| {}, |_, _, _, _| {})
         else {
             panic!("process-level git errors stay fatal");
         };
@@ -1987,7 +2024,8 @@ mod tests {
         let mut steps = FakeSteps::new();
         steps.branch_error = true;
 
-        let Err(error) = pending.finish_with_steps(UpstreamChoice::keep(), &mut steps, |_| {})
+        let Err(error) =
+            pending.finish_with_steps(UpstreamChoice::keep(), &mut steps, |_| {}, |_, _, _, _| {})
         else {
             panic!("process-level git errors stay fatal during stale Removal");
         };
@@ -2015,7 +2053,8 @@ mod tests {
         let mut steps = FakeSteps::new();
         steps.branch_error = true;
 
-        let Err(failure) = pending.finish_with_steps(UpstreamChoice::keep(), &mut steps, |_| {})
+        let Err(failure) =
+            pending.finish_with_steps(UpstreamChoice::keep(), &mut steps, |_| {}, |_, _, _, _| {})
         else {
             panic!("the branch process failure should stay fatal");
         };

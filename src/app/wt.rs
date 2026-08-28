@@ -198,9 +198,15 @@ pub(crate) fn run_rm(options: &WorktreeRemoval) -> AppResult<()> {
         let spinner = ProgressBar::new_spinner().with_message(progress_message);
         let _cursor_guard = console::Term::stderr().is_term().then(CursorGuard::hide);
         spinner.enable_steady_tick(std::time::Duration::from_millis(80));
-        let result = pending.finish(removal::UpstreamChoice::keep(), |line| {
-            spinner.suspend(|| eprintln!("{line}"));
-        });
+        let result = pending.finish(
+            removal::UpstreamChoice::keep(),
+            |line| {
+                spinner.suspend(|| eprintln!("{line}"));
+            },
+            |event, path, branch, main| {
+                spinner.suspend(|| hook::fire(event, path, branch, main));
+            },
+        );
         spinner.finish_and_clear();
         result
     };
