@@ -180,7 +180,7 @@ pub(crate) fn run_rm(options: &WorktreeRemoval) -> AppResult<()> {
         eprintln!("No worktrees to remove.");
         return Ok(());
     }
-    let Some(choice) = select_removal_locals(
+    let Some(selection) = select_removal_locals(
         &assessment,
         options.target(),
         options.force(),
@@ -189,9 +189,21 @@ pub(crate) fn run_rm(options: &WorktreeRemoval) -> AppResult<()> {
     else {
         return Ok(());
     };
+    let progress_message = removal_progress_message(selection.offers());
+    let choice = selection.into_choice();
     let pending = assessment.choose(choice)?;
-    let outcome = match pending.finish(removal::UpstreamChoice::keep(), |line| eprintln!("{line}"))
-    {
+    let result = {
+        let spinner = ProgressBar::new_spinner().with_message(progress_message);
+        let _cursor_guard = CursorGuard::hide();
+        spinner.enable_steady_tick(std::time::Duration::from_millis(80));
+        let result = pending.finish(
+            removal::UpstreamChoice::keep(),
+            RemovalProgress { spinner: &spinner },
+        );
+        spinner.finish_and_clear();
+        result
+    };
+    let outcome = match result {
         Ok(outcome) => outcome,
         Err(failure) => {
             if let Some(path) = failure.handoff() {
@@ -204,6 +216,27 @@ pub(crate) fn run_rm(options: &WorktreeRemoval) -> AppResult<()> {
         handoff_cd(path);
     }
     Ok(())
+}
+
+struct RemovalProgress<'a> {
+    spinner: &'a ProgressBar,
+}
+
+impl removal::Reporter for RemovalProgress<'_> {
+    fn emit(&mut self, line: String) {
+        self.spinner.suspend(|| eprintln!("{line}"));
+    }
+
+    fn removed(&mut self, hook: removal::RemovedHook<'_>) {
+        self.spinner.suspend(|| hook.fire());
+    }
+}
+
+fn removal_progress_message(offers: &[&removal::Offer]) -> String {
+    match offers {
+        [offer] => format!("Removing {}…", offer.name()),
+        offers => format!("Removing {} worktrees…", offers.len()),
+    }
 }
 
 /// `wt rm --complete` — the names `wt rm` will accept, one per line, for the

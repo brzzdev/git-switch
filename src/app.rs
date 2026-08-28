@@ -18,19 +18,25 @@ use picker::{
     Catalogue, MultiItem, PickerOptions, Selection, interactive_keys, multi_select, pick,
 };
 
-pub(crate) struct CursorGuard(Term);
+pub(crate) struct CursorGuard(Option<Term>);
 
 impl CursorGuard {
     pub(crate) fn hide() -> Self {
         let term = Term::stderr();
-        let _ = term.hide_cursor();
-        Self(term)
+        if term.is_term() {
+            let _ = term.hide_cursor();
+            Self(Some(term))
+        } else {
+            Self(None)
+        }
     }
 }
 
 impl Drop for CursorGuard {
     fn drop(&mut self) {
-        let _ = self.0.show_cursor();
+        if let Some(term) = &self.0 {
+            let _ = term.show_cursor();
+        }
     }
 }
 
@@ -635,7 +641,7 @@ pub(crate) fn prompt_delete_stale_branches(
         old_branch,
         destination,
     )))?;
-    let Some(choice) = select_removal_locals(
+    let Some(selection) = select_removal_locals(
         &assessment,
         None,
         false,
@@ -644,40 +650,48 @@ pub(crate) fn prompt_delete_stale_branches(
     else {
         return Ok(());
     };
+    let choice = selection.into_choice();
     let pending = assessment.choose(choice)?;
     pending
-        .finish(removal::UpstreamChoice::keep(), |line| eprintln!("{line}"))
+        .finish(removal::UpstreamChoice::keep(), removal::StderrReporter)
         .map_err(removal::FinishFailure::into_error)?;
 
     Ok(())
 }
 
-/// Turns a named target or picker interaction into the one opaque choice that
-/// Removal accepts. Callers supply only the verb-specific picker prompt.
-pub(crate) fn select_removal_locals(
-    assessment: &removal::Assessment,
+pub(crate) struct RemovalSelection<'a> {
+    choice: removal::LocalChoice,
+    offers: Vec<&'a removal::Offer>,
+}
+
+impl<'a> RemovalSelection<'a> {
+    pub(crate) fn offers(&self) -> &[&'a removal::Offer] {
+        &self.offers
+    }
+
+    pub(crate) fn into_choice(self) -> removal::LocalChoice {
+        self.choice
+    }
+}
+
+/// Turns a named target or picker interaction into the selected offers and the
+/// opaque choice that Removal accepts. Callers supply only the verb-specific
+/// picker prompt.
+pub(crate) fn select_removal_locals<'a>(
+    assessment: &'a removal::Assessment,
     target: Option<&str>,
     force: bool,
     prompt: &str,
-) -> AppResult<Option<removal::LocalChoice>> {
+) -> AppResult<Option<RemovalSelection<'a>>> {
     if let Some(name) = target {
         let named = assessment.named(name)?;
-        if force {
-            return Ok(Some(removal::LocalChoice::forced(named.id())));
-        }
-        if named.warnings().is_empty() {
-            return Ok(Some(removal::LocalChoice::named(named.id())));
-        }
-        if !is_interactive() {
-            return Err(Error::Unconfirmed(named.refusal().to_string()));
-        }
-        for warning in named.warnings() {
-            eprintln!("{warning}");
-        }
-        return Ok(
-            (confirm(named.question(), false)? == Confirmation::Accepted)
-                .then(|| removal::LocalChoice::named(named.id())),
-        );
+        let Some(choice) = named_removal_choice(&named, force)? else {
+            return Ok(None);
+        };
+        return Ok(Some(RemovalSelection {
+            choice,
+            offers: vec![assessment.offer(named.id())],
+        }));
     }
 
     if assessment.offers().is_empty() {
@@ -694,15 +708,39 @@ pub(crate) fn select_removal_locals(
     if selected.is_empty() {
         return Ok(None);
     }
-    let ids = selected
+    let offers: Vec<&removal::Offer> = selected
         .into_iter()
-        .map(|index| assessment.offers()[index].id())
+        .map(|index| &assessment.offers()[index])
         .collect();
-    Ok(Some(if force {
+    let ids = offers.iter().map(|offer| offer.id()).collect();
+    let choice = if force {
         removal::LocalChoice::forced_picked(ids)
     } else {
         removal::LocalChoice::picked(ids)
-    }))
+    };
+    Ok(Some(RemovalSelection { choice, offers }))
+}
+
+fn named_removal_choice(
+    named: &removal::NamedOffer,
+    force: bool,
+) -> AppResult<Option<removal::LocalChoice>> {
+    if force {
+        return Ok(Some(removal::LocalChoice::forced(named.id())));
+    }
+    if named.warnings().is_empty() {
+        return Ok(Some(removal::LocalChoice::named(named.id())));
+    }
+    if !is_interactive() {
+        return Err(Error::Unconfirmed(named.refusal().to_string()));
+    }
+    for warning in named.warnings() {
+        eprintln!("{warning}");
+    }
+    if confirm(named.question(), false)? != Confirmation::Accepted {
+        return Ok(None);
+    }
+    Ok(Some(removal::LocalChoice::named(named.id())))
 }
 
 /// Renders `word` so a shell reads it as the single literal it is. Git allows
