@@ -1645,7 +1645,7 @@ fn wt_creation_does_not_write_cursor_controls_without_a_terminal() {
     let output = perch_args(&work, &["wt", "feature"]);
 
     assert!(
-        !output.stderr.windows(6).any(|bytes| bytes == b"\x1b[?25"),
+        !output.stderr.windows(5).any(|bytes| bytes == b"\x1b[?25"),
         "stderr should not contain cursor controls: {:?}",
         output.stderr
     );

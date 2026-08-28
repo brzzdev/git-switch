@@ -7,10 +7,12 @@
 //! otherwise ignored. Nothing here returns a decision, which is the rule made
 //! structural.
 
-use std::env;
 use std::io::{self, Write};
 use std::path::Path;
 use std::process::{Command, ExitStatus, Stdio};
+
+#[cfg(not(test))]
+use std::env;
 
 use console::style;
 
@@ -78,9 +80,15 @@ pub(crate) fn fire(event: Event, worktree: &Path, branch: Option<&str>, main: &P
     }
 }
 
-/// `PERCH_NO_HOOKS` set to anything non-empty turns hooks off — the escape
-/// hatch for scripts that drive `perch` themselves, and what keeps the test
-/// suite indifferent to whatever the developer has in their global config.
+/// Unit-test builds suppress hooks so they cannot run commands from the
+/// developer's global git config. Otherwise, `PERCH_NO_HOOKS` set to anything
+/// non-empty turns hooks off for scripts that drive `perch` themselves.
+#[cfg(test)]
+fn suppressed() -> bool {
+    true
+}
+
+#[cfg(not(test))]
 fn suppressed() -> bool {
     env::var_os("PERCH_NO_HOOKS").is_some_and(|v| !v.is_empty())
 }

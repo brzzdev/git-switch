@@ -685,21 +685,8 @@ pub(crate) fn select_removal_locals<'a>(
 ) -> AppResult<Option<RemovalSelection<'a>>> {
     if let Some(name) = target {
         let named = assessment.named(name)?;
-        let choice = if force {
-            removal::LocalChoice::forced(named.id())
-        } else if named.warnings().is_empty() {
-            removal::LocalChoice::named(named.id())
-        } else {
-            if !is_interactive() {
-                return Err(Error::Unconfirmed(named.refusal().to_string()));
-            }
-            for warning in named.warnings() {
-                eprintln!("{warning}");
-            }
-            if confirm(named.question(), false)? != Confirmation::Accepted {
-                return Ok(None);
-            }
-            removal::LocalChoice::named(named.id())
+        let Some(choice) = named_removal_choice(&named, force)? else {
+            return Ok(None);
         };
         return Ok(Some(RemovalSelection {
             choice,
@@ -732,6 +719,28 @@ pub(crate) fn select_removal_locals<'a>(
         removal::LocalChoice::picked(ids)
     };
     Ok(Some(RemovalSelection { choice, offers }))
+}
+
+fn named_removal_choice(
+    named: &removal::NamedOffer,
+    force: bool,
+) -> AppResult<Option<removal::LocalChoice>> {
+    if force {
+        return Ok(Some(removal::LocalChoice::forced(named.id())));
+    }
+    if named.warnings().is_empty() {
+        return Ok(Some(removal::LocalChoice::named(named.id())));
+    }
+    if !is_interactive() {
+        return Err(Error::Unconfirmed(named.refusal().to_string()));
+    }
+    for warning in named.warnings() {
+        eprintln!("{warning}");
+    }
+    if confirm(named.question(), false)? != Confirmation::Accepted {
+        return Ok(None);
+    }
+    Ok(Some(removal::LocalChoice::named(named.id())))
 }
 
 /// Renders `word` so a shell reads it as the single literal it is. Git allows
