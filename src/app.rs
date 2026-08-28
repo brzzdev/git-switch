@@ -635,7 +635,7 @@ pub(crate) fn prompt_delete_stale_branches(
         old_branch,
         destination,
     )))?;
-    let Some(choice) = select_removal_locals(
+    let Some(selection) = select_removal_locals(
         &assessment,
         None,
         false,
@@ -644,12 +644,27 @@ pub(crate) fn prompt_delete_stale_branches(
     else {
         return Ok(());
     };
-    let pending = assessment.choose(choice)?;
+    let pending = assessment.choose(selection.into_choice())?;
     pending
         .finish(removal::UpstreamChoice::keep(), |line| eprintln!("{line}"))
         .map_err(removal::FinishFailure::into_error)?;
 
     Ok(())
+}
+
+pub(crate) struct LocalSelection {
+    choice: removal::LocalChoice,
+    count: usize,
+}
+
+impl LocalSelection {
+    pub(crate) fn count(&self) -> usize {
+        self.count
+    }
+
+    pub(crate) fn into_choice(self) -> removal::LocalChoice {
+        self.choice
+    }
 }
 
 /// Turns a named target or picker interaction into the one opaque choice that
@@ -659,14 +674,20 @@ pub(crate) fn select_removal_locals(
     target: Option<&str>,
     force: bool,
     prompt: &str,
-) -> AppResult<Option<removal::LocalChoice>> {
+) -> AppResult<Option<LocalSelection>> {
     if let Some(name) = target {
         let named = assessment.named(name)?;
         if force {
-            return Ok(Some(removal::LocalChoice::forced(named.id())));
+            return Ok(Some(LocalSelection {
+                choice: removal::LocalChoice::forced(named.id()),
+                count: 1,
+            }));
         }
         if named.warnings().is_empty() {
-            return Ok(Some(removal::LocalChoice::named(named.id())));
+            return Ok(Some(LocalSelection {
+                choice: removal::LocalChoice::named(named.id()),
+                count: 1,
+            }));
         }
         if !is_interactive() {
             return Err(Error::Unconfirmed(named.refusal().to_string()));
@@ -675,8 +696,10 @@ pub(crate) fn select_removal_locals(
             eprintln!("{warning}");
         }
         return Ok(
-            (confirm(named.question(), false)? == Confirmation::Accepted)
-                .then(|| removal::LocalChoice::named(named.id())),
+            (confirm(named.question(), false)? == Confirmation::Accepted).then(|| LocalSelection {
+                choice: removal::LocalChoice::named(named.id()),
+                count: 1,
+            }),
         );
     }
 
@@ -694,14 +717,18 @@ pub(crate) fn select_removal_locals(
     if selected.is_empty() {
         return Ok(None);
     }
+    let count = selected.len();
     let ids = selected
         .into_iter()
         .map(|index| assessment.offers()[index].id())
         .collect();
-    Ok(Some(if force {
-        removal::LocalChoice::forced_picked(ids)
-    } else {
-        removal::LocalChoice::picked(ids)
+    Ok(Some(LocalSelection {
+        choice: if force {
+            removal::LocalChoice::forced_picked(ids)
+        } else {
+            removal::LocalChoice::picked(ids)
+        },
+        count,
     }))
 }
 

@@ -180,7 +180,7 @@ pub(crate) fn run_rm(options: &WorktreeRemoval) -> AppResult<()> {
         eprintln!("No worktrees to remove.");
         return Ok(());
     }
-    let Some(choice) = select_removal_locals(
+    let Some(selection) = select_removal_locals(
         &assessment,
         options.target(),
         options.force(),
@@ -189,9 +189,22 @@ pub(crate) fn run_rm(options: &WorktreeRemoval) -> AppResult<()> {
     else {
         return Ok(());
     };
-    let pending = assessment.choose(choice)?;
-    let outcome = match pending.finish(removal::UpstreamChoice::keep(), |line| eprintln!("{line}"))
-    {
+    let progress_message = options.target().map_or_else(
+        || format!("Removing {} worktrees…", selection.count()),
+        |name| format!("Removing {name}…"),
+    );
+    let pending = assessment.choose(selection.into_choice())?;
+    let result = {
+        let spinner = ProgressBar::new_spinner().with_message(progress_message);
+        let _cursor_guard = CursorGuard::hide();
+        spinner.enable_steady_tick(std::time::Duration::from_millis(80));
+        let result = pending.finish(removal::UpstreamChoice::keep(), |line| {
+            spinner.suspend(|| eprintln!("{line}"));
+        });
+        spinner.finish_and_clear();
+        result
+    };
+    let outcome = match result {
         Ok(outcome) => outcome,
         Err(failure) => {
             if let Some(path) = failure.handoff() {

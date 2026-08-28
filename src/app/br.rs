@@ -30,7 +30,7 @@ pub(crate) fn run_rm(options: &BranchRemoval) -> AppResult<()> {
         &remote,
         upstream,
     )))?;
-    let Some(choice) = select_removal_locals(
+    let Some(selection) = select_removal_locals(
         &assessment,
         options.target(),
         options.force(),
@@ -39,7 +39,7 @@ pub(crate) fn run_rm(options: &BranchRemoval) -> AppResult<()> {
     else {
         return Ok(());
     };
-    let pending = assessment.choose(choice)?;
+    let pending = assessment.choose(selection.into_choice())?;
     for notice in pending.notices() {
         eprintln!("{notice}");
     }
