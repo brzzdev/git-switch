@@ -1773,34 +1773,37 @@ mod tests {
     }
 
     #[test]
-    fn picker_assessment_keeps_every_marker_and_the_legend() {
-        let worktrees = with_main_worktree(vec![
-            test_worktree("feature", "/tmp/worktrees/feature"),
-            test_worktree("other", "/tmp/worktrees/other"),
-        ]);
+    fn picker_assessment_keeps_every_marker_and_the_legend_for_both_forcing_states() {
+        for forcing in [Forcing::Forced, Forcing::Unforced] {
+            let worktrees = with_main_worktree(vec![
+                test_worktree("feature", "/tmp/worktrees/feature"),
+                test_worktree("other", "/tmp/worktrees/other"),
+            ]);
 
-        let assessment = build_worktree_assessment(
-            WorktreeRequest::new(worktrees, None, None, Forcing::Unforced),
-            |path| path.ends_with("feature"),
-        )
-        .expect("worktree assessment");
-        let labels: Vec<String> = assessment
-            .offers()
-            .iter()
-            .map(|offer| console::strip_ansi_codes(&offer.label).into_owned())
-            .collect();
-        let legend = assessment
-            .legend()
-            .map(console::strip_ansi_codes)
-            .map(std::borrow::Cow::into_owned);
-
-        assert_eq!(
-            (labels, legend),
-            (
-                vec!["feature  ●".to_string(), "other".to_string()],
-                Some("● uncommitted changes".to_string()),
+            let assessment = build_worktree_assessment(
+                WorktreeRequest::new(worktrees, None, None, forcing),
+                |path| path.ends_with("feature"),
             )
-        );
+            .expect("worktree assessment");
+            let labels: Vec<String> = assessment
+                .offers()
+                .iter()
+                .map(|offer| console::strip_ansi_codes(&offer.label).into_owned())
+                .collect();
+            let legend = assessment
+                .legend()
+                .map(console::strip_ansi_codes)
+                .map(std::borrow::Cow::into_owned);
+
+            assert_eq!(
+                (labels, legend),
+                (
+                    vec!["feature  ●".to_string(), "other".to_string()],
+                    Some("● uncommitted changes".to_string()),
+                ),
+                "{forcing:?}",
+            );
+        }
     }
 
     #[test]
