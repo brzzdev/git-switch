@@ -1648,7 +1648,7 @@ mod tests {
             WorktreeRequest::new(worktrees, None, Some("feature")),
             |path| {
                 dirty_paths.push(path.to_path_buf());
-                false
+                true
             },
         )
         .expect("worktree assessment");
