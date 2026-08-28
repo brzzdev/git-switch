@@ -215,12 +215,6 @@ pub(crate) fn run_rm(options: &WorktreeRemoval) -> AppResult<()> {
             return Err(failure.into_error());
         }
     };
-    if outcome.background_cleanup_started() {
-        eprintln!(
-            "{} reclaiming disk space in the background",
-            style("→").cyan().bold()
-        );
-    }
     if let Some(path) = outcome.handoff() {
         handoff_cd(path);
     }

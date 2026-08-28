@@ -725,7 +725,6 @@ impl Pending {
         let mut outcome = Outcome {
             failed: false,
             handoff,
-            background_cleanup: false,
         };
         let reclamation = if self.kind == RequestKind::Worktrees {
             Reclamation::Background
@@ -763,7 +762,6 @@ impl Pending {
             for line in reporting::removal_outcome(&report) {
                 reporter.emit(line);
             }
-            outcome.background_cleanup |= report.background_cleanup;
             if report.worktree_removed()
                 && let (Some(path), Some(main)) = (local.target.path(), self.main.as_deref())
             {
@@ -858,7 +856,6 @@ impl FinishFailure {
 pub(crate) struct Outcome {
     failed: bool,
     handoff: Option<PathBuf>,
-    background_cleanup: bool,
 }
 
 impl Outcome {
@@ -868,10 +865,6 @@ impl Outcome {
 
     pub(crate) fn handoff(&self) -> Option<&Path> {
         self.handoff.as_deref()
-    }
-
-    pub(crate) fn background_cleanup_started(&self) -> bool {
-        self.background_cleanup
     }
 }
 
@@ -1365,7 +1358,6 @@ struct Report<'a> {
     target: Target<'a>,
     worktree: Option<git::WorktreeRemoveOutcome>,
     branch: Option<git::BranchDeleteOutcome>,
-    background_cleanup: bool,
 }
 
 impl Report<'_> {
@@ -1521,16 +1513,14 @@ fn remove<'a>(
         target,
         worktree: None,
         branch: None,
-        background_cleanup: false,
     };
 
     if let Some(path) = target.path() {
-        let (worktree, background_cleanup) = match reclamation {
-            Reclamation::Synchronous => (steps.remove_worktree(path, license.worktree)?, false),
+        let worktree = match reclamation {
+            Reclamation::Synchronous => steps.remove_worktree(path, license.worktree)?,
             Reclamation::Background => remove_worktree_in_background(path, license, steps)?,
         };
         report.worktree = Some(worktree);
-        report.background_cleanup = background_cleanup;
         if !report.worktree_removed() {
             return Ok(report);
         }
@@ -1572,26 +1562,28 @@ fn remove_worktree_in_background(
     path: &Path,
     license: &License,
     steps: &mut impl Steps,
-) -> AppResult<(git::WorktreeRemoveOutcome, bool)> {
+) -> AppResult<git::WorktreeRemoveOutcome> {
     let may_stage = match steps.worktree_state(path) {
         FreshWorktree::Clean => true,
-        FreshWorktree::Dirty => license.worktree,
-        FreshWorktree::Missing | FreshWorktree::Unreadable => false,
+        FreshWorktree::Dirty | FreshWorktree::Unreadable => license.worktree,
+        FreshWorktree::Missing => false,
     };
     if !may_stage {
-        return Ok((steps.remove_worktree(path, false)?, false));
+        return steps.remove_worktree(path, false);
     }
 
     let staged = steps.stage_worktree(path)?;
     let removal = steps.remove_worktree(path, false);
     match removal {
         Ok(git::WorktreeRemoveOutcome::Removed) => {
-            steps.start_cleanup(&staged)?;
-            Ok((git::WorktreeRemoveOutcome::Removed, true))
+            // Deregistration is the Removal boundary. The durable staged record
+            // lets a later `wt` retry if the detached worker cannot start.
+            let _ = steps.start_cleanup(&staged);
+            Ok(git::WorktreeRemoveOutcome::Removed)
         }
         Ok(failed @ git::WorktreeRemoveOutcome::Failed(_)) => {
             steps.restore_worktree(&staged)?;
-            Ok((failed, false))
+            Ok(failed)
         }
         Err(error) => {
             steps.restore_worktree(&staged)?;
@@ -2512,7 +2504,7 @@ mod tests {
     fn a_clean_worktree_is_staged_deregistered_and_detached_before_its_branch_goes() {
         let mut steps = FakeSteps::new();
 
-        let report = remove(
+        remove(
             held(),
             &License::shown(Risk::default()),
             Reclamation::Background,
@@ -2530,7 +2522,6 @@ mod tests {
                 Call::DeleteBranch { force: false },
             ]
         );
-        assert!(report.background_cleanup);
     }
 
     #[test]
@@ -2587,14 +2578,14 @@ mod tests {
     }
 
     #[test]
-    fn an_unreadable_fresh_state_also_meets_gits_unforced_guard() {
+    fn an_unlicensed_unreadable_fresh_state_meets_gits_unforced_guard() {
         let mut steps = FakeSteps::new();
         steps.worktree_state = FreshWorktree::Unreadable;
         steps.worktree = git::WorktreeRemoveOutcome::Failed("unreadable".to_string());
 
         remove(
             held(),
-            &License::forced(),
+            &License::shown(Risk::default()),
             Reclamation::Background,
             &mut steps,
         )
@@ -2605,6 +2596,31 @@ mod tests {
             vec![
                 Call::ReadWorktree(FreshWorktree::Unreadable),
                 Call::RemoveWorktree { force: false },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_force_license_covers_an_unreadable_fresh_state() {
+        let mut steps = FakeSteps::new();
+        steps.worktree_state = FreshWorktree::Unreadable;
+
+        remove(
+            held(),
+            &License::forced(),
+            Reclamation::Background,
+            &mut steps,
+        )
+        .expect("the force license covers fresh uncertainty");
+
+        assert_eq!(
+            steps.calls,
+            vec![
+                Call::ReadWorktree(FreshWorktree::Unreadable),
+                Call::StageWorktree,
+                Call::RemoveWorktree { force: false },
+                Call::StartCleanup,
+                Call::DeleteBranch { force: true },
             ]
         );
     }
@@ -2635,17 +2651,17 @@ mod tests {
     }
 
     #[test]
-    fn failed_detached_launch_never_claims_removal_or_deletes_the_branch() {
+    fn failed_detached_launch_does_not_hide_removal_or_skip_the_branch() {
         let mut steps = FakeSteps::new();
         steps.cleanup_error = true;
 
-        let error = remove(
+        let report = remove(
             held(),
             &License::forced(),
             Reclamation::Background,
             &mut steps,
         )
-        .expect_err("a cleanup worker is required for success");
+        .expect("the durable record makes launch failure recoverable");
 
         assert_eq!(
             steps.calls,
@@ -2654,12 +2670,11 @@ mod tests {
                 Call::StageWorktree,
                 Call::RemoveWorktree { force: false },
                 Call::StartCleanup,
+                Call::DeleteBranch { force: true },
             ]
         );
-        assert_eq!(
-            error.to_string(),
-            "git worktree cleanup: could not start cleanup"
-        );
+        assert!(report.worktree_removed());
+        assert!(report.branch_removed());
     }
 
     #[test]

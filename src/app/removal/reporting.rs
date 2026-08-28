@@ -282,7 +282,6 @@ mod tests {
             target,
             worktree,
             branch,
-            background_cleanup: false,
         }
     }
 

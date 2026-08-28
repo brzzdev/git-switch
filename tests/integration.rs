@@ -3184,12 +3184,6 @@ fn wt_rm_returns_while_the_detached_unlink_is_still_blocked() {
         !branches.lines().any(|branch| branch == "feature"),
         "branch survived: {branches}"
     );
-    assert!(
-        stderr_str(&output).contains("reclaiming disk space in the background"),
-        "the delayed reclaim should be disclosed: {}",
-        stderr_str(&output)
-    );
-
     let record = stdout_str(&git(&work, &["config", "--get", "perch.cleanup.worktree"]));
     let duplicate = perch_command(&work, &[])
         .env("PERCH_INTERNAL_CLEANUP", record.trim())
