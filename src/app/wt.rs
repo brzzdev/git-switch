@@ -249,7 +249,7 @@ fn removal_progress_message(offers: &[&removal::Offer]) -> String {
 /// `.` is the one accepted target left off. It is a single character, every
 /// shell already completes it as a path, and it names the worktree the cwd sits
 /// in rather than any worktree in particular. Removal resolves it from the cwd,
-/// and [`rm_names`] never sees it.
+/// and [`removal::worktree_names`] never sees it.
 ///
 /// This returns unique raw names in worktree order. Grammar renders the
 /// newline-separated answer after Git facts return to it.
