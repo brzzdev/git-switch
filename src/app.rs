@@ -84,6 +84,13 @@ pub(crate) fn run_invocation(invocation: Invocation) -> AppResult<()> {
     }
 }
 
+/// Run the private detached cleanup mode when requested by a child process.
+/// `None` means this is an ordinary user invocation.
+#[must_use]
+pub fn run_internal_cleanup() -> Option<AppResult<()>> {
+    cleanup::run_worker()
+}
+
 /// `perch [<branch>]` — take me to the branch, wherever it lives.
 pub fn run(target: Option<&str>) -> AppResult<()> {
     run_verb(Verb::Go, target)

@@ -1,6 +1,6 @@
 //! Durable, detached reclamation of removed worktree directories.
 
-use std::fs;
+use std::fs::{self, File, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -8,60 +8,198 @@ use std::time::{SystemTime, UNIX_EPOCH};
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 
-use crate::{AppResult, Error};
+use crate::{AppResult, Error, git};
 
 const CONFIG_KEY: &str = "perch.cleanup.worktree";
+const LOCK_FILE: &str = "perch-cleanup.lock";
 const TRASH_PREFIX: &str = ".perch-trash.";
+const WORKER_ENV: &str = "PERCH_INTERNAL_CLEANUP";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum State {
+    Staged,
+    Ready,
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+struct Record {
+    state: State,
+    original: PathBuf,
+    trash: PathBuf,
+}
+
+impl Record {
+    fn staged(original: &Path, trash: &Path) -> Self {
+        Self {
+            state: State::Staged,
+            original: original.to_path_buf(),
+            trash: trash.to_path_buf(),
+        }
+    }
+
+    fn ready(original: &Path, trash: &Path) -> Self {
+        Self {
+            state: State::Ready,
+            original: original.to_path_buf(),
+            trash: trash.to_path_buf(),
+        }
+    }
+
+    fn encode(&self) -> AppResult<String> {
+        let state = match self.state {
+            State::Staged => "staged",
+            State::Ready => "ready",
+        };
+        let original = self
+            .original
+            .to_str()
+            .ok_or_else(|| non_utf8(&self.original))?;
+        let trash = self.trash.to_str().ok_or_else(|| non_utf8(&self.trash))?;
+        Ok(format!(
+            "{state}:{}:{}",
+            encode_hex(original.as_bytes()),
+            encode_hex(trash.as_bytes())
+        ))
+    }
+
+    fn decode(value: &str) -> Option<Self> {
+        let mut fields = value.split(':');
+        let state = match fields.next()? {
+            "staged" => State::Staged,
+            "ready" => State::Ready,
+            _ => return None,
+        };
+        let original = PathBuf::from(String::from_utf8(decode_hex(fields.next()?)?).ok()?);
+        let trash = PathBuf::from(String::from_utf8(decode_hex(fields.next()?)?).ok()?);
+        if fields.next().is_some() || !valid_record_paths(&original, &trash) {
+            return None;
+        }
+        Some(Self {
+            state,
+            original,
+            trash,
+        })
+    }
+}
+
+#[derive(Debug)]
 pub(super) struct Staged {
     pub(super) original: PathBuf,
     pub(super) trash: PathBuf,
+    // Holding this advisory lock keeps retries from observing the staged record
+    // until Git has either removed the registration or Perch has restored it.
+    pub(super) _lock: Option<File>,
 }
 
-/// Retry every exact trash path left by an earlier Removal. Reading config and
-/// starting workers are both best-effort: recovery must not delay or block the
-/// `wt` command the user asked for.
+/// Start a worker for every durable record left by an earlier Removal. Starting
+/// workers is best-effort and never waits for a lock or for file reclamation.
 pub(super) fn retry() {
     let Ok(config) = repository_config() else {
         return;
     };
-    let Ok(paths) = configured_paths(&config) else {
+    let Ok(records) = configured_records(&config) else {
         return;
     };
-    for path in paths {
-        if valid_trash_path(&path) {
-            let _ = spawn_deleter(&config, &path);
-        }
+    for record in records {
+        let _ = spawn_worker(&record);
     }
 }
 
 /// Record and move `original` to a hidden sibling on the same volume.
 pub(super) fn stage(original: &Path) -> AppResult<Staged> {
     let config = repository_config()?;
+    let lock = repository_lock(&config)?;
     let trash = unused_trash_path(original)?;
-    record(&config, &trash)?;
-    fs::rename(original, &trash).map_err(|error| cleanup_error("move worktree", &trash, &error))?;
+    let record = Record::staged(original, &trash);
+    record_config(&config, &record)?;
+    fs::rename(original, &trash)
+        .map_err(|error| cleanup_error("move worktree", original, &error))?;
     Ok(Staged {
         original: original.to_path_buf(),
         trash,
+        _lock: Some(lock),
     })
 }
 
 /// Put a staged worktree back after Git refused to remove its registration.
-/// The durable record is deliberately left until a later retry. It names the
-/// now-absent trash path, so that retry can only clear the record.
 pub(super) fn restore(staged: &Staged) -> AppResult<()> {
     fs::rename(&staged.trash, &staged.original)
-        .map_err(|error| cleanup_error("restore worktree", &staged.trash, &error))
+        .map_err(|error| cleanup_error("restore worktree", &staged.trash, &error))?;
+    if let Ok(config) = repository_config() {
+        let _ = forget_config(&config, &Record::staged(&staged.original, &staged.trash));
+    }
+    Ok(())
 }
 
-/// Start deletion without waiting for it, so unlinking cannot hold up
-/// reporting, hooks, or handoff.
+/// Mark a staged directory as safe to reclaim and start a detached worker.
 pub(super) fn start(staged: &Staged) -> AppResult<()> {
     let config = repository_config()?;
-    spawn_deleter(&config, &staged.trash)
+    let staged_record = Record::staged(&staged.original, &staged.trash);
+    let ready_record = Record::ready(&staged.original, &staged.trash);
+
+    // Add before removing so a crash can leave a duplicate, but never a gap.
+    record_config(&config, &ready_record)?;
+    let _ = forget_config(&config, &staged_record);
+    spawn_worker(&ready_record)
         .map_err(|error| cleanup_error("start background cleanup", &staged.trash, &error))
+}
+
+/// Run the private cleanup worker requested through the process environment.
+pub(super) fn run_worker() -> Option<AppResult<()>> {
+    let value = std::env::var(WORKER_ENV).ok()?;
+    let record = Record::decode(&value).ok_or_else(|| Error::Git {
+        command: "worktree cleanup".to_string(),
+        message: "invalid background cleanup record".to_string(),
+    });
+    Some(record.and_then(|record| reclaim(&record)))
+}
+
+fn reclaim(requested: &Record) -> AppResult<()> {
+    let config = repository_config()?;
+    let ready = {
+        let _lock = repository_lock(&config)?;
+        let records = configured_records(&config)?;
+        let Some(record) = records.iter().find(|record| *record == requested) else {
+            return Ok(());
+        };
+        match record.state {
+            State::Ready => record.clone(),
+            State::Staged => match recover_staged(&config, record)? {
+                Some(ready) => ready,
+                None => return Ok(()),
+            },
+        }
+    };
+
+    let status = Command::new("rm")
+        .args(["-rf", "--"])
+        .arg(&ready.trash)
+        .status()?;
+    if status.success() {
+        let _ = forget_config(&config, &ready);
+    }
+    Ok(())
+}
+
+/// Resolve a crash while a directory was staged. Only a missing original path
+/// permits Git deregistration and promotion to a deletable record.
+fn recover_staged(config: &Path, staged: &Record) -> AppResult<Option<Record>> {
+    if staged.original.exists() {
+        if !staged.trash.exists() {
+            let _ = forget_config(config, staged);
+        }
+        return Ok(None);
+    }
+
+    match git::worktree_remove(&staged.original, false)? {
+        git::WorktreeRemoveOutcome::Removed => {
+            let ready = Record::ready(&staged.original, &staged.trash);
+            record_config(config, &ready)?;
+            let _ = forget_config(config, staged);
+            Ok(Some(ready))
+        }
+        git::WorktreeRemoveOutcome::Failed(_) => Ok(None),
+    }
 }
 
 fn repository_config() -> AppResult<PathBuf> {
@@ -77,7 +215,22 @@ fn repository_config() -> AppResult<PathBuf> {
     Ok(PathBuf::from(String::from_utf8_lossy(&output.stdout).trim()).join("config"))
 }
 
-fn configured_paths(config: &Path) -> AppResult<Vec<PathBuf>> {
+fn repository_lock(config: &Path) -> AppResult<File> {
+    let common_dir = config.parent().ok_or_else(|| Error::Git {
+        command: "worktree cleanup".to_string(),
+        message: format!("{} has no parent directory", config.display()),
+    })?;
+    let file = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(common_dir.join(LOCK_FILE))?;
+    file.lock()?;
+    Ok(file)
+}
+
+fn configured_records(config: &Path) -> AppResult<Vec<Record>> {
     let output = Command::new("git")
         .arg("config")
         .arg("--file")
@@ -87,8 +240,7 @@ fn configured_paths(config: &Path) -> AppResult<Vec<PathBuf>> {
     if output.status.success() {
         return Ok(String::from_utf8_lossy(&output.stdout)
             .split('\0')
-            .filter(|value| !value.is_empty())
-            .map(PathBuf::from)
+            .filter_map(Record::decode)
             .collect());
     }
     if output.status.code() == Some(1) {
@@ -100,19 +252,38 @@ fn configured_paths(config: &Path) -> AppResult<Vec<PathBuf>> {
     })
 }
 
-fn record(config: &Path, trash: &Path) -> AppResult<()> {
+fn record_config(config: &Path, record: &Record) -> AppResult<()> {
+    let value = record.encode()?;
     let output = Command::new("git")
         .arg("config")
         .arg("--file")
         .arg(config)
         .args(["--add", CONFIG_KEY])
-        .arg(trash)
+        .arg(value)
         .output()?;
     if output.status.success() {
         return Ok(());
     }
     Err(Error::Git {
         command: "config --add".to_string(),
+        message: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+    })
+}
+
+fn forget_config(config: &Path, record: &Record) -> AppResult<()> {
+    let value = record.encode()?;
+    let output = Command::new("git")
+        .arg("config")
+        .arg("--file")
+        .arg(config)
+        .args(["--fixed-value", "--unset-all", CONFIG_KEY])
+        .arg(value)
+        .output()?;
+    if output.status.success() || output.status.code() == Some(5) {
+        return Ok(());
+    }
+    Err(Error::Git {
+        command: "config --unset-all".to_string(),
         message: String::from_utf8_lossy(&output.stderr).trim().to_string(),
     })
 }
@@ -125,10 +296,7 @@ fn unused_trash_path(original: &Path) -> AppResult<PathBuf> {
     let name = original
         .file_name()
         .and_then(|name| name.to_str())
-        .ok_or_else(|| Error::Git {
-            command: "worktree cleanup".to_string(),
-            message: format!("non-utf8 worktree path: {}", original.display()),
-        })?;
+        .ok_or_else(|| non_utf8(original))?;
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |duration| duration.as_nanos());
@@ -150,31 +318,29 @@ fn unused_trash_path(original: &Path) -> AppResult<PathBuf> {
     })
 }
 
-fn valid_trash_path(path: &Path) -> bool {
-    path.is_absolute()
-        && path.parent().is_some()
-        && path
+fn valid_record_paths(original: &Path, trash: &Path) -> bool {
+    original.is_absolute()
+        && trash.is_absolute()
+        && original.parent() == trash.parent()
+        && trash
             .file_name()
             .and_then(|name| name.to_str())
             .is_some_and(|name| name.starts_with(TRASH_PREFIX) && name.len() > TRASH_PREFIX.len())
 }
 
-fn spawn_deleter(config: &Path, trash: &Path) -> std::io::Result<()> {
-    if !valid_trash_path(trash) {
+fn spawn_worker(record: &Record) -> std::io::Result<()> {
+    if !valid_record_paths(&record.original, &record.trash) {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
-            format!("refusing cleanup path {}", trash.display()),
+            format!("refusing cleanup path {}", record.trash.display()),
         ));
     }
-    let script = format!(
-        "rm -rf -- \"$1\" || exit 0\n\
-         git config --file \"$2\" --fixed-value --unset-all {CONFIG_KEY} \"$1\" >/dev/null 2>&1 || :"
-    );
-    let mut command = Command::new("sh");
+    let value = record
+        .encode()
+        .map_err(|error| std::io::Error::other(error.to_string()))?;
+    let mut command = Command::new(std::env::current_exe()?);
     command
-        .args(["-c", &script, "perch-cleanup"])
-        .arg(trash)
-        .arg(config)
+        .env(WORKER_ENV, value)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
@@ -183,12 +349,46 @@ fn spawn_deleter(config: &Path, trash: &Path) -> std::io::Result<()> {
     command.spawn().map(|_| ())
 }
 
-fn cleanup_error(action: &str, trash: &Path, error: &std::io::Error) -> Error {
+fn encode_hex(bytes: &[u8]) -> String {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        encoded.push(char::from(DIGITS[usize::from(byte >> 4)]));
+        encoded.push(char::from(DIGITS[usize::from(byte & 0x0f)]));
+    }
+    encoded
+}
+
+fn decode_hex(encoded: &str) -> Option<Vec<u8>> {
+    if !encoded.len().is_multiple_of(2) {
+        return None;
+    }
+    encoded
+        .as_bytes()
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|pair| {
+            let high = char::from(pair[0]).to_digit(16)?;
+            let low = char::from(pair[1]).to_digit(16)?;
+            u8::try_from((high << 4) | low).ok()
+        })
+        .collect()
+}
+
+fn non_utf8(path: &Path) -> Error {
+    Error::Git {
+        command: "worktree cleanup".to_string(),
+        message: format!("non-utf8 worktree path: {}", path.display()),
+    }
+}
+
+fn cleanup_error(action: &str, recovery: &Path, error: &std::io::Error) -> Error {
     Error::Git {
         command: "worktree cleanup".to_string(),
         message: format!(
             "could not {action}: {error}; files remain at {}",
-            trash.display()
+            recovery.display()
         ),
     }
 }
@@ -198,12 +398,34 @@ mod tests {
     use super::*;
 
     #[test]
+    fn records_round_trip_without_exposing_paths_to_config_syntax() {
+        for state in [State::Staged, State::Ready] {
+            let record = Record {
+                state,
+                original: PathBuf::from("/tmp/worktrees/a:b"),
+                trash: PathBuf::from("/tmp/worktrees/.perch-trash.a:b.1"),
+            };
+            assert_eq!(Record::decode(&record.encode().unwrap()), Some(record));
+        }
+    }
+
+    #[test]
     fn cleanup_accepts_only_absolute_hidden_siblings() {
-        assert!(valid_trash_path(Path::new(
-            "/tmp/worktrees/repo/.perch-trash.feature.1"
-        )));
-        assert!(!valid_trash_path(Path::new(".perch-trash.feature.1")));
-        assert!(!valid_trash_path(Path::new("/tmp/worktrees/repo/feature")));
-        assert!(!valid_trash_path(Path::new("/")));
+        assert!(valid_record_paths(
+            Path::new("/tmp/worktrees/repo/feature"),
+            Path::new("/tmp/worktrees/repo/.perch-trash.feature.1")
+        ));
+        assert!(!valid_record_paths(
+            Path::new("feature"),
+            Path::new(".perch-trash.feature.1")
+        ));
+        assert!(!valid_record_paths(
+            Path::new("/tmp/worktrees/repo/feature"),
+            Path::new("/tmp/other/.perch-trash.feature.1")
+        ));
+        assert!(!valid_record_paths(
+            Path::new("/tmp/worktrees/repo/feature"),
+            Path::new("/tmp/worktrees/repo/feature")
+        ));
     }
 }

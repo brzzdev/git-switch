@@ -2304,6 +2304,7 @@ mod tests {
             Ok(cleanup::Staged {
                 original: path.to_path_buf(),
                 trash: PathBuf::from("/tmp/.perch-trash.wt.1"),
+                _lock: None,
             })
         }
 

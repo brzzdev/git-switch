@@ -87,6 +87,21 @@ fn perch(dir: &Path, branch: &str) -> Output {
     perch_args(dir, &[branch])
 }
 
+fn cleanup_record(state: &str, original: &Path, trash: &Path) -> String {
+    fn hex(path: &Path) -> String {
+        const DIGITS: &[u8; 16] = b"0123456789abcdef";
+        let bytes = path.to_str().unwrap().as_bytes();
+        let mut encoded = String::with_capacity(bytes.len() * 2);
+        for byte in bytes {
+            encoded.push(char::from(DIGITS[usize::from(byte >> 4)]));
+            encoded.push(char::from(DIGITS[usize::from(byte & 0x0f)]));
+        }
+        encoded
+    }
+
+    format!("{state}:{}:{}", hex(original), hex(trash))
+}
+
 /// Point a bare repo's HEAD at `main`.
 ///
 /// `git init --bare` derives HEAD from the host's `init.defaultBranch`, so on a
@@ -3188,16 +3203,13 @@ fn the_next_wt_command_retries_an_exact_recorded_external_trash_path() {
     let manual_parent = parent.path().join("manual-worktrees");
     fs::create_dir(&manual_parent).unwrap();
     let trash = manual_parent.join(".perch-trash.manual.123");
+    let original = manual_parent.join("manual");
     fs::create_dir(&trash).unwrap();
     fs::write(trash.join("leftover"), "content\n").unwrap();
+    let record = cleanup_record("ready", &original, &trash);
     git(
         &work,
-        &[
-            "config",
-            "--add",
-            "perch.cleanup.worktree",
-            trash.to_str().unwrap(),
-        ],
+        &["config", "--add", "perch.cleanup.worktree", &record],
     );
 
     let output = perch_args(&work, &["wt", "ls"]);
@@ -3216,6 +3228,66 @@ fn the_next_wt_command_retries_an_exact_recorded_external_trash_path() {
                 .is_ok_and(|output| output.status.code() == Some(1))
         }),
         "successful cleanup should clear its durable record"
+    );
+}
+
+#[test]
+fn a_staged_record_deregisters_before_reclaiming_after_a_crash() {
+    let (_bare, parent, work) = setup_with_parent();
+    let original = add_worktree(&work, &parent, "feature");
+    let trash = original
+        .parent()
+        .unwrap()
+        .join(".perch-trash.feature.crashed");
+    fs::rename(&original, &trash).unwrap();
+    let record = cleanup_record("staged", &original, &trash);
+    git(
+        &work,
+        &["config", "--add", "perch.cleanup.worktree", &record],
+    );
+
+    let output = perch_args(&work, &["wt", "ls"]);
+
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+    assert!(
+        poll_until(|| !trash.exists()),
+        "staged crash recovery did not reclaim the directory"
+    );
+    assert!(
+        poll_until(|| {
+            !stdout_str(&git(&work, &["worktree", "list", "--porcelain"]))
+                .contains(original.to_str().unwrap())
+        }),
+        "reclamation ran before the missing registration was cleared"
+    );
+}
+
+#[test]
+fn a_staged_record_never_reclaims_an_existing_original() {
+    let (_bare, parent, work) = setup_with_parent();
+    let original = parent.path().join("manual-worktree");
+    let trash = parent.path().join(".perch-trash.manual-worktree.crashed");
+    fs::create_dir(&original).unwrap();
+    fs::write(original.join("keep"), "content\n").unwrap();
+    let record = cleanup_record("staged", &original, &trash);
+    git(
+        &work,
+        &["config", "--add", "perch.cleanup.worktree", &record],
+    );
+
+    let output = perch_args(&work, &["wt", "ls"]);
+
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+    assert!(original.join("keep").exists());
+    assert!(
+        poll_until(|| {
+            Command::new("git")
+                .args(["config", "--get-all", "perch.cleanup.worktree"])
+                .current_dir(&work)
+                .output()
+                .is_ok_and(|output| output.status.code() == Some(1))
+        }),
+        "a restored staged record should be cleared"
     );
 }
 
