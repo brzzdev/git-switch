@@ -1573,15 +1573,13 @@ fn remove_worktree_in_background(
     license: &License,
     steps: &mut impl Steps,
 ) -> AppResult<(git::WorktreeRemoveOutcome, bool)> {
-    match steps.worktree_state(path) {
-        FreshWorktree::Missing => return Ok((steps.remove_worktree(path, false)?, false)),
-        FreshWorktree::Dirty if !license.worktree => {
-            return Ok((steps.remove_worktree(path, false)?, false));
-        }
-        FreshWorktree::Unreadable => {
-            return Ok((steps.remove_worktree(path, false)?, false));
-        }
-        FreshWorktree::Clean | FreshWorktree::Dirty => {}
+    let may_stage = match steps.worktree_state(path) {
+        FreshWorktree::Clean => true,
+        FreshWorktree::Dirty => license.worktree,
+        FreshWorktree::Missing | FreshWorktree::Unreadable => false,
+    };
+    if !may_stage {
+        return Ok((steps.remove_worktree(path, false)?, false));
     }
 
     let staged = steps.stage_worktree(path)?;
@@ -2302,6 +2300,7 @@ mod tests {
         fn stage_worktree(&mut self, path: &Path) -> AppResult<cleanup::Staged> {
             self.calls.push(Call::StageWorktree);
             Ok(cleanup::Staged {
+                config: PathBuf::from("/tmp/config"),
                 original: path.to_path_buf(),
                 trash: PathBuf::from("/tmp/.perch-trash.wt.1"),
                 _lock: None,

@@ -32,7 +32,6 @@ enum Existence {
 }
 
 pub(crate) fn run(target: Option<&str>, shell_handoff: ShellHandoff) -> AppResult<()> {
-    super::cleanup::retry();
     // A worktree whose directory was deleted by hand can't be entered, so its
     // branch is one to (re)create. `worktree_add`/`checkout` prune the stale
     // registration when it gets in the way.
@@ -123,7 +122,6 @@ pub(crate) fn run(target: Option<&str>, shell_handoff: ShellHandoff) -> AppResul
 }
 
 pub(crate) fn run_ls() -> AppResult<()> {
-    super::cleanup::retry();
     let worktrees = git::worktree_list()?;
     let track = git::ahead_behind_map();
 
@@ -171,7 +169,6 @@ pub(crate) fn run_ls() -> AppResult<()> {
 }
 
 pub(crate) fn run_rm(options: &WorktreeRemoval) -> AppResult<()> {
-    super::cleanup::retry();
     let worktrees = git::worktree_list()?;
     let cwd = env::current_dir()
         .ok()

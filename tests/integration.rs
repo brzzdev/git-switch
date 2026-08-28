@@ -3190,6 +3190,21 @@ fn wt_rm_returns_while_the_detached_unlink_is_still_blocked() {
         stderr_str(&output)
     );
 
+    let record = stdout_str(&git(&work, &["config", "--get", "perch.cleanup.worktree"]));
+    let duplicate = perch_command(&work, &[])
+        .env("PERCH_INTERNAL_CLEANUP", record.trim())
+        .output()
+        .expect("failed to run duplicate cleanup worker");
+    assert!(
+        duplicate.status.success(),
+        "stderr: {}",
+        stderr_str(&duplicate)
+    );
+    assert!(
+        trash.exists(),
+        "a duplicate worker reclaimed a directory already owned by a worker"
+    );
+
     fs::write(&gate, "go\n").unwrap();
     assert!(
         poll_until(|| !trash.exists()),

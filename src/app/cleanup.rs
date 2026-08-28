@@ -84,6 +84,7 @@ impl Record {
 
 #[derive(Debug)]
 pub(super) struct Staged {
+    pub(super) config: PathBuf,
     pub(super) original: PathBuf,
     pub(super) trash: PathBuf,
     // Holding this advisory lock keeps retries from observing the staged record
@@ -115,6 +116,7 @@ pub(super) fn stage(original: &Path) -> AppResult<Staged> {
     fs::rename(original, &trash)
         .map_err(|error| cleanup_error("move worktree", original, &error))?;
     Ok(Staged {
+        config,
         original: original.to_path_buf(),
         trash,
         _lock: Some(lock),
@@ -125,21 +127,21 @@ pub(super) fn stage(original: &Path) -> AppResult<Staged> {
 pub(super) fn restore(staged: &Staged) -> AppResult<()> {
     fs::rename(&staged.trash, &staged.original)
         .map_err(|error| cleanup_error("restore worktree", &staged.trash, &error))?;
-    if let Ok(config) = repository_config() {
-        let _ = forget_config(&config, &Record::staged(&staged.original, &staged.trash));
-    }
+    let _ = forget_config(
+        &staged.config,
+        &Record::staged(&staged.original, &staged.trash),
+    );
     Ok(())
 }
 
 /// Mark a staged directory as safe to reclaim and start a detached worker.
 pub(super) fn start(staged: &Staged) -> AppResult<()> {
-    let config = repository_config()?;
     let staged_record = Record::staged(&staged.original, &staged.trash);
     let ready_record = Record::ready(&staged.original, &staged.trash);
 
     // Add before removing so a crash can leave a duplicate, but never a gap.
-    record_config(&config, &ready_record)?;
-    let _ = forget_config(&config, &staged_record);
+    record_config(&staged.config, &ready_record)?;
+    let _ = forget_config(&staged.config, &staged_record);
     spawn_worker(&ready_record)
         .map_err(|error| cleanup_error("start background cleanup", &staged.trash, &error))
 }
@@ -170,6 +172,20 @@ fn reclaim(requested: &Record) -> AppResult<()> {
             },
         }
     };
+
+    let claim = match File::open(&ready.trash) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let _ = forget_config(&config, &ready);
+            return Ok(());
+        }
+        Err(error) => return Err(error.into()),
+    };
+    match claim.try_lock() {
+        Ok(()) => {}
+        Err(fs::TryLockError::WouldBlock) => return Ok(()),
+        Err(fs::TryLockError::Error(error)) => return Err(error.into()),
+    }
 
     let status = Command::new("rm")
         .args(["-rf", "--"])

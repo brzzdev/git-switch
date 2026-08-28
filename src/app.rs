@@ -62,6 +62,15 @@ impl Verb {
 }
 
 pub(crate) fn run_invocation(invocation: Invocation) -> AppResult<()> {
+    if matches!(
+        &invocation,
+        Invocation::Navigate(Navigation::Worktree { .. })
+            | Invocation::ListWorktrees
+            | Invocation::RemoveWorktrees(_)
+    ) {
+        cleanup::retry();
+    }
+
     match invocation {
         Invocation::Navigate(Navigation::Go(target)) => run(target.as_deref()),
         Invocation::Navigate(Navigation::Here(target)) => run_br(target.as_deref()),
