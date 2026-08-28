@@ -177,7 +177,7 @@ pub(crate) fn run_rm(options: &WorktreeRemoval) -> AppResult<()> {
         worktrees,
         cwd,
         options.target(),
-        options.force(),
+        removal::Forcing::from(options.force()),
     )))?;
     if assessment.offers().is_empty() {
         eprintln!("No worktrees to remove.");

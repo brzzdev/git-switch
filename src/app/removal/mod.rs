@@ -111,11 +111,23 @@ impl BranchRequest {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Forcing {
+    Forced,
+    Unforced,
+}
+
+impl From<bool> for Forcing {
+    fn from(force: bool) -> Self {
+        if force { Self::Forced } else { Self::Unforced }
+    }
+}
+
 pub(crate) struct WorktreeRequest {
     worktrees: Vec<git::Worktree>,
     cwd: Option<PathBuf>,
     target: Option<String>,
-    force: bool,
+    forcing: Forcing,
 }
 
 impl WorktreeRequest {
@@ -123,13 +135,13 @@ impl WorktreeRequest {
         worktrees: Vec<git::Worktree>,
         cwd: Option<PathBuf>,
         target: Option<&str>,
-        force: bool,
+        forcing: Forcing,
     ) -> Self {
         Self {
             worktrees,
             cwd,
             target: target.map(str::to_string),
-            force,
+            forcing,
         }
     }
 }
@@ -1165,7 +1177,7 @@ fn build_worktree_assessment(
     let (mut raw, mut locals) = (Vec::new(), Vec::new());
     for (index, (worktree, contains_cwd)) in removable.into_iter().enumerate() {
         let assess_dirtiness = request.target.is_none()
-            || (!request.force
+            || (request.forcing == Forcing::Unforced
                 && worktree_target.as_ref().and_then(|request| request.id) == Some(LocalId(index)));
         let risk = Risk {
             // INVARIANT: Named assessments never render unassessed dirtiness.
@@ -1651,7 +1663,7 @@ mod tests {
             with_main_worktree(worktrees),
             cwd.map(PathBuf::from),
             Some(target),
-            false,
+            Forcing::Unforced,
         ))
         .expect("worktree assessment")
     }
@@ -1665,7 +1677,7 @@ mod tests {
         let mut dirty_paths = Vec::new();
 
         let assessment = build_worktree_assessment(
-            WorktreeRequest::new(worktrees, None, Some("feature"), true),
+            WorktreeRequest::new(worktrees, None, Some("feature"), Forcing::Forced),
             |path| {
                 dirty_paths.push(path.to_path_buf());
                 true
@@ -1693,7 +1705,7 @@ mod tests {
                 worktrees,
                 Some(PathBuf::from("/tmp/worktrees/outer/inner/src")),
                 Some("."),
-                false,
+                Forcing::Unforced,
             ),
             |path| {
                 dirty_paths.push(path.to_path_buf());
@@ -1715,7 +1727,7 @@ mod tests {
         let mut dirty_paths = Vec::new();
 
         let assessment = build_worktree_assessment(
-            WorktreeRequest::new(worktrees, None, Some("login"), false),
+            WorktreeRequest::new(worktrees, None, Some("login"), Forcing::Unforced),
             |path| {
                 dirty_paths.push(path.to_path_buf());
                 true
@@ -1742,10 +1754,13 @@ mod tests {
         ]);
         let mut dirty_paths = Vec::new();
 
-        build_worktree_assessment(WorktreeRequest::new(worktrees, None, None, false), |path| {
-            dirty_paths.push(path.to_path_buf());
-            false
-        })
+        build_worktree_assessment(
+            WorktreeRequest::new(worktrees, None, None, Forcing::Unforced),
+            |path| {
+                dirty_paths.push(path.to_path_buf());
+                false
+            },
+        )
         .expect("worktree assessment");
 
         assert_eq!(
@@ -1764,11 +1779,11 @@ mod tests {
             test_worktree("other", "/tmp/worktrees/other"),
         ]);
 
-        let assessment =
-            build_worktree_assessment(WorktreeRequest::new(worktrees, None, None, false), |path| {
-                path.ends_with("feature")
-            })
-            .expect("worktree assessment");
+        let assessment = build_worktree_assessment(
+            WorktreeRequest::new(worktrees, None, None, Forcing::Unforced),
+            |path| path.ends_with("feature"),
+        )
+        .expect("worktree assessment");
         let labels: Vec<String> = assessment
             .offers()
             .iter()
@@ -2020,28 +2035,15 @@ mod tests {
 
     #[test]
     fn worktree_target_does_not_match_a_partial_branch_path() {
-        let assessment = Assessment {
-            kind: RequestKind::Worktrees,
-            offers: Vec::new(),
-            locals: vec![AssessedLocal {
-                target: OwnedTarget::Held {
-                    name: "feat/login".to_string(),
-                    path: PathBuf::from("/tmp/worktrees/repo/feat/login"),
-                },
-                risk: Risk::default(),
-                proof: None,
-                named_error: None,
-                picker_eligible: true,
-                contains_cwd: false,
-            }],
-            legend: None,
-            main: None,
-            worktree_target: Some(WorktreeTargetResolution {
-                target: "feat".to_string(),
-                id: None,
-            }),
-            upstream: UpstreamInterest::None,
-        };
+        let worktrees = with_main_worktree(vec![test_worktree(
+            "feat/login",
+            "/tmp/worktrees/repo/feat/login",
+        )]);
+        let assessment = build_worktree_assessment(
+            WorktreeRequest::new(worktrees, None, Some("feat"), Forcing::Unforced),
+            |_| false,
+        )
+        .expect("worktree assessment");
 
         let Err(error) = assessment.named("feat") else {
             panic!("a path segment is not a complete worktree target");
@@ -2276,7 +2278,7 @@ mod tests {
                 .ok()
                 .and_then(|dir| dir.canonicalize().ok()),
             None,
-            true,
+            Forcing::Forced,
         )))
         .expect("assessment");
         let id = assessment
