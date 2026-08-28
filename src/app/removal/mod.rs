@@ -114,11 +114,20 @@ impl BranchRequest {
 pub(crate) struct WorktreeRequest {
     worktrees: Vec<git::Worktree>,
     cwd: Option<PathBuf>,
+    target: Option<String>,
 }
 
 impl WorktreeRequest {
-    pub(crate) fn new(worktrees: Vec<git::Worktree>, cwd: Option<PathBuf>) -> Self {
-        Self { worktrees, cwd }
+    pub(crate) fn new(
+        worktrees: Vec<git::Worktree>,
+        cwd: Option<PathBuf>,
+        target: Option<&str>,
+    ) -> Self {
+        Self {
+            worktrees,
+            cwd,
+            target: target.map(str::to_string),
+        }
     }
 }
 
@@ -278,10 +287,10 @@ impl Assessment {
                 .position(|local| local.target.name() == Some(name)),
             RequestKind::Worktrees if name == "." => self.current.map(|id| id.0),
             RequestKind::Worktrees => self.locals.iter().position(|local| {
-                local.target.path().is_some_and(|path| {
-                    local.target.name() == Some(name)
-                        || path.file_name().and_then(|part| part.to_str()) == Some(name)
-                })
+                local
+                    .target
+                    .path()
+                    .is_some_and(|path| worktree_matches(name, local.target.name(), path))
             }),
         };
         let Some(index) = id else {
@@ -1065,6 +1074,34 @@ fn assess_branches(request: BranchRequest) -> AppResult<Assessment> {
 }
 
 fn assess_worktrees(request: WorktreeRequest) -> AppResult<Assessment> {
+    build_worktree_assessment(request, git::worktree_dirty)
+}
+
+fn worktree_matches(target: &str, branch: Option<&str>, path: &Path) -> bool {
+    branch == Some(target) || path.file_name().and_then(|part| part.to_str()) == Some(target)
+}
+
+fn requested_worktree(
+    removable: &[(git::Worktree, bool)],
+    current: Option<LocalId>,
+    target: Option<&str>,
+) -> Option<LocalId> {
+    let target = target?;
+    if target == "." {
+        return current;
+    }
+    removable
+        .iter()
+        .position(|(worktree, _)| {
+            worktree_matches(target, worktree.branch.as_deref(), &worktree.path)
+        })
+        .map(LocalId)
+}
+
+fn build_worktree_assessment(
+    request: WorktreeRequest,
+    mut worktree_dirty: impl FnMut(&Path) -> bool,
+) -> AppResult<Assessment> {
     let main = request
         .worktrees
         .iter()
@@ -1100,12 +1137,14 @@ fn assess_worktrees(request: WorktreeRequest) -> AppResult<Assessment> {
         .filter(|(_, (_, contains_cwd))| *contains_cwd)
         .max_by_key(|(_, (worktree, _))| worktree.path.as_os_str().len())
         .map(|(index, _)| LocalId(index));
+    let requested = requested_worktree(&removable, current, request.target.as_deref());
     let unmerged = git::unmerged_branches(Some(&main)).unwrap_or_default();
     let mut raw = Vec::new();
     let mut locals = Vec::new();
     for (index, (worktree, contains_cwd)) in removable.into_iter().enumerate() {
+        let assess_dirtiness = request.target.is_none() || requested == Some(LocalId(index));
         let risk = Risk {
-            dirty: !worktree.prunable && git::worktree_dirty(&worktree.path),
+            dirty: assess_dirtiness && !worktree.prunable && worktree_dirty(&worktree.path),
             unmerged: worktree
                 .branch
                 .as_deref()
@@ -1577,8 +1616,169 @@ mod tests {
                 prunable: false,
             },
         );
-        assess_worktrees(WorktreeRequest::new(worktrees, cwd.map(PathBuf::from)))
-            .expect("worktree assessment")
+        assess_worktrees(WorktreeRequest::new(
+            worktrees,
+            cwd.map(PathBuf::from),
+            None,
+        ))
+        .expect("worktree assessment")
+    }
+
+    #[test]
+    fn forced_named_assessment_reads_only_the_named_worktrees_dirtiness() {
+        let worktrees = vec![
+            git::Worktree {
+                path: PathBuf::from("/tmp/main"),
+                branch: Some("main".to_string()),
+                is_main: true,
+                prunable: false,
+            },
+            test_worktree("feature", "/tmp/worktrees/feature"),
+            test_worktree("other", "/tmp/worktrees/other"),
+        ];
+        let mut dirty_paths = Vec::new();
+
+        let assessment = build_worktree_assessment(
+            WorktreeRequest::new(worktrees, None, Some("feature")),
+            |path| {
+                dirty_paths.push(path.to_path_buf());
+                false
+            },
+        )
+        .expect("worktree assessment");
+        let named = assessment.named("feature").expect("named worktree");
+        assessment
+            .choose(LocalChoice::forced(named.id()))
+            .expect("forced Removal");
+
+        assert_eq!(dirty_paths, [PathBuf::from("/tmp/worktrees/feature")]);
+    }
+
+    #[test]
+    fn dot_assessment_reads_only_the_deepest_containing_worktrees_dirtiness() {
+        let worktrees = vec![
+            git::Worktree {
+                path: PathBuf::from("/tmp/main"),
+                branch: Some("main".to_string()),
+                is_main: true,
+                prunable: false,
+            },
+            test_worktree("outer", "/tmp/worktrees/outer"),
+            test_worktree("inner", "/tmp/worktrees/outer/inner"),
+        ];
+        let mut dirty_paths = Vec::new();
+
+        let assessment = build_worktree_assessment(
+            WorktreeRequest::new(
+                worktrees,
+                Some(PathBuf::from("/tmp/worktrees/outer/inner/src")),
+                Some("."),
+            ),
+            |path| {
+                dirty_paths.push(path.to_path_buf());
+                false
+            },
+        )
+        .expect("worktree assessment");
+        assessment.named(".").expect("current worktree");
+
+        assert_eq!(dirty_paths, [PathBuf::from("/tmp/worktrees/outer/inner")]);
+    }
+
+    #[test]
+    fn directory_target_assessment_reads_only_the_matching_worktrees_dirtiness() {
+        let worktrees = vec![
+            git::Worktree {
+                path: PathBuf::from("/tmp/main"),
+                branch: Some("main".to_string()),
+                is_main: true,
+                prunable: false,
+            },
+            test_worktree("feat/login", "/tmp/worktrees/repo/login"),
+            test_worktree("other", "/tmp/worktrees/repo/other"),
+        ];
+        let mut dirty_paths = Vec::new();
+
+        let assessment = build_worktree_assessment(
+            WorktreeRequest::new(worktrees, None, Some("login")),
+            |path| {
+                dirty_paths.push(path.to_path_buf());
+                false
+            },
+        )
+        .expect("worktree assessment");
+        assessment.named("login").expect("directory target");
+
+        assert_eq!(dirty_paths, [PathBuf::from("/tmp/worktrees/repo/login")]);
+    }
+
+    #[test]
+    fn picker_assessment_reads_every_non_missing_worktrees_dirtiness() {
+        let mut missing = test_worktree("missing", "/tmp/worktrees/missing");
+        missing.prunable = true;
+        let worktrees = vec![
+            git::Worktree {
+                path: PathBuf::from("/tmp/main"),
+                branch: Some("main".to_string()),
+                is_main: true,
+                prunable: false,
+            },
+            test_worktree("feature", "/tmp/worktrees/feature"),
+            test_worktree("other", "/tmp/worktrees/other"),
+            missing,
+        ];
+        let mut dirty_paths = Vec::new();
+
+        build_worktree_assessment(WorktreeRequest::new(worktrees, None, None), |path| {
+            dirty_paths.push(path.to_path_buf());
+            false
+        })
+        .expect("worktree assessment");
+
+        assert_eq!(
+            dirty_paths,
+            [
+                PathBuf::from("/tmp/worktrees/feature"),
+                PathBuf::from("/tmp/worktrees/other"),
+            ]
+        );
+    }
+
+    #[test]
+    fn picker_assessment_keeps_every_marker_and_the_legend() {
+        let worktrees = vec![
+            git::Worktree {
+                path: PathBuf::from("/tmp/main"),
+                branch: Some("main".to_string()),
+                is_main: true,
+                prunable: false,
+            },
+            test_worktree("feature", "/tmp/worktrees/feature"),
+            test_worktree("other", "/tmp/worktrees/other"),
+        ];
+
+        let assessment =
+            build_worktree_assessment(WorktreeRequest::new(worktrees, None, None), |path| {
+                path.ends_with("feature")
+            })
+            .expect("worktree assessment");
+        let labels: Vec<String> = assessment
+            .offers()
+            .iter()
+            .map(|offer| console::strip_ansi_codes(&offer.label).into_owned())
+            .collect();
+        let legend = assessment
+            .legend()
+            .map(console::strip_ansi_codes)
+            .map(std::borrow::Cow::into_owned);
+
+        assert_eq!(
+            (labels, legend),
+            (
+                vec!["feature  ●".to_string(), "other".to_string()],
+                Some("● uncommitted changes".to_string()),
+            )
+        );
     }
 
     #[test]
@@ -2062,6 +2262,7 @@ mod tests {
             env::current_dir()
                 .ok()
                 .and_then(|dir| dir.canonicalize().ok()),
+            None,
         )))
         .expect("assessment");
         let id = assessment

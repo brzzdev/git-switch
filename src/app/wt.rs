@@ -174,7 +174,9 @@ pub(crate) fn run_rm(options: &WorktreeRemoval) -> AppResult<()> {
         .ok()
         .and_then(|dir| dir.canonicalize().ok());
     let assessment = removal::assess(removal::Request::Worktrees(removal::WorktreeRequest::new(
-        worktrees, cwd,
+        worktrees,
+        cwd,
+        options.target(),
     )))?;
     if assessment.offers().is_empty() {
         eprintln!("No worktrees to remove.");
