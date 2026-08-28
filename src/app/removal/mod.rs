@@ -1719,6 +1719,22 @@ mod tests {
     }
 
     #[test]
+    fn branch_target_resolves_when_the_directory_name_differs() {
+        let assessment = test_worktree_assessment(
+            vec![test_worktree(
+                "feat/login",
+                "/tmp/worktrees/repo/differently-named",
+            )],
+            None,
+            "feat/login",
+        );
+
+        let named = assessment.named("feat/login").expect("branch target");
+
+        assert_eq!(assessment.offer(named.id()).name(), "feat/login");
+    }
+
+    #[test]
     fn directory_target_reports_the_dirtiness_of_the_resolved_worktree() {
         let worktrees = with_main_worktree(vec![
             test_worktree("feat/login", "/tmp/worktrees/repo/login"),
