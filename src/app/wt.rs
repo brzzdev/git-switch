@@ -174,7 +174,10 @@ pub(crate) fn run_rm(options: &WorktreeRemoval) -> AppResult<()> {
         .ok()
         .and_then(|dir| dir.canonicalize().ok());
     let assessment = removal::assess(removal::Request::Worktrees(removal::WorktreeRequest::new(
-        worktrees, cwd,
+        worktrees,
+        cwd,
+        options.target(),
+        removal::Forcing::from(options.force()),
     )))?;
     if assessment.offers().is_empty() {
         eprintln!("No worktrees to remove.");
@@ -240,13 +243,14 @@ fn removal_progress_message(offers: &[&removal::Offer]) -> String {
 }
 
 /// `wt rm --complete` — the names `wt rm` will accept, one per line, for the
-/// shell completions to offer. It is [`removable`] and [`rm_names`] and nothing
-/// else, the same worktree facts Removal assesses for `run_rm`.
+/// shell completions to offer. It is [`removable`] and
+/// [`removal::worktree_names`] and nothing else, the same worktree facts
+/// Removal assesses for `run_rm`.
 ///
 /// `.` is the one accepted target left off. It is a single character, every
 /// shell already completes it as a path, and it names the worktree the cwd sits
 /// in rather than any worktree in particular. Removal resolves it from the cwd,
-/// and [`rm_names`] never sees it.
+/// and [`removal::worktree_names`] never sees it.
 ///
 /// This returns unique raw names in worktree order. Grammar renders the
 /// newline-separated answer after Git facts return to it.
@@ -254,7 +258,7 @@ pub(crate) fn removal_candidates() -> AppResult<Vec<String>> {
     let worktrees = git::worktree_list()?;
     let mut seen = HashSet::new();
     Ok(removable(&worktrees)
-        .flat_map(rm_names)
+        .flat_map(|worktree| removal::worktree_names(worktree.branch.as_deref(), &worktree.path))
         .filter(|name| seen.insert(*name))
         .map(str::to_string)
         .collect())
@@ -388,21 +392,6 @@ fn resolve_target(
     Ok(Action::CreateNewBranch(name.to_string()))
 }
 
-/// Every name `wt rm` accepts for one worktree: its branch, and the final
-/// component of its path — the latter lets you name a detached/missing worktree.
-/// A worktree whose directory was renamed, or whose branch nests (`feat/x` under
-/// a directory `x`), answers to both, so this yields both.
-///
-/// One rule, read both ways round: to match a name that was typed, and to list
-/// the names to type. It settles what a worktree answers *to*, not which
-/// worktree is meant.
-fn rm_names(w: &git::Worktree) -> impl Iterator<Item = &str> {
-    w.branch
-        .as_deref()
-        .into_iter()
-        .chain(w.path.file_name().and_then(|n| n.to_str()))
-}
-
 /// The worktrees `wt rm` can act on: every one but the main worktree, which git
 /// will not remove. Branchless (detached) and missing ones stay in — a worktree
 /// whose directory was deleted by hand often shows up detached, and clearing its
@@ -471,7 +460,10 @@ mod tests {
     #[test]
     fn a_worktree_answers_to_its_branch_and_to_its_directory() {
         let w = worktree(Some("feat/login"), "/tmp/worktrees/repo/feat/login");
-        assert_eq!(rm_names(&w).collect::<Vec<_>>(), ["feat/login", "login"]);
+        assert_eq!(
+            removal::worktree_names(w.branch.as_deref(), &w.path).collect::<Vec<_>>(),
+            ["feat/login", "login"]
+        );
     }
 
     /// A detached or missing worktree has no branch, which is exactly when the
@@ -479,6 +471,9 @@ mod tests {
     #[test]
     fn a_branchless_worktree_answers_only_to_its_directory() {
         let w = worktree(None, "/tmp/worktrees/repo/detached");
-        assert_eq!(rm_names(&w).collect::<Vec<_>>(), ["detached"]);
+        assert_eq!(
+            removal::worktree_names(w.branch.as_deref(), &w.path).collect::<Vec<_>>(),
+            ["detached"]
+        );
     }
 }
