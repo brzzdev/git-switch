@@ -173,6 +173,14 @@ pub(crate) fn run_rm(options: &WorktreeRemoval) -> AppResult<()> {
     let cwd = env::current_dir()
         .ok()
         .and_then(|dir| dir.canonicalize().ok());
+    let named_removal = options
+        .target()
+        .and_then(|target| removal_name(&worktrees, cwd.as_deref(), target));
+    let picker_names: Vec<String> = worktrees
+        .iter()
+        .filter(|worktree| !worktree.is_main)
+        .map(worktree_name)
+        .collect();
     let assessment = removal::assess(removal::Request::Worktrees(removal::WorktreeRequest::new(
         worktrees, cwd,
     )))?;
@@ -189,10 +197,14 @@ pub(crate) fn run_rm(options: &WorktreeRemoval) -> AppResult<()> {
     else {
         return Ok(());
     };
-    let progress_message = options.target().map_or_else(
-        || format!("Removing {} worktrees…", selection.count()),
-        |name| format!("Removing {name}…"),
-    );
+    let single_name = selection
+        .only_picker_index()
+        .and_then(|index| picker_names.get(index))
+        .or(named_removal.as_ref());
+    let progress_message = match single_name {
+        Some(name) if selection.count() == 1 => format!("Removing {name}…"),
+        _ => format!("Removing {} worktrees…", selection.count()),
+    };
     let pending = assessment.choose(selection.into_choice())?;
     let result = {
         let spinner = ProgressBar::new_spinner().with_message(progress_message);
@@ -217,6 +229,34 @@ pub(crate) fn run_rm(options: &WorktreeRemoval) -> AppResult<()> {
         handoff_cd(path);
     }
     Ok(())
+}
+
+fn removal_name(worktrees: &[git::Worktree], cwd: Option<&Path>, target: &str) -> Option<String> {
+    let worktree = if target == "." {
+        worktrees
+            .iter()
+            .filter(|worktree| !worktree.is_main)
+            .filter(|worktree| {
+                let path = worktree
+                    .path
+                    .canonicalize()
+                    .unwrap_or_else(|_| worktree.path.clone());
+                cwd.is_some_and(|cwd| cwd.starts_with(path))
+            })
+            .max_by_key(|worktree| worktree.path.as_os_str().len())
+    } else {
+        worktrees
+            .iter()
+            .find(|worktree| !worktree.is_main && rm_names(worktree).any(|name| name == target))
+    }?;
+    Some(worktree_name(worktree))
+}
+
+fn worktree_name(worktree: &git::Worktree) -> String {
+    worktree
+        .branch
+        .clone()
+        .unwrap_or_else(|| display_path(&worktree.path))
 }
 
 /// `wt rm --complete` — the names `wt rm` will accept, one per line, for the

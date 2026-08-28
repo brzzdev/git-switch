@@ -655,11 +655,16 @@ pub(crate) fn prompt_delete_stale_branches(
 pub(crate) struct LocalSelection {
     choice: removal::LocalChoice,
     count: usize,
+    only_picker_index: Option<usize>,
 }
 
 impl LocalSelection {
     pub(crate) fn count(&self) -> usize {
         self.count
+    }
+
+    pub(crate) fn only_picker_index(&self) -> Option<usize> {
+        self.only_picker_index
     }
 
     pub(crate) fn into_choice(self) -> removal::LocalChoice {
@@ -681,12 +686,14 @@ pub(crate) fn select_removal_locals(
             return Ok(Some(LocalSelection {
                 choice: removal::LocalChoice::forced(named.id()),
                 count: 1,
+                only_picker_index: None,
             }));
         }
         if named.warnings().is_empty() {
             return Ok(Some(LocalSelection {
                 choice: removal::LocalChoice::named(named.id()),
                 count: 1,
+                only_picker_index: None,
             }));
         }
         if !is_interactive() {
@@ -699,6 +706,7 @@ pub(crate) fn select_removal_locals(
             (confirm(named.question(), false)? == Confirmation::Accepted).then(|| LocalSelection {
                 choice: removal::LocalChoice::named(named.id()),
                 count: 1,
+                only_picker_index: None,
             }),
         );
     }
@@ -718,6 +726,7 @@ pub(crate) fn select_removal_locals(
         return Ok(None);
     }
     let count = selected.len();
+    let only_picker_index = (count == 1).then(|| selected[0]);
     let ids = selected
         .into_iter()
         .map(|index| assessment.offers()[index].id())
@@ -729,6 +738,7 @@ pub(crate) fn select_removal_locals(
             removal::LocalChoice::picked(ids)
         },
         count,
+        only_picker_index,
     }))
 }
 
