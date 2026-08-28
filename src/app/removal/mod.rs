@@ -250,14 +250,6 @@ impl Assessment {
         self.legend.as_deref()
     }
 
-    pub(crate) fn target_name(&self, id: LocalId) -> Option<String> {
-        let target = &self.locals.get(id.0)?.target;
-        match target.name() {
-            Some(name) => Some(name.to_string()),
-            None => target.path().map(display_path),
-        }
-    }
-
     pub(crate) fn named(&self, name: &str) -> AppResult<NamedOffer> {
         let id = match self.kind {
             RequestKind::Branches => self

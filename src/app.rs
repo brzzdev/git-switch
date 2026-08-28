@@ -635,7 +635,7 @@ pub(crate) fn prompt_delete_stale_branches(
         old_branch,
         destination,
     )))?;
-    let Some(selection) = select_removal_locals(
+    let Some(choice) = select_removal_locals(
         &assessment,
         None,
         false,
@@ -644,32 +644,12 @@ pub(crate) fn prompt_delete_stale_branches(
     else {
         return Ok(());
     };
-    let pending = assessment.choose(selection.into_choice())?;
+    let pending = assessment.choose(choice)?;
     pending
         .finish(removal::UpstreamChoice::keep(), |line| eprintln!("{line}"))
         .map_err(removal::FinishFailure::into_error)?;
 
     Ok(())
-}
-
-pub(crate) struct LocalSelection {
-    choice: removal::LocalChoice,
-    count: usize,
-    single_name: Option<String>,
-}
-
-impl LocalSelection {
-    pub(crate) fn count(&self) -> usize {
-        self.count
-    }
-
-    pub(crate) fn single_name(&self) -> Option<&str> {
-        self.single_name.as_deref()
-    }
-
-    pub(crate) fn into_choice(self) -> removal::LocalChoice {
-        self.choice
-    }
 }
 
 /// Turns a named target or picker interaction into the one opaque choice that
@@ -679,23 +659,14 @@ pub(crate) fn select_removal_locals(
     target: Option<&str>,
     force: bool,
     prompt: &str,
-) -> AppResult<Option<LocalSelection>> {
+) -> AppResult<Option<removal::LocalChoice>> {
     if let Some(name) = target {
         let named = assessment.named(name)?;
-        let single_name = assessment.target_name(named.id());
         if force {
-            return Ok(Some(LocalSelection {
-                choice: removal::LocalChoice::forced(named.id()),
-                count: 1,
-                single_name,
-            }));
+            return Ok(Some(removal::LocalChoice::forced(named.id())));
         }
         if named.warnings().is_empty() {
-            return Ok(Some(LocalSelection {
-                choice: removal::LocalChoice::named(named.id()),
-                count: 1,
-                single_name,
-            }));
+            return Ok(Some(removal::LocalChoice::named(named.id())));
         }
         if !is_interactive() {
             return Err(Error::Unconfirmed(named.refusal().to_string()));
@@ -704,11 +675,8 @@ pub(crate) fn select_removal_locals(
             eprintln!("{warning}");
         }
         return Ok(
-            (confirm(named.question(), false)? == Confirmation::Accepted).then(|| LocalSelection {
-                choice: removal::LocalChoice::named(named.id()),
-                count: 1,
-                single_name,
-            }),
+            (confirm(named.question(), false)? == Confirmation::Accepted)
+                .then(|| removal::LocalChoice::named(named.id())),
         );
     }
 
@@ -726,23 +694,14 @@ pub(crate) fn select_removal_locals(
     if selected.is_empty() {
         return Ok(None);
     }
-    let ids: Vec<_> = selected
+    let ids = selected
         .into_iter()
         .map(|index| assessment.offers()[index].id())
         .collect();
-    let count = ids.len();
-    let single_name = match ids.as_slice() {
-        [id] => assessment.target_name(*id),
-        _ => None,
-    };
-    Ok(Some(LocalSelection {
-        choice: if force {
-            removal::LocalChoice::forced_picked(ids)
-        } else {
-            removal::LocalChoice::picked(ids)
-        },
-        count,
-        single_name,
+    Ok(Some(if force {
+        removal::LocalChoice::forced_picked(ids)
+    } else {
+        removal::LocalChoice::picked(ids)
     }))
 }
 

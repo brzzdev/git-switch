@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use console::{measure_text_width, style};
 use indicatif::ProgressBar;
 
-use super::picker::{PickerOptions, Selection, interactive_keys, pick};
+use super::picker::{MultiItem, PickerOptions, Selection, interactive_keys, multi_select, pick};
 use super::{
     CursorGuard, build_catalogue, display_path, fetch_and_ff, handoff_cd, hook, marker, picker,
     prompt_delete_stale_branches, removal, report_update, select_removal_locals,
@@ -173,6 +173,14 @@ pub(crate) fn run_rm(options: &WorktreeRemoval) -> AppResult<()> {
     let cwd = env::current_dir()
         .ok()
         .and_then(|dir| dir.canonicalize().ok());
+    let named_name = options
+        .target()
+        .and_then(|target| removal_name(&worktrees, cwd.as_deref(), target));
+    let picker_names: Vec<String> = worktrees
+        .iter()
+        .filter(|worktree| !worktree.is_main)
+        .map(worktree_name)
+        .collect();
     let assessment = removal::assess(removal::Request::Worktrees(removal::WorktreeRequest::new(
         worktrees, cwd,
     )))?;
@@ -180,23 +188,15 @@ pub(crate) fn run_rm(options: &WorktreeRemoval) -> AppResult<()> {
         eprintln!("No worktrees to remove.");
         return Ok(());
     }
-    let Some(selection) = select_removal_locals(
-        &assessment,
-        options.target(),
-        options.force(),
-        "Remove worktrees (space to toggle, →/← all/none)",
-    )?
+    let Some((choice, progress_message)) =
+        select_worktree_removals(&assessment, options, named_name, &picker_names)?
     else {
         return Ok(());
     };
-    let progress_message = match selection.single_name() {
-        Some(name) if selection.count() == 1 => format!("Removing {name}…"),
-        _ => format!("Removing {} worktrees…", selection.count()),
-    };
-    let pending = assessment.choose(selection.into_choice())?;
+    let pending = assessment.choose(choice)?;
     let result = {
         let spinner = ProgressBar::new_spinner().with_message(progress_message);
-        let _cursor_guard = CursorGuard::hide();
+        let _cursor_guard = console::Term::stderr().is_term().then(CursorGuard::hide);
         spinner.enable_steady_tick(std::time::Duration::from_millis(80));
         let result = pending.finish(removal::UpstreamChoice::keep(), |line| {
             spinner.suspend(|| eprintln!("{line}"));
@@ -217,6 +217,79 @@ pub(crate) fn run_rm(options: &WorktreeRemoval) -> AppResult<()> {
         handoff_cd(path);
     }
     Ok(())
+}
+
+fn select_worktree_removals(
+    assessment: &removal::Assessment,
+    options: &WorktreeRemoval,
+    named_name: Option<String>,
+    picker_names: &[String],
+) -> AppResult<Option<(removal::LocalChoice, String)>> {
+    const PROMPT: &str = "Remove worktrees (space to toggle, →/← all/none)";
+
+    if let Some(target) = options.target() {
+        let choice = select_removal_locals(assessment, Some(target), options.force(), PROMPT)?;
+        return Ok(choice.map(|choice| {
+            let name = named_name.unwrap_or_else(|| target.to_string());
+            (choice, format!("Removing {name}…"))
+        }));
+    }
+
+    let Some(keys) = interactive_keys() else {
+        return Ok(None);
+    };
+    let items: Vec<MultiItem> = assessment.offers().iter().map(MultiItem::from).collect();
+    let Some(selected) = multi_select(PROMPT, assessment.legend(), &items, keys)? else {
+        return Ok(None);
+    };
+    if selected.is_empty() {
+        return Ok(None);
+    }
+    let progress_message = match selected.as_slice() {
+        [index] => picker_names.get(*index).map_or_else(
+            || "Removing 1 worktree…".to_string(),
+            |name| format!("Removing {name}…"),
+        ),
+        selected => format!("Removing {} worktrees…", selected.len()),
+    };
+    let ids = selected
+        .into_iter()
+        .map(|index| assessment.offers()[index].id())
+        .collect();
+    let choice = if options.force() {
+        removal::LocalChoice::forced_picked(ids)
+    } else {
+        removal::LocalChoice::picked(ids)
+    };
+    Ok(Some((choice, progress_message)))
+}
+
+fn removal_name(worktrees: &[git::Worktree], cwd: Option<&Path>, target: &str) -> Option<String> {
+    let worktree = if target == "." {
+        worktrees
+            .iter()
+            .filter(|worktree| !worktree.is_main)
+            .filter(|worktree| {
+                let path = worktree
+                    .path
+                    .canonicalize()
+                    .unwrap_or_else(|_| worktree.path.clone());
+                cwd.is_some_and(|cwd| cwd.starts_with(path))
+            })
+            .max_by_key(|worktree| worktree.path.as_os_str().len())
+    } else {
+        worktrees
+            .iter()
+            .find(|worktree| !worktree.is_main && rm_names(worktree).any(|name| name == target))
+    }?;
+    Some(worktree_name(worktree))
+}
+
+fn worktree_name(worktree: &git::Worktree) -> String {
+    worktree
+        .branch
+        .clone()
+        .unwrap_or_else(|| display_path(&worktree.path))
 }
 
 /// `wt rm --complete` — the names `wt rm` will accept, one per line, for the
