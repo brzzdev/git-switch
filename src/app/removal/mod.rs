@@ -727,6 +727,11 @@ impl Pending {
             handoff,
             background_cleanup: false,
         };
+        let reclamation = if self.kind == RequestKind::Worktrees {
+            Reclamation::Background
+        } else {
+            Reclamation::Synchronous
+        };
         for local in self.locals {
             let display_name = local.target.name().unwrap_or("this worktree").to_string();
             if let Some(error) = local.preparation_failure {
@@ -738,11 +743,6 @@ impl Pending {
                 continue;
             }
 
-            let reclamation = if self.kind == RequestKind::Worktrees {
-                Reclamation::Background
-            } else {
-                Reclamation::Synchronous
-            };
             let report = match remove(local.target.borrowed(), &local.license, reclamation, steps) {
                 Ok(report) => report,
                 Err(error) if self.kind != RequestKind::Branches => {
