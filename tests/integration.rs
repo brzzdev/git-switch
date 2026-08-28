@@ -1638,6 +1638,20 @@ fn wt_creates_worktree_for_existing_local_branch() {
 }
 
 #[test]
+fn wt_creation_does_not_write_cursor_controls_without_a_terminal() {
+    let (_bare, _parent, work) = setup_with_parent();
+    git(&work, &["branch", "feature"]);
+
+    let output = perch_args(&work, &["wt", "feature"]);
+
+    assert!(
+        !output.stderr.windows(6).any(|bytes| bytes == b"\x1b[?25"),
+        "stderr should not contain cursor controls: {:?}",
+        output.stderr
+    );
+}
+
+#[test]
 fn wt_creates_new_branch_from_default_when_branch_absent() {
     let (_bare, parent, work) = setup_with_parent();
 

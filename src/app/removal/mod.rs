@@ -130,6 +130,7 @@ pub(crate) struct LocalId(usize);
 /// its opaque identity; it never reconstructs the safety facts behind the row.
 pub(crate) struct Offer {
     id: LocalId,
+    name: String,
     label: String,
     selected: bool,
     disabled: bool,
@@ -138,6 +139,10 @@ pub(crate) struct Offer {
 impl Offer {
     pub(crate) fn id(&self) -> LocalId {
         self.id
+    }
+
+    pub(crate) fn name(&self) -> &str {
+        &self.name
     }
 }
 
@@ -214,6 +219,13 @@ impl OwnedTarget {
             Self::Held { path, .. } | Self::Worktree { path } => Some(path),
         }
     }
+
+    fn offer_name(&self) -> String {
+        match self {
+            Self::Branch { name } | Self::Held { name, .. } => name.clone(),
+            Self::Worktree { path } => display_path(path),
+        }
+    }
 }
 
 struct AssessedLocal {
@@ -244,6 +256,10 @@ pub(crate) struct Assessment {
 impl Assessment {
     pub(crate) fn offers(&self) -> &[Offer] {
         &self.offers
+    }
+
+    pub(crate) fn offer(&self, id: LocalId) -> &Offer {
+        &self.offers[id.0]
     }
 
     pub(crate) fn legend(&self) -> Option<&str> {
@@ -467,6 +483,47 @@ struct PlannedLocal {
     upstream: Option<(UpstreamId, git::RemoteBranch)>,
 }
 
+pub(crate) trait Reporter {
+    fn emit(&mut self, line: String);
+
+    fn removed(&mut self, hook: RemovedHook<'_>) {
+        hook.fire();
+    }
+}
+
+/// A successful worktree Removal owes the outside world one Hook. A reporter
+/// may choose where that Hook is drawn, but dropping the token still fires it,
+/// so presentation cannot suppress the consequence.
+pub(crate) struct RemovedHook<'a> {
+    path: &'a Path,
+    branch: Option<&'a str>,
+    main: &'a Path,
+    fired: bool,
+}
+
+impl RemovedHook<'_> {
+    pub(crate) fn fire(mut self) {
+        self.fired = true;
+        hook::fire(hook::Event::Removed, self.path, self.branch, self.main);
+    }
+}
+
+impl Drop for RemovedHook<'_> {
+    fn drop(&mut self) {
+        if !self.fired {
+            hook::fire(hook::Event::Removed, self.path, self.branch, self.main);
+        }
+    }
+}
+
+pub(crate) struct StderrReporter;
+
+impl Reporter for StderrReporter {
+    fn emit(&mut self, line: String) {
+        eprintln!("{line}");
+    }
+}
+
 /// A fully chosen Removal. Dropping it is cancellation; only [`Self::finish`]
 /// can cross the mutation point.
 pub(crate) struct Pending {
@@ -610,19 +667,17 @@ impl Pending {
     pub(crate) fn finish(
         self,
         upstream: UpstreamChoice,
-        emit: impl FnMut(String),
-        fire_hook: impl FnMut(hook::Event, &Path, Option<&str>, &Path),
+        mut reporter: impl Reporter,
     ) -> Result<Outcome, FinishFailure> {
         let mut steps = GitSteps::at_main(self.main.as_deref());
-        self.finish_with_steps(upstream, &mut steps, emit, fire_hook)
+        self.finish_with_steps(upstream, &mut steps, &mut reporter)
     }
 
     fn finish_with_steps(
         self,
         upstream: UpstreamChoice,
         steps: &mut impl Steps,
-        mut emit: impl FnMut(String),
-        mut fire_hook: impl FnMut(hook::Event, &Path, Option<&str>, &Path),
+        reporter: &mut impl Reporter,
     ) -> Result<Outcome, FinishFailure> {
         let selected: HashSet<UpstreamId> = upstream.ids.into_iter().collect();
         let handoff = self
@@ -642,7 +697,7 @@ impl Pending {
         for local in self.locals {
             let display_name = local.target.name().unwrap_or("this worktree").to_string();
             if let Some(error) = local.preparation_failure {
-                emit(format!(
+                reporter.emit(format!(
                     "{} could not prepare upstream removal for {display_name}: {error}; kept the local branch",
                     style("!").yellow().bold(),
                 ));
@@ -659,7 +714,7 @@ impl Pending {
                     return Err(FinishFailure::new(error, handoff));
                 }
                 Err(error) => {
-                    emit(format!(
+                    reporter.emit(format!(
                         "{} could not remove {display_name}: {error}",
                         style("!").yellow().bold(),
                     ));
@@ -668,12 +723,17 @@ impl Pending {
                 }
             };
             for line in reporting::removal_outcome(&report) {
-                emit(line);
+                reporter.emit(line);
             }
             if report.worktree_removed()
                 && let (Some(path), Some(main)) = (local.target.path(), self.main.as_deref())
             {
-                fire_hook(hook::Event::Removed, path, local.target.name(), main);
+                reporter.removed(RemovedHook {
+                    path,
+                    branch: local.target.name(),
+                    main,
+                    fired: false,
+                });
             }
 
             let local_deleted = report.branch_removed();
@@ -690,14 +750,14 @@ impl Pending {
             };
             let local_ref = format!("refs/heads/{display_name}");
             if !local_deleted || git::resolve(None, &local_ref).is_some() {
-                emit(reporting::upstream_kept_local(upstream));
+                reporter.emit(reporting::upstream_kept_local(upstream));
                 outcome.failed = true;
                 continue;
             }
             let remote_outcome = match git::delete_remote_branch(upstream) {
                 Ok(remote_outcome) => remote_outcome,
                 Err(error) => {
-                    emit(format!(
+                    reporter.emit(format!(
                         "{} could not delete upstream {}/{}: {error}",
                         style("!").yellow().bold(),
                         upstream.remote,
@@ -707,7 +767,7 @@ impl Pending {
                     continue;
                 }
             };
-            emit(reporting::upstream_outcome(upstream, &remote_outcome));
+            reporter.emit(reporting::upstream_outcome(upstream, &remote_outcome));
             if !matches!(
                 remote_outcome,
                 git::RemoteBranchDeleteOutcome::Deleted
@@ -896,6 +956,7 @@ fn build_stale_assessment(
         .enumerate()
         .map(|(index, label)| Offer {
             id: LocalId(index),
+            name: locals[index].target.offer_name(),
             selected: request.old_branch.as_deref() == locals[index].target.name(),
             disabled: false,
             label,
@@ -978,6 +1039,7 @@ fn assess_branches(request: BranchRequest) -> AppResult<Assessment> {
         .enumerate()
         .map(|(index, label)| Offer {
             id: LocalId(index),
+            name: locals[index].target.offer_name(),
             label,
             selected: false,
             disabled: locals[index].named_error.is_some()
@@ -1084,6 +1146,7 @@ fn assess_worktrees(request: WorktreeRequest) -> AppResult<Assessment> {
         .enumerate()
         .map(|(index, label)| Offer {
             id: LocalId(index),
+            name: locals[index].target.offer_name(),
             label,
             selected: false,
             disabled: false,
@@ -1501,6 +1564,68 @@ mod tests {
         }
     }
 
+    fn test_worktree_assessment(
+        mut worktrees: Vec<git::Worktree>,
+        cwd: Option<&str>,
+    ) -> Assessment {
+        worktrees.insert(
+            0,
+            git::Worktree {
+                path: PathBuf::from("/tmp/main"),
+                branch: Some("main".to_string()),
+                is_main: true,
+                prunable: false,
+            },
+        );
+        assess_worktrees(WorktreeRequest::new(worktrees, cwd.map(PathBuf::from)))
+            .expect("worktree assessment")
+    }
+
+    #[test]
+    fn dot_names_the_deepest_worktree_containing_the_cwd() {
+        let assessment = test_worktree_assessment(
+            vec![
+                test_worktree("outer", "/tmp/worktrees/outer"),
+                test_worktree("inner", "/tmp/worktrees/outer/inner"),
+            ],
+            Some("/tmp/worktrees/outer/inner/src"),
+        );
+
+        let named = assessment.named(".").expect("current worktree");
+
+        assert_eq!(assessment.offer(named.id()).name(), "inner");
+    }
+
+    #[test]
+    fn directory_target_keeps_the_assessed_branch_name() {
+        let assessment = test_worktree_assessment(
+            vec![test_worktree("feat/login", "/tmp/worktrees/repo/login")],
+            None,
+        );
+
+        let named = assessment.named("login").expect("directory target");
+
+        assert_eq!(assessment.offer(named.id()).name(), "feat/login");
+    }
+
+    #[test]
+    fn detached_worktree_offer_uses_its_display_path_as_the_name() {
+        let path = PathBuf::from("/tmp/worktrees/repo/detached");
+        let assessment = test_worktree_assessment(
+            vec![git::Worktree {
+                path: path.clone(),
+                branch: None,
+                is_main: false,
+                prunable: false,
+            }],
+            None,
+        );
+
+        let named = assessment.named("detached").expect("detached worktree");
+
+        assert_eq!(assessment.offer(named.id()).name(), display_path(&path));
+    }
+
     #[test]
     fn stale_ground_without_following_detail_has_no_trailing_padding() {
         let assessment = build_stale_assessment(
@@ -1856,6 +1981,36 @@ mod tests {
         }
     }
 
+    struct LineReporter<'a>(&'a mut Vec<String>);
+
+    impl Reporter for LineReporter<'_> {
+        fn emit(&mut self, line: String) {
+            self.0.push(line);
+        }
+    }
+
+    struct SilentReporter;
+
+    impl Reporter for SilentReporter {
+        fn emit(&mut self, _line: String) {}
+    }
+
+    #[derive(Default)]
+    struct EventReporter {
+        events: Vec<&'static str>,
+    }
+
+    impl Reporter for EventReporter {
+        fn emit(&mut self, _line: String) {
+            self.events.push("outcome");
+        }
+
+        fn removed(&mut self, hook: RemovedHook<'_>) {
+            self.events.push("hook");
+            hook.fire();
+        }
+    }
+
     #[test]
     fn branch_removal_crosses_the_staged_interface() {
         let _lock = REPO_LOCK.lock().expect("repository lock");
@@ -1882,11 +2037,7 @@ mod tests {
             .expect("pending Removal");
         let mut lines = Vec::new();
         let outcome = pending
-            .finish(
-                UpstreamChoice::keep(),
-                |line| lines.push(line),
-                |_, _, _, _| {},
-            )
+            .finish(UpstreamChoice::keep(), LineReporter(&mut lines))
             .expect("Removal outcome");
 
         assert_eq!(plain(&lines), ["✓ deleted feature"]);
@@ -1925,11 +2076,7 @@ mod tests {
             .expect("pending Removal");
         let mut lines = Vec::new();
         let outcome = pending
-            .finish(
-                UpstreamChoice::keep(),
-                |line| lines.push(line),
-                |_, _, _, _| {},
-            )
+            .finish(UpstreamChoice::keep(), LineReporter(&mut lines))
             .expect("Removal outcome");
 
         assert_eq!(
@@ -1946,6 +2093,8 @@ mod tests {
 
     #[test]
     fn worktree_removal_emits_its_outcome_before_firing_the_hook() {
+        let _lock = REPO_LOCK.lock().expect("repository lock");
+        let repo = Repo::new();
         let pending = pending_with_local(
             RequestKind::Worktrees,
             OwnedTarget::Held {
@@ -1953,21 +2102,16 @@ mod tests {
                 path: PathBuf::from("/tmp/wt"),
             },
             false,
-            Some(PathBuf::from("/tmp/main")),
+            Some(repo.path().to_path_buf()),
         );
         let mut steps = FakeSteps::new();
-        let events = std::cell::RefCell::new(Vec::new());
+        let mut reporter = EventReporter::default();
 
         pending
-            .finish_with_steps(
-                UpstreamChoice::keep(),
-                &mut steps,
-                |_| events.borrow_mut().push("outcome"),
-                |_, _, _, _| events.borrow_mut().push("hook"),
-            )
+            .finish_with_steps(UpstreamChoice::keep(), &mut steps, &mut reporter)
             .expect("Removal outcome");
 
-        assert_eq!(events.into_inner(), ["outcome", "hook"]);
+        assert_eq!(reporter.events, ["outcome", "hook"]);
     }
 
     /// Git will not delete a branch a worktree still holds, so the order is not
@@ -2000,7 +2144,7 @@ mod tests {
         steps.worktree_error = true;
 
         let Err(error) =
-            pending.finish_with_steps(UpstreamChoice::keep(), &mut steps, |_| {}, |_, _, _, _| {})
+            pending.finish_with_steps(UpstreamChoice::keep(), &mut steps, &mut SilentReporter)
         else {
             panic!("process-level git errors stay fatal");
         };
@@ -2025,7 +2169,7 @@ mod tests {
         steps.branch_error = true;
 
         let Err(error) =
-            pending.finish_with_steps(UpstreamChoice::keep(), &mut steps, |_| {}, |_, _, _, _| {})
+            pending.finish_with_steps(UpstreamChoice::keep(), &mut steps, &mut SilentReporter)
         else {
             panic!("process-level git errors stay fatal during stale Removal");
         };
@@ -2054,7 +2198,7 @@ mod tests {
         steps.branch_error = true;
 
         let Err(failure) =
-            pending.finish_with_steps(UpstreamChoice::keep(), &mut steps, |_| {}, |_, _, _, _| {})
+            pending.finish_with_steps(UpstreamChoice::keep(), &mut steps, &mut SilentReporter)
         else {
             panic!("the branch process failure should stay fatal");
         };

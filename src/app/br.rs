@@ -3,7 +3,7 @@
 //! targets have a safety contract of their own.
 
 use super::picker::{MultiItem, interactive_keys, multi_select};
-use super::{Confirmation, confirm, hook, interactive_term, removal, select_removal_locals};
+use super::{Confirmation, confirm, interactive_term, removal, select_removal_locals};
 use crate::grammar::BranchRemoval;
 use crate::{AppResult, Error, git};
 
@@ -30,7 +30,7 @@ pub(crate) fn run_rm(options: &BranchRemoval) -> AppResult<()> {
         &remote,
         upstream,
     )))?;
-    let Some(choice) = select_removal_locals(
+    let Some(selection) = select_removal_locals(
         &assessment,
         options.target(),
         options.force(),
@@ -39,6 +39,7 @@ pub(crate) fn run_rm(options: &BranchRemoval) -> AppResult<()> {
     else {
         return Ok(());
     };
+    let choice = selection.into_choice();
     let pending = assessment.choose(choice)?;
     for notice in pending.notices() {
         eprintln!("{notice}");
@@ -118,7 +119,7 @@ fn select_upstream(
 
 fn finish(pending: removal::Pending, upstream: removal::UpstreamChoice) -> AppResult<()> {
     let outcome = pending
-        .finish(upstream, |line| eprintln!("{line}"), hook::fire)
+        .finish(upstream, removal::StderrReporter)
         .map_err(removal::FinishFailure::into_error)?;
     if outcome.failed() {
         Err(Error::RemovalFailed)
