@@ -1444,9 +1444,10 @@ trait Steps {
 enum FreshWorktree {
     Clean,
     Dirty,
+    DirtinessUnreadable,
     Guarded,
     Missing,
-    Unreadable,
+    SubmodulesUnreadable,
 }
 
 /// The real steps, run against the repo on disk.
@@ -1500,13 +1501,14 @@ impl Steps for GitSteps {
     fn worktree_state(&mut self, path: &Path) -> FreshWorktree {
         if path.exists() {
             match git::worktree_has_initialized_submodules(path) {
-                Some(true) | None => return FreshWorktree::Guarded,
+                Some(true) => return FreshWorktree::Guarded,
                 Some(false) => {}
+                None => return FreshWorktree::SubmodulesUnreadable,
             }
             match git::worktree_dirtiness(path) {
                 Some(true) => FreshWorktree::Dirty,
                 Some(false) => FreshWorktree::Clean,
-                None => FreshWorktree::Unreadable,
+                None => FreshWorktree::DirtinessUnreadable,
             }
         } else {
             FreshWorktree::Missing
@@ -1547,7 +1549,8 @@ fn remove<'a>(
     if let Some(path) = target.path() {
         let worktree = match reclamation {
             Reclamation::Synchronous => {
-                steps.remove_worktree(path, license.worktree.permits_file_discard())?
+                let state = steps.worktree_state(path);
+                steps.remove_worktree(path, worktree_force(state, license.worktree))?
             }
             Reclamation::Background => remove_worktree_in_background(path, license, steps)?,
         };
@@ -1589,18 +1592,29 @@ fn remove<'a>(
     Ok(report)
 }
 
+fn worktree_force(state: FreshWorktree, license: WorktreeLicense) -> bool {
+    license.permits_guard_override()
+        || matches!(
+            state,
+            FreshWorktree::Dirty | FreshWorktree::DirtinessUnreadable
+        ) && license.permits_file_discard()
+}
+
 fn remove_worktree_in_background(
     path: &Path,
     license: &License,
     steps: &mut impl Steps,
 ) -> AppResult<git::WorktreeRemoveOutcome> {
-    let (may_stage, fallback_force) = match steps.worktree_state(path) {
-        FreshWorktree::Clean => (true, false),
-        FreshWorktree::Dirty | FreshWorktree::Unreadable => {
-            (license.worktree.permits_file_discard(), false)
+    let state = steps.worktree_state(path);
+    let fallback_force = worktree_force(state, license.worktree);
+    let may_stage = match state {
+        FreshWorktree::Clean => true,
+        FreshWorktree::Dirty | FreshWorktree::DirtinessUnreadable => {
+            license.worktree.permits_file_discard()
         }
-        FreshWorktree::Guarded => (false, license.worktree.permits_guard_override()),
-        FreshWorktree::Missing => (false, false),
+        FreshWorktree::Guarded | FreshWorktree::Missing | FreshWorktree::SubmodulesUnreadable => {
+            false
+        }
     };
     if !may_stage {
         return steps.remove_worktree(path, fallback_force);
@@ -2527,6 +2541,7 @@ mod tests {
         assert_eq!(
             steps.calls,
             vec![
+                Call::ReadWorktree(FreshWorktree::Clean),
                 Call::RemoveWorktree { force: false },
                 Call::DeleteBranch { force: false },
             ]
@@ -2613,7 +2628,7 @@ mod tests {
     #[test]
     fn an_unlicensed_unreadable_fresh_state_meets_gits_unforced_guard() {
         let mut steps = FakeSteps::new();
-        steps.worktree_state = FreshWorktree::Unreadable;
+        steps.worktree_state = FreshWorktree::DirtinessUnreadable;
         steps.worktree = git::WorktreeRemoveOutcome::Failed("unreadable".to_string());
 
         remove(
@@ -2627,7 +2642,34 @@ mod tests {
         assert_eq!(
             steps.calls,
             vec![
-                Call::ReadWorktree(FreshWorktree::Unreadable),
+                Call::ReadWorktree(FreshWorktree::DirtinessUnreadable),
+                Call::RemoveWorktree { force: false },
+            ]
+        );
+    }
+
+    #[test]
+    fn an_incomplete_safety_read_meets_gits_unforced_guard() {
+        let mut steps = FakeSteps::new();
+        steps.worktree_state = FreshWorktree::SubmodulesUnreadable;
+        steps.worktree = git::WorktreeRemoveOutcome::Failed("uninspectable".to_string());
+        let risk = Risk {
+            dirty: true,
+            unmerged: None,
+        };
+
+        remove(
+            held(),
+            &License::shown(risk),
+            Reclamation::Background,
+            &mut steps,
+        )
+        .expect("git refusal is an outcome");
+
+        assert_eq!(
+            steps.calls,
+            vec![
+                Call::ReadWorktree(FreshWorktree::SubmodulesUnreadable),
                 Call::RemoveWorktree { force: false },
             ]
         );
@@ -2636,7 +2678,7 @@ mod tests {
     #[test]
     fn a_force_license_covers_an_unreadable_fresh_state() {
         let mut steps = FakeSteps::new();
-        steps.worktree_state = FreshWorktree::Unreadable;
+        steps.worktree_state = FreshWorktree::DirtinessUnreadable;
 
         remove(
             held(),
@@ -2649,7 +2691,7 @@ mod tests {
         assert_eq!(
             steps.calls,
             vec![
-                Call::ReadWorktree(FreshWorktree::Unreadable),
+                Call::ReadWorktree(FreshWorktree::DirtinessUnreadable),
                 Call::StageWorktree,
                 Call::RemoveWorktree { force: false },
                 Call::StartReclamation,
@@ -2672,6 +2714,34 @@ mod tests {
             held(),
             &License::shown(risk),
             Reclamation::Background,
+            &mut steps,
+        )
+        .expect("git refusal is an outcome");
+
+        assert_eq!(
+            steps.calls,
+            vec![
+                Call::ReadWorktree(FreshWorktree::Guarded),
+                Call::RemoveWorktree { force: false },
+            ]
+        );
+        assert!(report.branch.is_none());
+    }
+
+    #[test]
+    fn stale_removal_does_not_let_a_dirty_marker_override_a_submodule_guard() {
+        let mut steps = FakeSteps::new();
+        steps.worktree_state = FreshWorktree::Guarded;
+        steps.worktree = git::WorktreeRemoveOutcome::Failed("submodule".to_string());
+        let risk = Risk {
+            dirty: true,
+            unmerged: None,
+        };
+
+        let report = remove(
+            held(),
+            &License::shown(risk),
+            Reclamation::Synchronous,
             &mut steps,
         )
         .expect("git refusal is an outcome");
@@ -2855,7 +2925,13 @@ mod tests {
             &mut steps,
         )
         .expect("no git to fail");
-        assert_eq!(steps.calls, vec![Call::RemoveWorktree { force: true }]);
+        assert_eq!(
+            steps.calls,
+            vec![
+                Call::ReadWorktree(FreshWorktree::Clean),
+                Call::RemoveWorktree { force: true },
+            ]
+        );
         assert!(matches!(
             report.worktree,
             Some(git::WorktreeRemoveOutcome::Failed(_))
@@ -2872,6 +2948,7 @@ mod tests {
     #[test]
     fn a_license_from_markers_forces_only_what_was_marked() {
         let mut dirty_only = FakeSteps::new();
+        dirty_only.worktree_state = FreshWorktree::Dirty;
         let risk = Risk {
             dirty: true,
             unmerged: None,
@@ -2886,6 +2963,7 @@ mod tests {
         assert_eq!(
             dirty_only.calls,
             vec![
+                Call::ReadWorktree(FreshWorktree::Dirty),
                 Call::RemoveWorktree { force: true },
                 Call::DeleteBranch { force: false },
             ]
@@ -2906,6 +2984,7 @@ mod tests {
         assert_eq!(
             unmerged_only.calls,
             vec![
+                Call::ReadWorktree(FreshWorktree::Clean),
                 Call::RemoveWorktree { force: false },
                 Call::DeleteBranch { force: true },
             ]
@@ -2926,6 +3005,7 @@ mod tests {
         assert_eq!(
             steps.calls,
             vec![
+                Call::ReadWorktree(FreshWorktree::Clean),
                 Call::RemoveWorktree { force: true },
                 Call::DeleteBranch { force: true },
             ]
@@ -2949,6 +3029,7 @@ mod tests {
         assert_eq!(
             steps.calls,
             vec![
+                Call::ReadWorktree(FreshWorktree::Clean),
                 Call::RemoveWorktree { force: false },
                 Call::DeleteBranchAt { hit: true },
             ]
@@ -2978,6 +3059,7 @@ mod tests {
         assert_eq!(
             branch_moved.calls,
             vec![
+                Call::ReadWorktree(FreshWorktree::Clean),
                 Call::RemoveWorktree { force: false },
                 Call::DeleteBranchAt { hit: false },
                 Call::DeleteBranch { force: false },
@@ -2996,6 +3078,7 @@ mod tests {
         assert_eq!(
             anchor_moved.calls,
             vec![
+                Call::ReadWorktree(FreshWorktree::Clean),
                 Call::RemoveWorktree { force: false },
                 Call::DeleteBranch { force: false },
             ],

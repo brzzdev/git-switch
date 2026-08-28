@@ -75,7 +75,7 @@ Destroying something git would otherwise protect, or skipping Perch's upstream-d
 _Avoid_: Overriding, ignoring
 
 **License**:
-What permits forcing: the markers already shown to the user, the separate upstream choice, an explicit `--force`, or proof that a branch is *Equivalent*. It covers what was warned about or proven and nothing else, so anything that became risky after its row was drawn meets git's own guard instead — as does a proof whose ground has shifted, since equivalence is established on a pair of commits and lapses when either the branch or the *Anchor* moves off it. See [ADR 0001](./docs/adr/0001-warned-means-forceable.md), [ADR 0005](./docs/adr/0005-proof-of-equivalence-is-a-license.md), and [ADR 0009](./docs/adr/0009-branch-removal-earns-a-subverb.md).
+What permits forcing: the markers already shown to the user, the separate upstream choice, an explicit `--force`, or proof that a branch is *Equivalent*. A warning or proof covers what it named and nothing else; explicit `--force` covers the whole *Removal*. Anything that became risky after its row was drawn meets git's own guard instead — as does a proof whose ground has shifted, since equivalence is established on a pair of commits and lapses when either the branch or the *Anchor* moves off it. See [ADR 0001](./docs/adr/0001-warned-means-forceable.md), [ADR 0005](./docs/adr/0005-proof-of-equivalence-is-a-license.md), and [ADR 0009](./docs/adr/0009-branch-removal-earns-a-subverb.md).
 _Avoid_: Permission, approval, consent
 
 **Removal**:

@@ -2863,6 +2863,70 @@ fn wt_rm_does_not_rename_past_gits_initialized_submodule_guard() {
     assert!(path.exists(), "the guarded worktree must survive");
 }
 
+#[test]
+fn wt_rm_keeps_fast_reclamation_for_an_unmapped_gitlink() {
+    let (_bare, parent, work) = setup_with_parent();
+    let head = stdout_str(&git(&work, &["rev-parse", "HEAD"]))
+        .trim()
+        .to_string();
+    git(
+        &work,
+        &[
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            &format!("160000,{head},gl"),
+        ],
+    );
+    git(&work, &["commit", "-m", "add unmapped gitlink"]);
+    let path = add_worktree(&work, &parent, "feature");
+
+    let bin = parent.path().join("bin");
+    fs::create_dir(&bin).unwrap();
+    let fake_rm = bin.join("rm");
+    fs::write(
+        &fake_rm,
+        "#!/bin/sh\n\
+         : > \"$PERCH_TEST_RM_STARTED\"\n\
+         exec /bin/rm \"$@\"\n",
+    )
+    .unwrap();
+    let mut permissions = fs::metadata(&fake_rm).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&fake_rm, permissions).unwrap();
+
+    let started = parent.path().join("rm-started");
+    let path_env = std::env::join_paths(std::iter::once(bin).chain(std::env::split_paths(
+        &std::env::var_os("PATH").unwrap_or_default(),
+    )))
+    .unwrap();
+
+    let output = perch_command(&work, &["wt", "rm", "feature"])
+        .env("PERCH_NO_HOOKS", "1")
+        .env("PERCH_TEST_RM_STARTED", &started)
+        .env("PATH", path_env)
+        .output()
+        .expect("failed to run perch");
+
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+    let reclamation_started = poll_until(|| started.exists());
+    assert!(
+        reclamation_started,
+        "an unmapped gitlink should keep detached reclamation"
+    );
+    assert!(!path.exists(), "the original worktree path should be gone");
+    assert!(poll_until(|| {
+        fs::read_dir(path.parent().unwrap()).is_ok_and(|entries| {
+            entries.filter_map(Result::ok).all(|entry| {
+                !entry
+                    .file_name()
+                    .to_str()
+                    .is_some_and(|name| name.starts_with(".perch-trash."))
+            })
+        })
+    }));
+}
+
 /// `--force` waives the confirmation, discarding uncommitted changes and the
 /// unmerged branch alike.
 #[test]

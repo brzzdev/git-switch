@@ -1,4 +1,9 @@
 use std::collections::{HashMap, HashSet};
+#[cfg(unix)]
+use std::ffi::OsStr;
+use std::io::ErrorKind;
+#[cfg(unix)]
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -723,21 +728,34 @@ pub fn worktree_dirtiness(path: &Path) -> Option<bool> {
 
 /// Whether the worktree contains an initialized submodule. Git refuses to
 /// remove such a worktree even when its status is clean, so a destructive fast
-/// path must keep that guard in charge. `None` means Git could not inspect it.
+/// path must keep that guard in charge. This reads gitlinks from the index
+/// rather than `.gitmodules`, which may legitimately omit one Git can remove.
+/// `None` means Git or the filesystem could not inspect it.
 #[must_use]
 pub fn worktree_has_initialized_submodules(path: &Path) -> Option<bool> {
-    git_cmd(Some(path))
-        .args(["submodule", "status", "--recursive"])
+    let output = git_cmd(Some(path))
+        .args(["ls-files", "--stage", "-z"])
         .output()
         .ok()
-        .filter(|output| output.status.success())
-        .map(|output| {
-            output
-                .stdout
-                .split(|byte| *byte == b'\n')
-                .filter_map(|line| line.first())
-                .any(|prefix| *prefix != b'-')
-        })
+        .filter(|output| output.status.success())?;
+
+    for entry in output.stdout.split(|byte| *byte == b'\0') {
+        let Some(rest) = entry.strip_prefix(b"160000 ") else {
+            continue;
+        };
+        let tab = rest.iter().position(|byte| *byte == b'\t')?;
+        #[cfg(unix)]
+        let relative = PathBuf::from(OsStr::from_bytes(&rest[tab + 1..]));
+        #[cfg(not(unix))]
+        let relative = PathBuf::from(std::str::from_utf8(&rest[tab + 1..]).ok()?);
+        match std::fs::symlink_metadata(path.join(relative).join(".git")) {
+            Ok(_) => return Some(true),
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(_) => return None,
+        }
+    }
+
+    Some(false)
 }
 
 /// Maps each local branch to its (ahead, behind) commit counts versus its
