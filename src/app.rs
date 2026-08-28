@@ -655,7 +655,7 @@ pub(crate) fn prompt_delete_stale_branches(
 pub(crate) struct LocalSelection {
     choice: removal::LocalChoice,
     count: usize,
-    only_picker_index: Option<usize>,
+    single_name: Option<String>,
 }
 
 impl LocalSelection {
@@ -663,8 +663,8 @@ impl LocalSelection {
         self.count
     }
 
-    pub(crate) fn only_picker_index(&self) -> Option<usize> {
-        self.only_picker_index
+    pub(crate) fn single_name(&self) -> Option<&str> {
+        self.single_name.as_deref()
     }
 
     pub(crate) fn into_choice(self) -> removal::LocalChoice {
@@ -682,18 +682,19 @@ pub(crate) fn select_removal_locals(
 ) -> AppResult<Option<LocalSelection>> {
     if let Some(name) = target {
         let named = assessment.named(name)?;
+        let single_name = assessment.target_name(named.id());
         if force {
             return Ok(Some(LocalSelection {
                 choice: removal::LocalChoice::forced(named.id()),
                 count: 1,
-                only_picker_index: None,
+                single_name,
             }));
         }
         if named.warnings().is_empty() {
             return Ok(Some(LocalSelection {
                 choice: removal::LocalChoice::named(named.id()),
                 count: 1,
-                only_picker_index: None,
+                single_name,
             }));
         }
         if !is_interactive() {
@@ -706,7 +707,7 @@ pub(crate) fn select_removal_locals(
             (confirm(named.question(), false)? == Confirmation::Accepted).then(|| LocalSelection {
                 choice: removal::LocalChoice::named(named.id()),
                 count: 1,
-                only_picker_index: None,
+                single_name,
             }),
         );
     }
@@ -725,12 +726,15 @@ pub(crate) fn select_removal_locals(
     if selected.is_empty() {
         return Ok(None);
     }
-    let count = selected.len();
-    let only_picker_index = (count == 1).then(|| selected[0]);
-    let ids = selected
+    let ids: Vec<_> = selected
         .into_iter()
         .map(|index| assessment.offers()[index].id())
         .collect();
+    let count = ids.len();
+    let single_name = match ids.as_slice() {
+        [id] => assessment.target_name(*id),
+        _ => None,
+    };
     Ok(Some(LocalSelection {
         choice: if force {
             removal::LocalChoice::forced_picked(ids)
@@ -738,7 +742,7 @@ pub(crate) fn select_removal_locals(
             removal::LocalChoice::picked(ids)
         },
         count,
-        only_picker_index,
+        single_name,
     }))
 }
 
