@@ -162,6 +162,8 @@ A named target like `wt rm .` has no row to carry a marker, so the same informat
 
 Nothing at risk means no prompt at all. `--force` (`-f`) skips it. In a pipe or CI run there's no way to show the warning or ask, so a risky removal refuses and exits non-zero unless you pass `--force`.
 
+After a removable worktree passes those guards, Perch moves its directory to a hidden sibling, removes the Git registration, and starts reclaiming the files in the background. The command returns once the original path and registration are gone, so disk space may come back shortly after `wt rm` exits. If background cleanup is interrupted, the next `wt` command retries the exact recorded trash path silently.
+
 Plain `perch <branch>` also knows about worktrees: if the picked branch is already checked out in another worktree, it hands off to that worktree rather than failing with git's "already checked out" error. `perch br <branch>` is the one that won't, since it promises a checkout here:
 
 ```
