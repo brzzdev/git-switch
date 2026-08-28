@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 
 use console::style;
 
-use super::{cleanup, display_path, hook, marker, picker, shell_quote};
+use super::{display_path, hook, marker, picker, reclamation, shell_quote};
 use crate::{AppResult, Error, git};
 
 mod reporting;
@@ -1282,9 +1282,29 @@ impl<'a> Target<'a> {
     }
 }
 
+/// The worktree half of a [`License`]: on what authority the delete may discard
+/// files. A shown dirty marker is deliberately distinct from explicit force:
+/// both cover dirty files, but only the latter may override an unrelated git
+/// guard such as an initialized submodule.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WorktreeLicense {
+    None,
+    Marked,
+    Forced,
+}
+
+impl WorktreeLicense {
+    fn permits_file_discard(self) -> bool {
+        !matches!(self, Self::None)
+    }
+
+    fn permits_guard_override(self) -> bool {
+        matches!(self, Self::Forced)
+    }
+}
+
 /// The branch half of a [`License`]: on what authority the delete may discard
-/// commits. The worktree half needs no such thing — only a warning ever licenses
-/// discarding files.
+/// commits.
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum BranchLicense {
     /// Nothing licenses it, so git's own guard decides.
@@ -1307,7 +1327,7 @@ enum BranchLicense {
 /// warned about and nothing was proven of is unrepresentable rather than merely
 /// against convention.
 struct License {
-    worktree: bool,
+    worktree: WorktreeLicense,
     branch: BranchLicense,
 }
 
@@ -1320,7 +1340,11 @@ impl License {
     /// refuses instead.
     pub(crate) fn shown(risk: Risk) -> Self {
         Self {
-            worktree: risk.dirty,
+            worktree: if risk.dirty {
+                WorktreeLicense::Marked
+            } else {
+                WorktreeLicense::None
+            },
             branch: if risk.unmerged.is_some() {
                 BranchLicense::Outright
             } else {
@@ -1343,7 +1367,7 @@ impl License {
     /// An explicit removal `--force`, blanket over both local steps.
     pub(crate) fn forced() -> Self {
         Self {
-            worktree: true,
+            worktree: WorktreeLicense::Forced,
             branch: BranchLicense::Outright,
         }
     }
@@ -1409,17 +1433,18 @@ trait Steps {
 
     fn worktree_state(&mut self, path: &Path) -> FreshWorktree;
 
-    fn stage_worktree(&mut self, path: &Path) -> AppResult<cleanup::Staged>;
+    fn stage_worktree(&mut self, path: &Path) -> AppResult<reclamation::Staged>;
 
-    fn restore_worktree(&mut self, staged: &cleanup::Staged) -> AppResult<()>;
+    fn restore_worktree(&mut self, staged: &reclamation::Staged) -> AppResult<()>;
 
-    fn start_cleanup(&mut self, staged: &cleanup::Staged) -> AppResult<()>;
+    fn start_reclamation(&mut self, staged: &reclamation::Staged) -> AppResult<()>;
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum FreshWorktree {
     Clean,
     Dirty,
+    Guarded,
     Missing,
     Unreadable,
 }
@@ -1474,6 +1499,10 @@ impl Steps for GitSteps {
 
     fn worktree_state(&mut self, path: &Path) -> FreshWorktree {
         if path.exists() {
+            match git::worktree_has_initialized_submodules(path) {
+                Some(true) | None => return FreshWorktree::Guarded,
+                Some(false) => {}
+            }
             match git::worktree_dirtiness(path) {
                 Some(true) => FreshWorktree::Dirty,
                 Some(false) => FreshWorktree::Clean,
@@ -1484,16 +1513,16 @@ impl Steps for GitSteps {
         }
     }
 
-    fn stage_worktree(&mut self, path: &Path) -> AppResult<cleanup::Staged> {
-        cleanup::stage(path)
+    fn stage_worktree(&mut self, path: &Path) -> AppResult<reclamation::Staged> {
+        reclamation::stage(path)
     }
 
-    fn restore_worktree(&mut self, staged: &cleanup::Staged) -> AppResult<()> {
-        cleanup::restore(staged)
+    fn restore_worktree(&mut self, staged: &reclamation::Staged) -> AppResult<()> {
+        reclamation::restore(staged)
     }
 
-    fn start_cleanup(&mut self, staged: &cleanup::Staged) -> AppResult<()> {
-        cleanup::start(staged)
+    fn start_reclamation(&mut self, staged: &reclamation::Staged) -> AppResult<()> {
+        reclamation::start(staged)
     }
 }
 
@@ -1517,7 +1546,9 @@ fn remove<'a>(
 
     if let Some(path) = target.path() {
         let worktree = match reclamation {
-            Reclamation::Synchronous => steps.remove_worktree(path, license.worktree)?,
+            Reclamation::Synchronous => {
+                steps.remove_worktree(path, license.worktree.permits_file_discard())?
+            }
             Reclamation::Background => remove_worktree_in_background(path, license, steps)?,
         };
         report.worktree = Some(worktree);
@@ -1563,13 +1594,16 @@ fn remove_worktree_in_background(
     license: &License,
     steps: &mut impl Steps,
 ) -> AppResult<git::WorktreeRemoveOutcome> {
-    let may_stage = match steps.worktree_state(path) {
-        FreshWorktree::Clean => true,
-        FreshWorktree::Dirty | FreshWorktree::Unreadable => license.worktree,
-        FreshWorktree::Missing => false,
+    let (may_stage, fallback_force) = match steps.worktree_state(path) {
+        FreshWorktree::Clean => (true, false),
+        FreshWorktree::Dirty | FreshWorktree::Unreadable => {
+            (license.worktree.permits_file_discard(), false)
+        }
+        FreshWorktree::Guarded => (false, license.worktree.permits_guard_override()),
+        FreshWorktree::Missing => (false, false),
     };
     if !may_stage {
-        return steps.remove_worktree(path, false);
+        return steps.remove_worktree(path, fallback_force);
     }
 
     let staged = steps.stage_worktree(path)?;
@@ -1578,7 +1612,7 @@ fn remove_worktree_in_background(
         Ok(git::WorktreeRemoveOutcome::Removed) => {
             // Deregistration is the Removal boundary. The durable staged record
             // lets a later `wt` retry if the detached worker cannot start.
-            let _ = steps.start_cleanup(&staged);
+            let _ = steps.start_reclamation(&staged);
             Ok(git::WorktreeRemoveOutcome::Removed)
         }
         Ok(failed @ git::WorktreeRemoveOutcome::Failed(_)) => {
@@ -2180,7 +2214,7 @@ mod tests {
         ReadWorktree(FreshWorktree),
         StageWorktree,
         RestoreWorktree,
-        StartCleanup,
+        StartReclamation,
     }
 
     /// Runs the steps from scripted outcomes and records what it was asked to
@@ -2189,7 +2223,7 @@ mod tests {
         worktree: git::WorktreeRemoveOutcome,
         worktree_error: bool,
         worktree_state: FreshWorktree,
-        cleanup_error: bool,
+        reclamation_error: bool,
         branch: git::BranchDeleteOutcome,
         branch_error: bool,
         /// What the refs read when [`remove`] asks. The proof tests move one out
@@ -2206,7 +2240,7 @@ mod tests {
                 worktree: git::WorktreeRemoveOutcome::Removed,
                 worktree_error: false,
                 worktree_state: FreshWorktree::Clean,
-                cleanup_error: false,
+                reclamation_error: false,
                 branch: git::BranchDeleteOutcome::Deleted,
                 branch_error: false,
                 refs: HashMap::from([
@@ -2289,9 +2323,9 @@ mod tests {
             self.worktree_state
         }
 
-        fn stage_worktree(&mut self, path: &Path) -> AppResult<cleanup::Staged> {
+        fn stage_worktree(&mut self, path: &Path) -> AppResult<reclamation::Staged> {
             self.calls.push(Call::StageWorktree);
-            Ok(cleanup::Staged {
+            Ok(reclamation::Staged {
                 config: PathBuf::from("/tmp/config"),
                 original: path.to_path_buf(),
                 trash: PathBuf::from("/tmp/.perch-trash.wt.1"),
@@ -2299,18 +2333,17 @@ mod tests {
             })
         }
 
-        fn restore_worktree(&mut self, _staged: &cleanup::Staged) -> AppResult<()> {
+        fn restore_worktree(&mut self, _staged: &reclamation::Staged) -> AppResult<()> {
             self.calls.push(Call::RestoreWorktree);
             Ok(())
         }
 
-        fn start_cleanup(&mut self, _staged: &cleanup::Staged) -> AppResult<()> {
-            self.calls.push(Call::StartCleanup);
-            if self.cleanup_error {
-                return Err(Error::Git {
-                    command: "worktree cleanup".to_string(),
-                    message: "could not start cleanup".to_string(),
-                });
+        fn start_reclamation(&mut self, _staged: &reclamation::Staged) -> AppResult<()> {
+            self.calls.push(Call::StartReclamation);
+            if self.reclamation_error {
+                return Err(Error::Reclamation(
+                    "could not start background reclamation".to_string(),
+                ));
             }
             Ok(())
         }
@@ -2518,7 +2551,7 @@ mod tests {
                 Call::ReadWorktree(FreshWorktree::Clean),
                 Call::StageWorktree,
                 Call::RemoveWorktree { force: false },
-                Call::StartCleanup,
+                Call::StartReclamation,
                 Call::DeleteBranch { force: false },
             ]
         );
@@ -2547,7 +2580,7 @@ mod tests {
                 Call::ReadWorktree(FreshWorktree::Dirty),
                 Call::StageWorktree,
                 Call::RemoveWorktree { force: false },
-                Call::StartCleanup,
+                Call::StartReclamation,
                 Call::DeleteBranch { force: false },
             ]
         );
@@ -2619,7 +2652,58 @@ mod tests {
                 Call::ReadWorktree(FreshWorktree::Unreadable),
                 Call::StageWorktree,
                 Call::RemoveWorktree { force: false },
-                Call::StartCleanup,
+                Call::StartReclamation,
+                Call::DeleteBranch { force: true },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_dirty_marker_does_not_override_an_initialized_submodule_guard() {
+        let mut steps = FakeSteps::new();
+        steps.worktree_state = FreshWorktree::Guarded;
+        steps.worktree = git::WorktreeRemoveOutcome::Failed("submodule".to_string());
+        let risk = Risk {
+            dirty: true,
+            unmerged: None,
+        };
+
+        let report = remove(
+            held(),
+            &License::shown(risk),
+            Reclamation::Background,
+            &mut steps,
+        )
+        .expect("git refusal is an outcome");
+
+        assert_eq!(
+            steps.calls,
+            vec![
+                Call::ReadWorktree(FreshWorktree::Guarded),
+                Call::RemoveWorktree { force: false },
+            ]
+        );
+        assert!(report.branch.is_none());
+    }
+
+    #[test]
+    fn explicit_force_overrides_an_initialized_submodule_guard() {
+        let mut steps = FakeSteps::new();
+        steps.worktree_state = FreshWorktree::Guarded;
+
+        remove(
+            held(),
+            &License::forced(),
+            Reclamation::Background,
+            &mut steps,
+        )
+        .expect("explicit force covers the guard");
+
+        assert_eq!(
+            steps.calls,
+            vec![
+                Call::ReadWorktree(FreshWorktree::Guarded),
+                Call::RemoveWorktree { force: true },
                 Call::DeleteBranch { force: true },
             ]
         );
@@ -2653,7 +2737,7 @@ mod tests {
     #[test]
     fn failed_detached_launch_does_not_hide_removal_or_skip_the_branch() {
         let mut steps = FakeSteps::new();
-        steps.cleanup_error = true;
+        steps.reclamation_error = true;
 
         let report = remove(
             held(),
@@ -2669,7 +2753,7 @@ mod tests {
                 Call::ReadWorktree(FreshWorktree::Clean),
                 Call::StageWorktree,
                 Call::RemoveWorktree { force: false },
-                Call::StartCleanup,
+                Call::StartReclamation,
                 Call::DeleteBranch { force: true },
             ]
         );

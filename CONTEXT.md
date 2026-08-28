@@ -48,6 +48,18 @@ _Avoid_: Modified, unclean
 The original checkout, which git will not let you remove. Every other worktree is *removable*.
 _Avoid_: Root, primary, parent
 
+**Trash**:
+The renamed remains of a worktree waiting for *Reclamation*. It no longer acts as a worktree, but its files survive until reclamation finishes.
+_Avoid_: Cleanup directory, temporary worktree
+
+**Staged**:
+The state of *Trash* while its *Removal* is still undecided. Staged trash must remain restorable and cannot be reclaimed.
+_Avoid_: Pending (reserved for a Removal awaiting its finish), ready
+
+**Ready**:
+The state of *Trash* after Git has confirmed the worktree registration is gone. Ready trash may be reclaimed.
+_Avoid_: Staged, removable
+
 ### Destruction
 
 **Risk**:
@@ -69,6 +81,10 @@ _Avoid_: Permission, approval, consent
 **Removal**:
 Destroying a local branch, an upstream branch, a worktree, or a local branch together with the worktree holding it. Every destructive path first *assesses* repository facts, then records the user's *choice*, and only then *finishes* the chosen work. Assessment makes no destructive change; any Git objects it creates are unreachable and have no user-visible effect. Abandoning a pending removal cancels it. A worktree goes before the local branch it holds; an upstream branch goes only after its selected local branch, and only while the upstream still stands at the tip the user was shown.
 _Avoid_: Deletion (reserved for branches), cleanup, teardown
+
+**Reclamation**:
+Recovering disk space from a removed worktree's *Trash*. It follows *Removal* and may finish after the command that removed the worktree returns.
+_Avoid_: Cleanup (reserved for the stale-branch prompt), Removal, deletion
 
 ### Targets
 

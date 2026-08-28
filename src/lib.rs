@@ -11,6 +11,9 @@ pub enum Error {
     #[error("git {command}: {message}")]
     Git { command: String, message: String },
 
+    #[error("worktree reclamation: {0}")]
+    Reclamation(String),
+
     #[error(transparent)]
     Io(#[from] std::io::Error),
 

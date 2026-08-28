@@ -7,11 +7,11 @@ use crate::grammar::{Invocation, Navigation, Verb};
 use crate::{AppResult, Error, git};
 
 pub mod br;
-mod cleanup;
 pub mod complete;
 pub(crate) mod hook;
 pub(crate) mod marker;
 pub(crate) mod picker;
+mod reclamation;
 pub(crate) mod removal;
 pub mod wt;
 
@@ -68,7 +68,7 @@ pub(crate) fn run_invocation(invocation: Invocation) -> AppResult<()> {
             | Invocation::ListWorktrees
             | Invocation::RemoveWorktrees(_)
     ) {
-        cleanup::retry();
+        reclamation::retry();
     }
 
     match invocation {
@@ -93,11 +93,11 @@ pub(crate) fn run_invocation(invocation: Invocation) -> AppResult<()> {
     }
 }
 
-/// Run the private detached cleanup mode when requested by a child process.
+/// Run the private detached reclamation mode when requested by a child process.
 /// `None` means this is an ordinary user invocation.
 #[must_use]
-pub fn run_internal_cleanup() -> Option<AppResult<()>> {
-    cleanup::run_worker()
+pub fn run_internal_reclamation() -> Option<AppResult<()>> {
+    reclamation::run_worker()
 }
 
 /// `perch [<branch>]` — take me to the branch, wherever it lives.

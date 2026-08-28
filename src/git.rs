@@ -721,6 +721,25 @@ pub fn worktree_dirtiness(path: &Path) -> Option<bool> {
         .map(|output| !output.stdout.is_empty())
 }
 
+/// Whether the worktree contains an initialized submodule. Git refuses to
+/// remove such a worktree even when its status is clean, so a destructive fast
+/// path must keep that guard in charge. `None` means Git could not inspect it.
+#[must_use]
+pub fn worktree_has_initialized_submodules(path: &Path) -> Option<bool> {
+    git_cmd(Some(path))
+        .args(["submodule", "status", "--recursive"])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| {
+            output
+                .stdout
+                .split(|byte| *byte == b'\n')
+                .filter_map(|line| line.first())
+                .any(|prefix| *prefix != b'-')
+        })
+}
+
 /// Maps each local branch to its (ahead, behind) commit counts versus its
 /// upstream. Built from a single `for-each-ref` over the shared `refs/heads`,
 /// so it costs one git call regardless of how many worktrees exist. Branches

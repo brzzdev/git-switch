@@ -10,10 +10,10 @@ use std::os::unix::process::CommandExt;
 
 use crate::{AppResult, Error, git};
 
-const CONFIG_KEY: &str = "perch.cleanup.worktree";
-const LOCK_FILE: &str = "perch-cleanup.lock";
+const CONFIG_KEY: &str = "perch.reclamation.worktree";
+const LOCK_FILE: &str = "perch-reclamation.lock";
 const TRASH_PREFIX: &str = ".perch-trash.";
-const WORKER_ENV: &str = "PERCH_INTERNAL_CLEANUP";
+const WORKER_ENV: &str = "PERCH_INTERNAL_RECLAMATION";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum State {
@@ -114,7 +114,7 @@ pub(super) fn stage(original: &Path) -> AppResult<Staged> {
     let record = Record::staged(original, &trash);
     record_config(&config, &record)?;
     fs::rename(original, &trash)
-        .map_err(|error| cleanup_error("move worktree", original, &error))?;
+        .map_err(|error| reclamation_error("move worktree", original, &error))?;
     Ok(Staged {
         config,
         original: original.to_path_buf(),
@@ -126,7 +126,7 @@ pub(super) fn stage(original: &Path) -> AppResult<Staged> {
 /// Put a staged worktree back after Git refused to remove its registration.
 pub(super) fn restore(staged: &Staged) -> AppResult<()> {
     fs::rename(&staged.trash, &staged.original)
-        .map_err(|error| cleanup_error("restore worktree", &staged.trash, &error))?;
+        .map_err(|error| reclamation_error("restore worktree", &staged.trash, &error))?;
     let _ = forget_config(
         &staged.config,
         &Record::staged(&staged.original, &staged.trash),
@@ -143,16 +143,14 @@ pub(super) fn start(staged: &Staged) -> AppResult<()> {
     record_config(&staged.config, &ready_record)?;
     let _ = forget_config(&staged.config, &staged_record);
     spawn_worker(&ready_record)
-        .map_err(|error| cleanup_error("start background cleanup", &staged.trash, &error))
+        .map_err(|error| reclamation_error("start background reclamation", &staged.trash, &error))
 }
 
-/// Run the private cleanup worker requested through the process environment.
+/// Run the private reclamation worker requested through the process environment.
 pub(super) fn run_worker() -> Option<AppResult<()>> {
     let value = std::env::var(WORKER_ENV).ok()?;
-    let record = Record::decode(&value).ok_or_else(|| Error::Git {
-        command: "worktree cleanup".to_string(),
-        message: "invalid background cleanup record".to_string(),
-    });
+    let record = Record::decode(&value)
+        .ok_or_else(|| Error::Reclamation("invalid background record".to_string()));
     Some(record.and_then(|record| reclaim(&record)))
 }
 
@@ -232,9 +230,8 @@ fn repository_config() -> AppResult<PathBuf> {
 }
 
 fn repository_lock(config: &Path) -> AppResult<File> {
-    let common_dir = config.parent().ok_or_else(|| Error::Git {
-        command: "worktree cleanup".to_string(),
-        message: format!("{} has no parent directory", config.display()),
+    let common_dir = config.parent().ok_or_else(|| {
+        Error::Reclamation(format!("{} has no parent directory", config.display()))
     })?;
     let file = OpenOptions::new()
         .create(true)
@@ -305,9 +302,8 @@ fn forget_config(config: &Path, record: &Record) -> AppResult<()> {
 }
 
 fn unused_trash_path(original: &Path) -> AppResult<PathBuf> {
-    let parent = original.parent().ok_or_else(|| Error::Git {
-        command: "worktree cleanup".to_string(),
-        message: format!("{} has no parent directory", original.display()),
+    let parent = original.parent().ok_or_else(|| {
+        Error::Reclamation(format!("{} has no parent directory", original.display()))
     })?;
     let name = original
         .file_name()
@@ -325,13 +321,10 @@ fn unused_trash_path(original: &Path) -> AppResult<PathBuf> {
             return Ok(candidate);
         }
     }
-    Err(Error::Git {
-        command: "worktree cleanup".to_string(),
-        message: format!(
-            "could not choose a trash path beside {}",
-            original.display()
-        ),
-    })
+    Err(Error::Reclamation(format!(
+        "could not choose a trash path beside {}",
+        original.display()
+    )))
 }
 
 fn valid_record_paths(original: &Path, trash: &Path) -> bool {
@@ -348,7 +341,7 @@ fn spawn_worker(record: &Record) -> std::io::Result<()> {
     if !valid_record_paths(&record.original, &record.trash) {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
-            format!("refusing cleanup path {}", record.trash.display()),
+            format!("refusing reclamation path {}", record.trash.display()),
         ));
     }
     let value = record
@@ -393,20 +386,14 @@ fn decode_hex(encoded: &str) -> Option<Vec<u8>> {
 }
 
 fn non_utf8(path: &Path) -> Error {
-    Error::Git {
-        command: "worktree cleanup".to_string(),
-        message: format!("non-utf8 worktree path: {}", path.display()),
-    }
+    Error::Reclamation(format!("non-utf8 worktree path: {}", path.display()))
 }
 
-fn cleanup_error(action: &str, recovery: &Path, error: &std::io::Error) -> Error {
-    Error::Git {
-        command: "worktree cleanup".to_string(),
-        message: format!(
-            "could not {action}: {error}; files remain at {}",
-            recovery.display()
-        ),
-    }
+fn reclamation_error(action: &str, recovery: &Path, error: &std::io::Error) -> Error {
+    Error::Reclamation(format!(
+        "could not {action}: {error}; files remain at {}",
+        recovery.display()
+    ))
 }
 
 #[cfg(test)]
@@ -426,7 +413,7 @@ mod tests {
     }
 
     #[test]
-    fn cleanup_accepts_only_absolute_hidden_siblings() {
+    fn reclamation_accepts_only_absolute_hidden_siblings() {
         assert!(valid_record_paths(
             Path::new("/tmp/worktrees/repo/feature"),
             Path::new("/tmp/worktrees/repo/.perch-trash.feature.1")
@@ -443,5 +430,19 @@ mod tests {
             Path::new("/tmp/worktrees/repo/feature"),
             Path::new("/tmp/worktrees/repo/feature")
         ));
+    }
+
+    #[test]
+    fn filesystem_failures_are_reported_as_reclamation_errors() {
+        let error = reclamation_error(
+            "move worktree",
+            Path::new("/tmp/worktrees/repo/feature"),
+            &std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+        );
+
+        assert_eq!(
+            error.to_string(),
+            "worktree reclamation: could not move worktree: permission denied; files remain at /tmp/worktrees/repo/feature"
+        );
     }
 }

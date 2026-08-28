@@ -1,7 +1,7 @@
 use std::process;
 
 fn main() {
-    if let Some(result) = perch::app::run_internal_cleanup() {
+    if let Some(result) = perch::app::run_internal_reclamation() {
         if result.is_err() {
             process::exit(1);
         }

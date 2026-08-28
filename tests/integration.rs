@@ -87,7 +87,7 @@ fn perch(dir: &Path, branch: &str) -> Output {
     perch_args(dir, &[branch])
 }
 
-fn cleanup_record(state: &str, original: &Path, trash: &Path) -> String {
+fn reclamation_record(state: &str, original: &Path, trash: &Path) -> String {
     fn hex(path: &Path) -> String {
         const DIGITS: &[u8; 16] = b"0123456789abcdef";
         let bytes = path.to_str().unwrap().as_bytes();
@@ -2822,6 +2822,47 @@ fn wt_rm_refuses_dirty_worktree_non_interactively() {
     assert!(path.exists(), "worktree must survive: {}", path.display());
 }
 
+#[test]
+fn wt_rm_does_not_rename_past_gits_initialized_submodule_guard() {
+    let (_bare, parent, work) = setup_with_parent();
+    let submodule = TempDir::new().unwrap();
+    git(submodule.path(), &["init", "--initial-branch=main"]);
+    commit_in(submodule.path(), "tracked.txt", "initial submodule commit");
+    git(
+        &work,
+        &[
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            submodule.path().to_str().unwrap(),
+            "module",
+        ],
+    );
+    git(&work, &["commit", "-m", "add submodule"]);
+    let path = add_worktree(&work, &parent, "feature");
+    git(
+        &path,
+        &[
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "update",
+            "--init",
+        ],
+    );
+
+    let output = perch_args(&work, &["wt", "rm", "feature"]);
+
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+    assert!(
+        stderr_str(&output).contains("working trees containing submodules"),
+        "Git's submodule guard should speak for the refusal: {}",
+        stderr_str(&output)
+    );
+    assert!(path.exists(), "the guarded worktree must survive");
+}
+
 /// `--force` waives the confirmation, discarding uncommitted changes and the
 /// unmerged branch alike.
 #[test]
@@ -3002,6 +3043,19 @@ fn wt_rm_from_inside_doomed_worktree_hands_off_to_main() {
         Path::new(&printed).is_dir() && printed.ends_with("repo"),
         "stdout should be the main worktree path; got: {printed}"
     );
+    assert!(
+        poll_until(|| {
+            fs::read_dir(path.parent().unwrap()).is_ok_and(|entries| {
+                entries.filter_map(Result::ok).all(|entry| {
+                    !entry
+                        .file_name()
+                        .to_str()
+                        .is_some_and(|name| name.starts_with(".perch-trash."))
+                })
+            })
+        }),
+        "the worker inherited the surviving main-worktree cwd and reclaimed the trash"
+    );
 }
 
 #[test]
@@ -3112,9 +3166,9 @@ fn wt_rm_clears_missing_detached_worktree_by_dir_name() {
     );
 }
 
-struct CleanupGate(PathBuf);
+struct ReclamationGate(PathBuf);
 
-impl Drop for CleanupGate {
+impl Drop for ReclamationGate {
     fn drop(&mut self) {
         let _ = fs::write(&self.0, "go\n");
     }
@@ -3142,7 +3196,7 @@ fn wt_rm_returns_while_the_detached_unlink_is_still_blocked() {
 
     let started = parent.path().join("rm-started");
     let gate = parent.path().join("allow-rm");
-    let _gate_guard = CleanupGate(gate.clone());
+    let _gate_guard = ReclamationGate(gate.clone());
     let path_env = std::env::join_paths(std::iter::once(bin.clone()).chain(std::env::split_paths(
         &std::env::var_os("PATH").unwrap_or_default(),
     )))
@@ -3184,11 +3238,14 @@ fn wt_rm_returns_while_the_detached_unlink_is_still_blocked() {
         !branches.lines().any(|branch| branch == "feature"),
         "branch survived: {branches}"
     );
-    let record = stdout_str(&git(&work, &["config", "--get", "perch.cleanup.worktree"]));
+    let record = stdout_str(&git(
+        &work,
+        &["config", "--get", "perch.reclamation.worktree"],
+    ));
     let duplicate = perch_command(&work, &[])
-        .env("PERCH_INTERNAL_CLEANUP", record.trim())
+        .env("PERCH_INTERNAL_RECLAMATION", record.trim())
         .output()
-        .expect("failed to run duplicate cleanup worker");
+        .expect("failed to run duplicate reclamation worker");
     assert!(
         duplicate.status.success(),
         "stderr: {}",
@@ -3215,10 +3272,10 @@ fn the_next_wt_command_retries_an_exact_recorded_external_trash_path() {
     let original = manual_parent.join("manual");
     fs::create_dir(&trash).unwrap();
     fs::write(trash.join("leftover"), "content\n").unwrap();
-    let record = cleanup_record("ready", &original, &trash);
+    let record = reclamation_record("ready", &original, &trash);
     git(
         &work,
-        &["config", "--add", "perch.cleanup.worktree", &record],
+        &["config", "--add", "perch.reclamation.worktree", &record],
     );
 
     let output = perch_args(&work, &["wt", "ls"]);
@@ -3231,12 +3288,12 @@ fn the_next_wt_command_retries_an_exact_recorded_external_trash_path() {
     assert!(
         poll_until(|| {
             Command::new("git")
-                .args(["config", "--get-all", "perch.cleanup.worktree"])
+                .args(["config", "--get-all", "perch.reclamation.worktree"])
                 .current_dir(&work)
                 .output()
                 .is_ok_and(|output| output.status.code() == Some(1))
         }),
-        "successful cleanup should clear its durable record"
+        "successful reclamation should clear its durable record"
     );
 }
 
@@ -3249,10 +3306,10 @@ fn a_staged_record_deregisters_before_reclaiming_after_a_crash() {
         .unwrap()
         .join(".perch-trash.feature.crashed");
     fs::rename(&original, &trash).unwrap();
-    let record = cleanup_record("staged", &original, &trash);
+    let record = reclamation_record("staged", &original, &trash);
     git(
         &work,
-        &["config", "--add", "perch.cleanup.worktree", &record],
+        &["config", "--add", "perch.reclamation.worktree", &record],
     );
 
     let output = perch_args(&work, &["wt", "ls"]);
@@ -3278,10 +3335,10 @@ fn a_staged_record_never_reclaims_an_existing_original() {
     let trash = parent.path().join(".perch-trash.manual-worktree.crashed");
     fs::create_dir(&original).unwrap();
     fs::write(original.join("keep"), "content\n").unwrap();
-    let record = cleanup_record("staged", &original, &trash);
+    let record = reclamation_record("staged", &original, &trash);
     git(
         &work,
-        &["config", "--add", "perch.cleanup.worktree", &record],
+        &["config", "--add", "perch.reclamation.worktree", &record],
     );
 
     let output = perch_args(&work, &["wt", "ls"]);
@@ -3291,7 +3348,7 @@ fn a_staged_record_never_reclaims_an_existing_original() {
     assert!(
         poll_until(|| {
             Command::new("git")
-                .args(["config", "--get-all", "perch.cleanup.worktree"])
+                .args(["config", "--get-all", "perch.reclamation.worktree"])
                 .current_dir(&work)
                 .output()
                 .is_ok_and(|output| output.status.code() == Some(1))
