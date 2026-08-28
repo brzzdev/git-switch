@@ -7,6 +7,7 @@ use crate::grammar::{Invocation, Navigation, Verb};
 use crate::{AppResult, Error, git};
 
 pub mod br;
+mod cleanup;
 pub mod complete;
 pub(crate) mod hook;
 pub(crate) mod marker;

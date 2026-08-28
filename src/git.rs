@@ -705,10 +705,20 @@ pub fn worktree_list_in(dir: Option<&Path>) -> AppResult<Vec<Worktree>> {
 /// untracked, non-ignored files). A missing/unreadable path reports clean.
 #[must_use]
 pub fn worktree_dirty(path: &Path) -> bool {
+    worktree_dirtiness(path).unwrap_or(false)
+}
+
+/// A fresh dirtiness reading, or `None` when Git could not inspect the
+/// worktree. Callers taking a destructive fast path must distinguish that from
+/// clean so Git's own guard remains in charge of unreadable state.
+#[must_use]
+pub fn worktree_dirtiness(path: &Path) -> Option<bool> {
     git_cmd(Some(path))
         .args(["status", "--porcelain"])
         .output()
-        .is_ok_and(|o| o.status.success() && !o.stdout.is_empty())
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| !output.stdout.is_empty())
 }
 
 /// Maps each local branch to its (ahead, behind) commit counts versus its
