@@ -27,7 +27,7 @@ A branch whose whole diff against the anchor is already in the anchor, under som
 _Avoid_: Squashed, duplicate, redundant
 
 **Kept**:
-Held back from the *Stale* cleanup prompt, via `perch.keep` config or by being the remote's default branch. Keeping is about the sweep, not the branch: `br rm` and `wt rm` reach a kept branch like any other, and a kept branch is never drawn differently in a picker.
+Held back from the *Stale* cleanup prompt, via `perch.keep` config or by being the remote's default branch. Keeping is about the sweep, not the branch: `br rm` and `wt rm` reach a kept branch like any other, and a kept branch is never drawn differently in a picker. See [ADR 0011](./docs/adr/0011-keeping-is-about-the-sweep.md).
 _Avoid_: Protected, ignored, excluded
 
 ### Worktrees

@@ -158,8 +158,8 @@ pub(crate) struct Pick {
     /// inert.
     pub annotation: String,
     /// Greyed and unselectable: this verb has nothing to do with the row. The
-    /// row stays on screen regardless, since hiding it only turns "why isn't
-    /// `main` in this list?" into a support question.
+    /// row stays on screen regardless, since hiding a branch another worktree
+    /// holds only turns "where did that branch go?" into a support question.
     pub disabled: bool,
 }
 
@@ -207,20 +207,19 @@ fn row(catalogue: &Catalogue, name: &str, verb: Verb) -> Pick {
 /// where it lives. Headings with nothing under them are dropped, so a repo whose
 /// branches are all checked out shows no *Remote*.
 pub(crate) fn sections(catalogue: &Catalogue, verb: Verb) -> Vec<Section> {
-    let rows = |names: &[String]| -> Vec<Pick> {
-        names
-            .iter()
-            .map(|name| row(catalogue, name, verb))
-            .collect()
-    };
-
     [
-        ("Local", rows(&catalogue.local)),
-        ("Remote", rows(&catalogue.remote_only)),
+        ("Local", &catalogue.local),
+        ("Remote", &catalogue.remote_only),
     ]
     .into_iter()
-    .filter(|(_, items)| !items.is_empty())
-    .map(|(heading, items)| Section { heading, items })
+    .filter(|(_, names)| !names.is_empty())
+    .map(|(heading, names)| Section {
+        heading,
+        items: names
+            .iter()
+            .map(|name| row(catalogue, name, verb))
+            .collect(),
+    })
     .collect()
 }
 
@@ -1386,19 +1385,6 @@ mod tests {
         };
         assert_eq!(listing(&catalogue, Verb::Go), ["Local", "* main"]);
         assert_eq!(listing(&catalogue, Verb::Here), ["Local", "* main"]);
-    }
-
-    /// An empty heading is dropped rather than drawn over nothing.
-    #[test]
-    fn a_heading_with_no_rows_is_not_drawn() {
-        let catalogue = Catalogue {
-            local: names(&["main", "spike"]),
-            ..catalogue()
-        };
-        assert_eq!(
-            listing(&catalogue, Verb::Go),
-            ["Local", "  main", "  spike"],
-        );
     }
 
     /// A heading with nothing under it is not a heading.

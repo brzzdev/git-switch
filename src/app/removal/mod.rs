@@ -259,9 +259,17 @@ struct AssessedLocal {
     target: OwnedTarget,
     risk: Risk,
     proof: Option<git::Proof>,
+    /// Why naming this target is an error, where it is one. It is also the
+    /// whole of why a picker row is inert: the picker offers what a name would
+    /// reach, so the two answers cannot differ.
     named_error: Option<NamedError>,
-    picker_eligible: bool,
     contains_cwd: bool,
+}
+
+impl AssessedLocal {
+    fn disabled(&self) -> bool {
+        self.named_error.is_some()
+    }
 }
 
 enum NamedError {
@@ -386,7 +394,7 @@ impl Assessment {
             let Some(local) = self.locals.get(id.0) else {
                 continue;
             };
-            if source == ChoiceSource::Picker && !local.picker_eligible {
+            if source == ChoiceSource::Picker && local.disabled() {
                 continue;
             }
             let license = match authority {
@@ -980,7 +988,6 @@ fn build_stale_assessment(
             risk,
             proof,
             named_error: None,
-            picker_eligible: true,
             contains_cwd: false,
         });
     }
@@ -1059,7 +1066,6 @@ fn assess_branches(request: BranchRequest) -> AppResult<Assessment> {
             risk,
             proof: None,
             named_error: holder.map(NamedError::Held),
-            picker_eligible: !disabled,
             contains_cwd: false,
         });
     }
@@ -1072,15 +1078,14 @@ fn assess_branches(request: BranchRequest) -> AppResult<Assessment> {
             name: locals[index].target.offer_name(),
             label,
             selected: false,
-            disabled: locals[index].named_error.is_some(),
+            disabled: locals[index].disabled(),
         })
         .collect();
     let legend = risk_legend(
         locals
             .iter()
-            .zip(offers.iter())
-            .filter(|(_, offer)| !offer.disabled)
-            .map(|(local, _)| local.risk),
+            .filter(|local| !local.disabled())
+            .map(|local| local.risk),
     );
     Ok(Assessment {
         kind: RequestKind::Branches,
@@ -1216,7 +1221,6 @@ fn build_worktree_assessment(
             risk,
             proof: None,
             named_error: None,
-            picker_eligible: true,
             contains_cwd,
         });
     }
