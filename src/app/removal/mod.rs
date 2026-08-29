@@ -89,7 +89,6 @@ pub(crate) struct BranchRequest {
     branches: Vec<String>,
     worktrees: Vec<git::Worktree>,
     current: Option<String>,
-    remote: String,
     upstream: UpstreamInterest,
 }
 
@@ -98,14 +97,12 @@ impl BranchRequest {
         branches: Vec<String>,
         worktrees: Vec<git::Worktree>,
         current: Option<&str>,
-        remote: &str,
         upstream: UpstreamInterest,
     ) -> Self {
         Self {
             branches,
             worktrees,
             current: current.map(str::to_string),
-            remote: remote.to_string(),
             upstream,
         }
     }
@@ -262,9 +259,17 @@ struct AssessedLocal {
     target: OwnedTarget,
     risk: Risk,
     proof: Option<git::Proof>,
+    /// Why naming this target is an error, where it is one. It is also the
+    /// whole of why a picker row is inert: the picker offers what a name would
+    /// reach, so the two answers cannot differ.
     named_error: Option<NamedError>,
-    picker_eligible: bool,
     contains_cwd: bool,
+}
+
+impl AssessedLocal {
+    fn disabled(&self) -> bool {
+        self.named_error.is_some()
+    }
 }
 
 enum NamedError {
@@ -389,7 +394,7 @@ impl Assessment {
             let Some(local) = self.locals.get(id.0) else {
                 continue;
             };
-            if source == ChoiceSource::Picker && !local.picker_eligible {
+            if source == ChoiceSource::Picker && local.disabled() {
                 continue;
             }
             let license = match authority {
@@ -983,7 +988,6 @@ fn build_stale_assessment(
             risk,
             proof,
             named_error: None,
-            picker_eligible: true,
             contains_cwd: false,
         });
     }
@@ -1022,20 +1026,21 @@ fn assess_branches(request: BranchRequest) -> AppResult<Assessment> {
         })?
         .path
         .clone();
-    let kept: HashSet<String> = git::pinned_branches(&request.remote).into_iter().collect();
     let unmerged = git::unmerged_branches(Some(&main)).unwrap_or_default();
     let mut raw = Vec::new();
     let mut locals = Vec::new();
     for name in request.branches {
-        let holder = git::worktree_for_branch(&request.worktrees, &name);
-        let is_kept = kept.contains(&name);
+        // Being held is the whole of why a branch row is inert, so the row is
+        // drawn from the error naming it would raise rather than from a second
+        // reading of the same fact.
+        let named_error = git::worktree_for_branch(&request.worktrees, &name).map(NamedError::Held);
         let risk = Risk {
             dirty: false,
             unmerged: unmerged.get(&name).copied(),
         };
         let annotation = if request.current.as_deref() == Some(&name) {
             "current".to_string()
-        } else if let Some(holder) = &holder {
+        } else if let Some(NamedError::Held(holder)) = &named_error {
             let path = display_path(&holder.path);
             if holder.is_main {
                 format!("main worktree at {path}")
@@ -1044,13 +1049,10 @@ fn assess_branches(request: BranchRequest) -> AppResult<Assessment> {
             } else {
                 format!("{path}; use wt rm")
             }
-        } else if is_kept {
-            "kept".to_string()
         } else {
             String::new()
         };
-        let disabled = holder.is_some() || is_kept;
-        let markers = if disabled {
+        let markers = if named_error.is_some() {
             String::new()
         } else {
             risk.markers()
@@ -1065,8 +1067,7 @@ fn assess_branches(request: BranchRequest) -> AppResult<Assessment> {
             target: OwnedTarget::Branch { name },
             risk,
             proof: None,
-            named_error: holder.map(NamedError::Held),
-            picker_eligible: !disabled,
+            named_error,
             contains_cwd: false,
         });
     }
@@ -1079,16 +1080,14 @@ fn assess_branches(request: BranchRequest) -> AppResult<Assessment> {
             name: locals[index].target.offer_name(),
             label,
             selected: false,
-            disabled: locals[index].named_error.is_some()
-                || kept.contains(locals[index].target.name().unwrap_or_default()),
+            disabled: locals[index].disabled(),
         })
         .collect();
     let legend = risk_legend(
         locals
             .iter()
-            .zip(offers.iter())
-            .filter(|(_, offer)| !offer.disabled)
-            .map(|(local, _)| local.risk),
+            .filter(|local| !local.disabled())
+            .map(|local| local.risk),
     );
     Ok(Assessment {
         kind: RequestKind::Branches,
@@ -1224,7 +1223,6 @@ fn build_worktree_assessment(
             risk,
             proof: None,
             named_error: None,
-            picker_eligible: true,
             contains_cwd,
         });
     }
@@ -2432,7 +2430,6 @@ mod tests {
             branches,
             worktrees,
             Some("main"),
-            "origin",
             UpstreamInterest::None,
         )))
         .expect("assessment");

@@ -596,27 +596,6 @@ pub fn stale_branches(remote: &str) -> AppResult<Vec<StaleBranch>> {
     Ok(branches)
 }
 
-/// Branches treated as "pinned" by the picker: the remote's default branch
-/// first, then `perch.keep` entries in config order, deduplicated.
-#[must_use]
-pub fn pinned_branches(remote: &str) -> Vec<String> {
-    let mut seen: HashSet<String> = HashSet::new();
-    let mut out: Vec<String> = Vec::new();
-    if let Some(default) = default_branch(remote) {
-        seen.insert(default.clone());
-        out.push(default);
-    }
-    if let Ok(output) = run(&["config", "--get-all", "perch.keep"]) {
-        for line in output.lines() {
-            let name = line.trim();
-            if !name.is_empty() && seen.insert(name.to_string()) {
-                out.push(name.to_string());
-            }
-        }
-    }
-    out
-}
-
 /// The shell command configured as `perch.hook.<event>`, or `None` when it's
 /// unset or blank. Read straight from git config like `perch.keep`, so a global
 /// hook and a per-repo override layer the way git says they do — `--get` yields
@@ -646,6 +625,10 @@ pub(crate) fn default_branch(remote: &str) -> Option<String> {
     None
 }
 
+/// Branches held back from the cleanup sweep: `perch.keep` entries, plus the
+/// remote's default branch. Private, and read by [`stale_branches`] alone —
+/// keeping is about the sweep and nothing else, so nothing that draws a picker
+/// or removes a named branch may consult it. See ADR 0011.
 fn kept_branches(remote: &str) -> HashSet<String> {
     let mut kept: HashSet<String> = run(&["config", "--get-all", "perch.keep"])
         .map(|o| o.lines().map(String::from).collect())

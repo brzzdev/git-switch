@@ -580,6 +580,36 @@ fn local_only_branch_stale_after_main_advances() {
     );
 }
 
+/// Keeping a branch is about the sweep and nothing else: a branch `perch.keep`
+/// names is stale by every rule and still never offered.
+#[test]
+fn a_kept_branch_is_never_offered_by_the_sweep() {
+    let (_bare, work) = setup();
+
+    git(work.path(), &["checkout", "-b", "develop"]);
+    fs::write(work.path().join("dev.txt"), "work\n").unwrap();
+    git(work.path(), &["add", "dev.txt"]);
+    git(work.path(), &["commit", "-m", "dev work"]);
+    git(work.path(), &["checkout", "main"]);
+    git(work.path(), &["merge", "develop"]);
+    push_upstream_change(work.path(), "advance.txt", "new\n", "advance main");
+    git(work.path(), &["pull", "origin", "main"]);
+
+    let _cwd = cwd_at(work.path());
+    assert!(
+        stale_names("origin").contains(&"develop".to_string()),
+        "the branch must be stale before keeping it can mean anything",
+    );
+
+    git(work.path(), &["config", "--add", "perch.keep", "develop"]);
+
+    let stale = stale_names("origin");
+    assert!(
+        !stale.contains(&"develop".to_string()),
+        "a kept branch must not be offered, got: {stale:?}"
+    );
+}
+
 /// A branch that published its own counterpart hands the question over to the
 /// remote: once both are pushed, a branch whose commits main fast-forwarded
 /// over is byte-identical to one pushed without any commits at all. Deleting
@@ -1560,57 +1590,6 @@ fn rebase_aborts_on_conflict_and_leaves_clean_tree() {
 }
 
 #[test]
-fn pinned_branches_includes_default_first() {
-    let (_bare, work) = setup();
-
-    git(work.path(), &["remote", "set-head", "origin", "main"]);
-
-    let _cwd = cwd_at(work.path());
-    let pinned = perch::git::pinned_branches("origin");
-
-    assert_eq!(
-        pinned.first().map(String::as_str),
-        Some("main"),
-        "expected main first, got: {pinned:?}"
-    );
-}
-
-#[test]
-fn pinned_branches_appends_keep_config_in_order_and_dedups() {
-    let (_bare, work) = setup();
-
-    git(work.path(), &["remote", "set-head", "origin", "main"]);
-    // Repo-local keep entries: deliberately duplicate "main" (the default)
-    // and reorder release branches to verify config order is preserved.
-    git(
-        work.path(),
-        &["config", "--add", "perch.keep", "release/v2"],
-    );
-    git(work.path(), &["config", "--add", "perch.keep", "main"]);
-    git(
-        work.path(),
-        &["config", "--add", "perch.keep", "release/v1"],
-    );
-
-    let _cwd = cwd_at(work.path());
-    let pinned = perch::git::pinned_branches("origin");
-
-    let position = |name: &str| pinned.iter().position(|p| p == name);
-    let main = position("main").expect("main should be present");
-    let v2 = position("release/v2").expect("release/v2 should be present");
-    let v1 = position("release/v1").expect("release/v1 should be present");
-
-    assert_eq!(main, 0, "default branch must be first, got: {pinned:?}");
-    assert!(v2 > main, "release/v2 after main, got: {pinned:?}");
-    assert!(v1 > v2, "release/v1 after release/v2, got: {pinned:?}");
-    assert_eq!(
-        pinned.iter().filter(|p| *p == "main").count(),
-        1,
-        "main should be deduped, got: {pinned:?}"
-    );
-}
-
-#[test]
 fn detached_head_can_switch_to_branch() {
     let (_bare, work) = setup();
 
@@ -2304,8 +2283,6 @@ fn br_rm_picker_shows_but_does_not_select_disabled_branches() {
     let (_bare, parent, work) = setup_with_parent();
     git(&work, &["branch", "free"]);
     git(&work, &["branch", "held"]);
-    git(&work, &["branch", "kept"]);
-    git(&work, &["config", "perch.keep", "kept"]);
     git(&work, &["switch", "-c", "current"]);
     let held_path = parent.path().join("held-worktree");
     git(
@@ -2323,30 +2300,45 @@ fn br_rm_picker_shows_but_does_not_select_disabled_branches() {
     .into_owned();
 
     assert!(!local_branch_exists(&work, "free"));
-    for branch in ["current", "held", "kept", "main"] {
+    for branch in ["current", "held"] {
         assert!(
             local_branch_exists(&work, branch),
             "disabled branch {branch} should survive; output: {output}"
         );
     }
     assert!(output.contains("current"), "current row missing: {output}");
-    assert!(output.contains("kept"), "kept row missing: {output}");
     assert!(
         output.contains("use wt rm"),
         "held row should point to wt rm: {output}"
     );
 }
 
+/// Keeping is about the sweep, so `br rm`'s picker draws a kept branch and the
+/// local default branch as ordinary rows — select-all reaches both.
 #[test]
-fn br_rm_named_kept_branch_is_removable_when_unheld() {
+fn br_rm_picker_offers_a_kept_branch_and_the_default_branch() {
     let (_bare, work) = setup();
     git(work.path(), &["branch", "kept"]);
-    git(work.path(), &["config", "perch.keep", "kept"]);
+    git(work.path(), &["config", "--add", "perch.keep", "kept"]);
+    git(work.path(), &["switch", "-c", "topic"]);
 
-    let output = perch_args(work.path(), &["br", "rm", "kept"]);
+    let output = String::from_utf8_lossy(&drive_multi_select_prompt(
+        work.path(),
+        &["br", "rm", "--force"],
+        "kept",
+        false,
+        || {},
+    ))
+    .into_owned();
 
-    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
-    assert!(!local_branch_exists(work.path(), "kept"));
+    assert!(
+        !local_branch_exists(work.path(), "kept"),
+        "a kept branch is an ordinary picker row; output: {output}"
+    );
+    assert!(
+        !local_branch_exists(work.path(), "main"),
+        "the local default branch is an ordinary picker row; output: {output}"
+    );
 }
 
 #[test]

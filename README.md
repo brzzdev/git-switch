@@ -88,9 +88,8 @@ With no branch named, all three verbs open the **same list** — every branch, w
 
 ```
 ? Switch to (type to filter):
-Pinned
-  > * main
 Local
+  > * main
       feature  ~/dev/worktrees/repo/feature
       spike
 ```
@@ -112,7 +111,7 @@ perch br rm feature --upstream # offer origin/feature too, when it is the config
 perch br rm feature --upstream --force
 ```
 
-The picker lists every local branch. The branch you're on, branches held by another worktree, the remote's default branch, and branches named by `perch.keep` stay visible but cannot be selected. A precisely named default or kept branch can still be removed when no worktree holds it. A branch held by a linked worktree points to `wt rm`, which owns removing the worktree along with its branch; the main worktree instead asks you to check out another branch first.
+The picker lists every local branch. The branch you're on and branches held by another worktree stay visible but cannot be selected. A branch held by a linked worktree points to `wt rm`, which owns removing the worktree along with its branch; the main worktree instead asks you to check out another branch first.
 
 Local rows use the same `↑N` marker and main-worktree merge judgement as `wt rm`. A named unmerged branch asks before using `git branch -D`; a non-interactive run needs `--force`. `br rm` does not apply the stronger squash/rebase equivalence proof used by stale cleanup.
 
@@ -274,7 +273,7 @@ A branch that landed by squash or rebase merge draws no `↑`, and is deleted wi
 
 ## Configuration
 
-Protect branches from the "delete merged branches" prompt by adding them to your Git config:
+Hold branches back from the "delete merged branches" prompt by adding them to your Git config:
 
 ```sh
 git config --add perch.keep develop

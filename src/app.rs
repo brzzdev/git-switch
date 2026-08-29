@@ -628,7 +628,6 @@ pub(crate) fn build_catalogue(
             .filter_map(|w| w.branch.clone().map(|b| (b, display_path(&w.path))))
             .collect(),
         local,
-        pinned: git::pinned_branches(remote),
         remote_only,
     })
 }

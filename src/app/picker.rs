@@ -8,7 +8,7 @@
 //! keep separate models and message types: they share a shape but not a state
 //! space, and a union would be half-dead in either.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use console::{Key, Term, measure_text_width, style};
 
@@ -133,10 +133,10 @@ mod raw {
     }
 }
 
-/// Everything the git side found: which branches exist where, which are *Kept*,
-/// and which worktree *Held*s each. Only facts — grouping them under headings
-/// and deciding what each row says is [`sections`], which is pure and needs no
-/// repo on disk.
+/// Everything the git side found: which branches exist where, and which
+/// worktree *Held*s each. Only facts — grouping them under headings and
+/// deciding what each row says is [`sections`], which is pure and needs no repo
+/// on disk.
 pub(crate) struct Catalogue {
     /// The branch the worktree we're standing in has checked out.
     pub current: Option<String>,
@@ -144,8 +144,6 @@ pub(crate) struct Catalogue {
     pub held: HashMap<String, String>,
     /// Checked out locally, in the order git listed them.
     pub local: Vec<String>,
-    /// *Kept* out of the cleanup prompt, listed whether or not they exist yet.
-    pub pinned: Vec<String>,
     /// On the remote with no local counterpart.
     pub remote_only: Vec<String>,
 }
@@ -160,32 +158,14 @@ pub(crate) struct Pick {
     /// inert.
     pub annotation: String,
     /// Greyed and unselectable: this verb has nothing to do with the row. The
-    /// row stays on screen regardless, since hiding it only turns "why isn't
-    /// `main` in this list?" into a support question.
+    /// row stays on screen regardless, since hiding a branch another worktree
+    /// holds only turns "where did that branch go?" into a support question.
     pub disabled: bool,
 }
 
 pub(crate) struct Section {
     pub heading: &'static str,
     pub items: Vec<Pick>,
-}
-
-/// Where a branch can be found, as only the *Pinned* section has to say it. A
-/// kept branch is listed whether or not it is here yet, so its row is the one
-/// that must answer the question; under *Local* and *Remote* the heading
-/// already has.
-///
-/// Deliberately not *Missing*: the glossary reserves that for a worktree whose
-/// directory is gone, and `wt rm` already draws the word for one. A branch that
-/// exists nowhere is a different fact, so it gets a different word.
-#[derive(Clone, Copy)]
-enum Availability {
-    /// Neither here nor on the remote. No verb can reach it.
-    Absent,
-    /// Nothing to add — the verb can just act on it.
-    Ready,
-    /// Only on the remote. Fetching it would do.
-    RemoteOnly,
 }
 
 impl Catalogue {
@@ -206,16 +186,14 @@ impl Catalogue {
     }
 }
 
-fn row(catalogue: &Catalogue, name: &str, availability: Availability, verb: Verb) -> Pick {
-    let (annotation, disabled) = match (availability, catalogue.elsewhere(name)) {
-        (Availability::Absent, _) => ("absent".to_string(), true),
+fn row(catalogue: &Catalogue, name: &str, verb: Verb) -> Pick {
+    let (annotation, disabled) = match catalogue.elsewhere(name) {
         // `br` promises a checkout *here*, and git will not check out a branch a
         // second worktree already holds. So this is the one row a verb differs
         // over — everywhere else git leaves exactly one move legal.
-        (_, Some(path)) if verb == Verb::Here => (format!("in {path} — use `perch`"), true),
-        (_, Some(path)) => (path.to_string(), false),
-        (Availability::RemoteOnly, None) => ("☁".to_string(), false),
-        (Availability::Ready, None) => (String::new(), false),
+        Some(path) if verb == Verb::Here => (format!("in {path} — use `perch`"), true),
+        Some(path) => (path.to_string(), false),
+        None => (String::new(), false),
     };
     Pick {
         name: name.to_string(),
@@ -225,50 +203,23 @@ fn row(catalogue: &Catalogue, name: &str, availability: Availability, verb: Verb
     }
 }
 
-/// The whole list, for any verb: every branch once, under the heading it
-/// belongs to. Headings with nothing under them are dropped, so a repo with
-/// nothing kept shows no *Pinned*.
+/// The whole list, for any verb: every branch once, under the heading saying
+/// where it lives. Headings with nothing under them are dropped, so a repo whose
+/// branches are all checked out shows no *Remote*.
 pub(crate) fn sections(catalogue: &Catalogue, verb: Verb) -> Vec<Section> {
-    let local: HashSet<&str> = catalogue.local.iter().map(String::as_str).collect();
-    let remote: HashSet<&str> = catalogue.remote_only.iter().map(String::as_str).collect();
-    let pinned: HashSet<&str> = catalogue.pinned.iter().map(String::as_str).collect();
-
-    // A kept branch is drawn under *Pinned* and never again below, so the two
-    // lower sections skip anything already up there.
-    let unpinned = |names: &[String], availability| -> Vec<Pick> {
-        names
-            .iter()
-            .filter(|name| !pinned.contains(name.as_str()))
-            .map(|name| row(catalogue, name, availability, verb))
-            .collect()
-    };
-
-    let pinned_rows = catalogue
-        .pinned
-        .iter()
-        .map(|name| {
-            let availability = if local.contains(name.as_str()) {
-                Availability::Ready
-            } else if remote.contains(name.as_str()) {
-                Availability::RemoteOnly
-            } else {
-                Availability::Absent
-            };
-            row(catalogue, name, availability, verb)
-        })
-        .collect();
-
     [
-        ("Pinned", pinned_rows),
-        ("Local", unpinned(&catalogue.local, Availability::Ready)),
-        (
-            "Remote",
-            unpinned(&catalogue.remote_only, Availability::Ready),
-        ),
+        ("Local", &catalogue.local),
+        ("Remote", &catalogue.remote_only),
     ]
     .into_iter()
-    .filter(|(_, items)| !items.is_empty())
-    .map(|(heading, items)| Section { heading, items })
+    .filter(|(_, names)| !names.is_empty())
+    .map(|(heading, names)| Section {
+        heading,
+        items: names
+            .iter()
+            .map(|name| row(catalogue, name, verb))
+            .collect(),
+    })
     .collect()
 }
 
@@ -1034,7 +985,6 @@ mod tests {
             current: None,
             held: HashMap::new(),
             local: Vec::new(),
-            pinned: Vec::new(),
             remote_only: Vec::new(),
         }
     }
@@ -1287,11 +1237,11 @@ mod tests {
 
     #[test]
     fn cursor_navigation_skips_headings() {
-        let sections = vec![section("Pinned", &["p1"]), section("Local", &["l1", "l2"])];
-        // From p1, one ArrowDown should land on l1, stepping over the "Local"
+        let sections = vec![section("Local", &["l1"]), section("Remote", &["r1", "r2"])];
+        // From l1, one ArrowDown should land on r1, stepping over the "Remote"
         // heading row rather than onto it.
         let sel = run_pick(&sections, SELECT_OPTS, vec![Key::ArrowDown, Key::Enter]);
-        assert_eq!(picked_name(sel).as_deref(), Some("l1"));
+        assert_eq!(picked_name(sel).as_deref(), Some("r1"));
     }
 
     fn run_multi_select_with_disabled(
@@ -1396,14 +1346,12 @@ mod tests {
             current: Some("main".to_string()),
             held: held(&[("feature", "~/wt/repo/feature")]),
             local: names(&["main", "feature", "spike"]),
-            pinned: names(&["main"]),
             remote_only: names(&["colleagues-work"]),
         };
 
         let listed = [
-            "Pinned",
-            "* main",
             "Local",
+            "* main",
             "  feature ~/wt/repo/feature",
             "  spike",
             "Remote",
@@ -1414,9 +1362,8 @@ mod tests {
         assert_eq!(
             listing(&catalogue, Verb::Here),
             [
-                "Pinned",
-                "* main",
                 "Local",
+                "* main",
                 "  feature in ~/wt/repo/feature — use `perch` (disabled)",
                 "  spike",
                 "Remote",
@@ -1438,51 +1385,6 @@ mod tests {
         };
         assert_eq!(listing(&catalogue, Verb::Go), ["Local", "* main"]);
         assert_eq!(listing(&catalogue, Verb::Here), ["Local", "* main"]);
-    }
-
-    /// A kept branch is listed whether or not it is here yet: `☁` where fetching
-    /// it would do, and inert where it exists nowhere at all.
-    #[test]
-    fn a_kept_branch_says_where_it_can_be_found() {
-        let catalogue = Catalogue {
-            local: names(&["here"]),
-            pinned: names(&["here", "develop", "release"]),
-            remote_only: names(&["develop"]),
-            ..catalogue()
-        };
-        assert_eq!(
-            listing(&catalogue, Verb::Go),
-            [
-                "Pinned",
-                "  here",
-                "  develop ☁",
-                "  release absent (disabled)",
-            ],
-            "a kept branch is drawn whether it is local, remote-only, or nowhere at all",
-        );
-    }
-
-    /// A kept branch is drawn under *Pinned* and never again below, so the
-    /// lower sections skip whatever is already up there.
-    #[test]
-    fn a_kept_branch_is_listed_once() {
-        let catalogue = Catalogue {
-            local: names(&["main", "spike"]),
-            pinned: names(&["main"]),
-            remote_only: names(&["develop"]),
-            ..catalogue()
-        };
-        assert_eq!(
-            listing(&catalogue, Verb::Go),
-            [
-                "Pinned",
-                "  main",
-                "Local",
-                "  spike",
-                "Remote",
-                "  develop",
-            ],
-        );
     }
 
     /// A heading with nothing under it is not a heading.

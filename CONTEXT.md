@@ -27,7 +27,7 @@ A branch whose whole diff against the anchor is already in the anchor, under som
 _Avoid_: Squashed, duplicate, redundant
 
 **Kept**:
-Pinned out of deletion pickers, via `perch.keep` config or by being the remote's default branch. A precisely named local branch is still removable; a remote default branch never is.
+Held back from the *Stale* cleanup prompt, via `perch.keep` config or by being the remote's default branch. Keeping is about the sweep, not the branch: `br rm` and `wt rm` reach a kept branch like any other, and a kept branch is never drawn differently in a picker. See [ADR 0011](./docs/adr/0011-keeping-is-about-the-sweep.md).
 _Avoid_: Protected, ignored, excluded
 
 ### Worktrees
@@ -37,7 +37,7 @@ Of a branch, checked out in some worktree. Git forbids the same branch in two wo
 _Avoid_: Locked, checked out, in use
 
 **Missing**:
-A worktree still registered in `.git/worktrees` whose directory is gone — git calls this *prunable*. It cannot be entered, and it blocks its branch from being checked out or deleted — but only until something prunes the dead registration, which both `checkout` and `worktree add` do for themselves before retrying. So it blocks git and not `perch`, which is why the *Catalogue* treats it as holding nothing. Of a worktree only: a branch that exists nowhere is *Absent*.
+A worktree still registered in `.git/worktrees` whose directory is gone — git calls this *prunable*. It cannot be entered, and it blocks its branch from being checked out or deleted — but only until something prunes the dead registration, which both `checkout` and `worktree add` do for themselves before retrying. So it blocks git and not `perch`, which is why the *Catalogue* treats it as holding nothing.
 _Avoid_: Stale (reserved for branches), dead, orphaned
 
 **Dirty**:
@@ -99,10 +99,6 @@ _Avoid_: Candidates, options, menu
 **Annotation**:
 The dim text after a name in a picker row, saying what there is to know about it: the path of the worktree *Held*ing a branch, or why a row is inert. An annotation is not a *Marker* — it warns of no loss and licenses no *Forcing*, exactly as a *Ground* doesn't. Rows share a column for it, so a list reads down as well as across. See [ADR 0004](./docs/adr/0004-a-ground-is-not-a-marker.md) and [ADR 0008](./docs/adr/0008-one-list-whichever-verb-is-picking.md).
 _Avoid_: Marker (reserved for risk), label, badge, hint
-
-**Absent**:
-Of a *Kept* branch, existing neither locally nor on the remote — so it is listed, because keeping it says it matters, but no *Verb* can reach it and its row is inert. Distinct from *Missing*, which is a worktree whose directory is gone.
-_Avoid_: Missing (reserved for worktrees), gone (reserved for a *Ground*), unavailable
 
 **Subverb**:
 A word a *Verb* reads before it reads a branch name. `br` reads `rm`; `wt` reads `ls` and `rm`, plus the retired `list` and `remove`, which are refused rather than taken for branches. Collision is positional, and `--` is needed wherever the dispatcher would eat the spelling: after `br` or `wt` for a subverb, at the top level for a *Verb*. Everywhere else the bare name reaches the branch, so `perch list`, `perch br list` and `perch br wt` all work as written.
