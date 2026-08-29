@@ -1030,14 +1030,17 @@ fn assess_branches(request: BranchRequest) -> AppResult<Assessment> {
     let mut raw = Vec::new();
     let mut locals = Vec::new();
     for name in request.branches {
-        let holder = git::worktree_for_branch(&request.worktrees, &name);
+        // Being held is the whole of why a branch row is inert, so the row is
+        // drawn from the error naming it would raise rather than from a second
+        // reading of the same fact.
+        let named_error = git::worktree_for_branch(&request.worktrees, &name).map(NamedError::Held);
         let risk = Risk {
             dirty: false,
             unmerged: unmerged.get(&name).copied(),
         };
         let annotation = if request.current.as_deref() == Some(&name) {
             "current".to_string()
-        } else if let Some(holder) = &holder {
+        } else if let Some(NamedError::Held(holder)) = &named_error {
             let path = display_path(&holder.path);
             if holder.is_main {
                 format!("main worktree at {path}")
@@ -1049,8 +1052,7 @@ fn assess_branches(request: BranchRequest) -> AppResult<Assessment> {
         } else {
             String::new()
         };
-        let disabled = holder.is_some();
-        let markers = if disabled {
+        let markers = if named_error.is_some() {
             String::new()
         } else {
             risk.markers()
@@ -1065,7 +1067,7 @@ fn assess_branches(request: BranchRequest) -> AppResult<Assessment> {
             target: OwnedTarget::Branch { name },
             risk,
             proof: None,
-            named_error: holder.map(NamedError::Held),
+            named_error,
             contains_cwd: false,
         });
     }

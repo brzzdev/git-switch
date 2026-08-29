@@ -273,7 +273,7 @@ A branch that landed by squash or rebase merge draws no `↑`, and is deleted wi
 
 ## Configuration
 
-Protect branches from the "delete merged branches" prompt by adding them to your Git config:
+Hold branches back from the "delete merged branches" prompt by adding them to your Git config:
 
 ```sh
 git config --add perch.keep develop

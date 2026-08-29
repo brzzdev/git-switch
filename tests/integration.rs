@@ -2313,6 +2313,34 @@ fn br_rm_picker_shows_but_does_not_select_disabled_branches() {
     );
 }
 
+/// Keeping is about the sweep, so `br rm`'s picker draws a kept branch and the
+/// local default branch as ordinary rows — select-all reaches both.
+#[test]
+fn br_rm_picker_offers_a_kept_branch_and_the_default_branch() {
+    let (_bare, work) = setup();
+    git(work.path(), &["branch", "kept"]);
+    git(work.path(), &["config", "--add", "perch.keep", "kept"]);
+    git(work.path(), &["switch", "-c", "topic"]);
+
+    let output = String::from_utf8_lossy(&drive_multi_select_prompt(
+        work.path(),
+        &["br", "rm", "--force"],
+        "kept",
+        false,
+        || {},
+    ))
+    .into_owned();
+
+    assert!(
+        !local_branch_exists(work.path(), "kept"),
+        "a kept branch is an ordinary picker row; output: {output}"
+    );
+    assert!(
+        !local_branch_exists(work.path(), "main"),
+        "the local default branch is an ordinary picker row; output: {output}"
+    );
+}
+
 #[test]
 fn br_rm_named_local_default_branch_is_removable_when_unheld() {
     let (_bare, work) = setup();

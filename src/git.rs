@@ -625,6 +625,10 @@ pub(crate) fn default_branch(remote: &str) -> Option<String> {
     None
 }
 
+/// Branches held back from the cleanup sweep: `perch.keep` entries, plus the
+/// remote's default branch. Private, and read by [`stale_branches`] alone —
+/// keeping is about the sweep and nothing else, so nothing that draws a picker
+/// or removes a named branch may consult it. See ADR 0011.
 fn kept_branches(remote: &str) -> HashSet<String> {
     let mut kept: HashSet<String> = run(&["config", "--get-all", "perch.keep"])
         .map(|o| o.lines().map(String::from).collect())
