@@ -89,7 +89,6 @@ pub(crate) struct BranchRequest {
     branches: Vec<String>,
     worktrees: Vec<git::Worktree>,
     current: Option<String>,
-    remote: String,
     upstream: UpstreamInterest,
 }
 
@@ -98,14 +97,12 @@ impl BranchRequest {
         branches: Vec<String>,
         worktrees: Vec<git::Worktree>,
         current: Option<&str>,
-        remote: &str,
         upstream: UpstreamInterest,
     ) -> Self {
         Self {
             branches,
             worktrees,
             current: current.map(str::to_string),
-            remote: remote.to_string(),
             upstream,
         }
     }
@@ -1022,13 +1019,11 @@ fn assess_branches(request: BranchRequest) -> AppResult<Assessment> {
         })?
         .path
         .clone();
-    let kept: HashSet<String> = git::pinned_branches(&request.remote).into_iter().collect();
     let unmerged = git::unmerged_branches(Some(&main)).unwrap_or_default();
     let mut raw = Vec::new();
     let mut locals = Vec::new();
     for name in request.branches {
         let holder = git::worktree_for_branch(&request.worktrees, &name);
-        let is_kept = kept.contains(&name);
         let risk = Risk {
             dirty: false,
             unmerged: unmerged.get(&name).copied(),
@@ -1044,12 +1039,10 @@ fn assess_branches(request: BranchRequest) -> AppResult<Assessment> {
             } else {
                 format!("{path}; use wt rm")
             }
-        } else if is_kept {
-            "kept".to_string()
         } else {
             String::new()
         };
-        let disabled = holder.is_some() || is_kept;
+        let disabled = holder.is_some();
         let markers = if disabled {
             String::new()
         } else {
@@ -1079,8 +1072,7 @@ fn assess_branches(request: BranchRequest) -> AppResult<Assessment> {
             name: locals[index].target.offer_name(),
             label,
             selected: false,
-            disabled: locals[index].named_error.is_some()
-                || kept.contains(locals[index].target.name().unwrap_or_default()),
+            disabled: locals[index].named_error.is_some(),
         })
         .collect();
     let legend = risk_legend(
@@ -2432,7 +2424,6 @@ mod tests {
             branches,
             worktrees,
             Some("main"),
-            "origin",
             UpstreamInterest::None,
         )))
         .expect("assessment");

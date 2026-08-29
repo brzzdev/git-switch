@@ -10,7 +10,6 @@ use crate::{AppResult, Error, git};
 pub(crate) fn run_rm(options: &BranchRemoval) -> AppResult<()> {
     let worktrees = git::worktree_list()?;
     let current = git::current_branch()?;
-    let remote = git::current_remote(current.as_deref());
     let local = git::local_branches()?;
     if local.is_empty() {
         eprintln!("No local branches to remove.");
@@ -27,7 +26,6 @@ pub(crate) fn run_rm(options: &BranchRemoval) -> AppResult<()> {
         local,
         worktrees,
         current.as_deref(),
-        &remote,
         upstream,
     )))?;
     let Some(selection) = select_removal_locals(

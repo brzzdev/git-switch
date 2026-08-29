@@ -1,0 +1,11 @@
+# Keeping is about the sweep
+
+`perch.keep` exists to hold a branch back from the merged-branch cleanup prompt: `develop` and `staging` land in the anchor constantly and are not finished with. That is one job, and it is a good one. But *Kept* had spread beyond it — a **Pinned** heading hoisted kept branches to the top of every navigation picker, listed them whether or not they existed anywhere, and drew the ones that existed nowhere as inert `absent` rows; `br rm` greyed them out too. None of that protects anything, because a kept branch was always removable by name, and a picker section that exists to say "this branch matters" is decoration for a fact the user already knows. *Kept* is therefore a property of the sweep alone, and nothing else reads it.
+
+## Consequences
+
+- **The *Pinned* section is gone, and the picker has only the two headings that say where a branch lives.** *Local* and *Remote* are facts about a branch; *Pinned* was a fact about the config, which is why it needed a whole *Availability* judgement to answer "and where is this one, then?" — a question the other two headings answer by existing. Removing it removes that judgement with it.
+- **A branch that exists nowhere is no longer listed.** *Absent* leaves the glossary; the only rows are branches git can name. This supersedes ADR 0008's rule for the pinned case alone — a row a *Verb* can't act on is still greyed rather than hidden, but a branch with no ref is not a row at all.
+- **`br rm` no longer treats a *Kept* branch specially.** It was already removable by name, so disabling its picker row bought a confirmation step, not safety. This supersedes ADR 0009's consequence that kept branches stay visible but disabled; held branches still do, because git genuinely refuses those.
+- **Deleting `main` from `br rm`'s picker is now possible.** It always was by name, and the local default branch is a branch like any other — recreated from `origin/main` by the next fetch. The remote default is still never offered for upstream deletion, which is where the irreversible half lives.
+- **`perch.keep` keeps its config key, its layering, and its one meaning.** A user who set it to protect `develop` from the sweep still has exactly that, which is what the README always documented it as.

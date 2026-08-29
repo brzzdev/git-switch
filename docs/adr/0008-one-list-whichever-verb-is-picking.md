@@ -1,5 +1,7 @@
 # One list, whichever verb is picking
 
+> The *Pinned* section and its inert *Absent* rows are superseded by [ADR 0011](./0011-keeping-is-about-the-sweep.md). One list for all three verbs, and greying rather than hiding, remain unchanged.
+
 [ADR 0007](./0007-three-verbs-one-per-intent.md) gave each intent a verb, but only for a branch named on the command line. With no name, the three verbs drew three different lists: bare `perch` showed branches and said nothing about worktrees, and `perch wt` showed a *Worktrees* section above the branches that weren't in one. "Which of my branches has a worktree?" needed a second command to answer.
 
 The tempting fix — asking "branch or worktree?" on a bare invocation — is a tax on the most-used path. It adds a step every single time to collect something the user knew before they started typing, and it only ever fires for the people who didn't reach for a verb, i.e. the people least able to answer it.
