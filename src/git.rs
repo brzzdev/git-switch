@@ -531,37 +531,38 @@ fn stale_from(
     stale
 }
 
-/// Branches that have outlived their purpose: a deleted upstream, or work that
-/// has landed on the anchor.
+/// Branches whose refs qualify them for the cleanup prompt.
 ///
 /// Merged-ness alone doesn't settle it. Every branch reachable from the anchor
 /// has its tip as its own merge-base with it, so a branch freshly cut from the
 /// anchor is topologically indistinguishable from one whose commits were
 /// fast-forwarded onto it — and, if it was cut from a merged topic, from one
 /// whose commits arrived by merge commit too. Topology is therefore no evidence
-/// at all here; only what a branch *tracks* is. Two clauses read that, and
-/// either suffices:
+/// at all here; only what a branch *tracks* is. Three ref facts qualify a
+/// branch:
 ///
-/// - it tracks the anchor's counterpart and is *ahead* of it, so it holds work
-///   of its own that the local anchor has since taken;
-/// - it tracks nothing and its tip is *behind* the anchor's, so it was merged
-///   locally and left behind.
+/// - its configured upstream was deleted;
+/// - it tracks the anchor's counterpart and is *ahead* of it;
+/// - it tracks nothing and its tip is reachable from, but not equal to, the
+///   anchor's tip.
 ///
-/// A branch cut from the anchor and never committed to satisfies neither, as
-/// long as the anchor it was cut from was level with what it tracks.
+/// A branch cut from the anchor and never committed to satisfies neither anchor
+/// ground, as long as the anchor it was cut from was level with what it tracks.
 ///
-/// Where a branch is published under a name of its own, neither applies.
+/// Where a branch is published under a name of its own, neither anchor ground
+/// applies.
 /// Whether the anchor holds its work is a question about two remote branches,
 /// and no local ref answers it. Such a branch waits for its upstream to be
 /// deleted, as a rebased or squashed one does — neither is an ancestor of the
 /// anchor in any way this rule can read.
 ///
-/// Both clauses read a proxy, and both are wrong at the edges. They go quiet
-/// where the branch comes to look untouched — an untracked one once the anchor
-/// moves past it, a `wt` one once the anchor reaches its own upstream — and
-/// they misfire where an untouched branch comes to look worked on: cut from an
-/// anchor that was already behind, or already ahead. In each pair the two
-/// branches carry identical refs, so the proxy is the whole of the evidence.
+/// Both anchor grounds read a proxy, and both are wrong at the edges. They go
+/// quiet where the branch comes to look untouched — an untracked one once the
+/// anchor moves past it, a `wt` one once the anchor reaches its own upstream —
+/// and they misfire where an untouched branch comes to look worked on: cut
+/// from an anchor that was already behind, or already ahead. In each pair the
+/// two branches carry identical refs, so the proxy is the whole of the
+/// evidence.
 /// [ADR 0002](../docs/adr/0002-staleness-is-anchored-to-the-default-branch.md)
 /// records why that is accepted rather than guessed at.
 pub fn stale_branches(remote: &str) -> AppResult<Vec<StaleBranch>> {
