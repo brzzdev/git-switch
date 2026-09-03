@@ -932,11 +932,14 @@ fn build_stale_assessment(
 ) -> Assessment {
     let mut raw = Vec::new();
     let mut locals = Vec::new();
-    for stale in request
-        .stale
-        .into_iter()
-        .filter(|branch| request.destination.as_deref() != Some(branch.name.as_str()))
-    {
+    let mut stale = request.stale;
+    stale.retain(|branch| request.destination.as_deref() != Some(branch.name.as_str()));
+    let ground_width = stale
+        .iter()
+        .map(|branch| stale_ground_label(branch.ground).len())
+        .max()
+        .unwrap_or_default();
+    for stale in stale {
         let worktree = git::worktree_for_branch(&request.worktrees, &stale.name);
         let proof = equivalent.get(&stale.name).cloned();
         let risk = Risk {
@@ -959,14 +962,11 @@ fn build_stale_assessment(
             unmerged: risk.unmerged,
         }
         .markers();
-        let ground = match stale.ground {
-            git::Ground::Gone => "gone",
-            git::Ground::Landed => "landed",
-        };
+        let ground = stale_ground_label(stale.ground);
         let follows = !worktree_label.is_empty() || !branch_risk.is_empty();
         let ground = style(format!(
             "{ground:<width$}",
-            width = if follows { 6 } else { 0 }
+            width = if follows { ground_width } else { 0 }
         ))
         .dim()
         .to_string();
@@ -1012,6 +1012,14 @@ fn build_stale_assessment(
         main,
         worktree_target: None,
         upstream: UpstreamInterest::None,
+    }
+}
+
+fn stale_ground_label(ground: git::Ground) -> &'static str {
+    match ground {
+        git::Ground::Gone => "gone",
+        git::Ground::TracksAnchorAhead => "tracks anchor, ahead",
+        git::Ground::UntrackedTipInAnchor => "untracked, tip in anchor",
     }
 }
 
@@ -1741,11 +1749,11 @@ mod tests {
             StaleRequest::new(
                 vec![
                     git::StaleBranch {
-                        ground: git::Ground::Landed,
+                        ground: git::Ground::UntrackedTipInAnchor,
                         name: "feature".to_string(),
                     },
                     git::StaleBranch {
-                        ground: git::Ground::Landed,
+                        ground: git::Ground::UntrackedTipInAnchor,
                         name: "fix/typo".to_string(),
                     },
                 ],
@@ -2011,7 +2019,7 @@ mod tests {
         let assessment = build_stale_assessment(
             StaleRequest::new(
                 vec![git::StaleBranch {
-                    ground: git::Ground::Landed,
+                    ground: git::Ground::UntrackedTipInAnchor,
                     name: "fix/typo".to_string(),
                 }],
                 Vec::new(),
@@ -2026,7 +2034,10 @@ mod tests {
         );
 
         let label = console::strip_ansi_codes(&assessment.offers[0].label).into_owned();
-        assert!(label.ends_with("landed"), "ground-only row: {label:?}");
+        assert!(
+            label.ends_with("untracked, tip in anchor"),
+            "ground-only row: {label:?}"
+        );
         assert_eq!(label.trim_end(), label);
     }
 
@@ -2037,7 +2048,7 @@ mod tests {
         let assessment = build_stale_assessment(
             StaleRequest::new(
                 vec![git::StaleBranch {
-                    ground: git::Ground::Landed,
+                    ground: git::Ground::UntrackedTipInAnchor,
                     name: "old/thing".to_string(),
                 }],
                 vec![missing],
@@ -2053,7 +2064,7 @@ mod tests {
 
         let label = console::strip_ansi_codes(&assessment.offers[0].label).into_owned();
         assert!(
-            label.contains("landed (+ worktree, missing)"),
+            label.contains("untracked, tip in anchor (+ worktree, missing)"),
             "missing worktree label: {label:?}"
         );
     }
@@ -2068,13 +2079,18 @@ mod tests {
                         name: "gone-held".to_string(),
                     },
                     git::StaleBranch {
-                        ground: git::Ground::Landed,
-                        name: "landed-held".to_string(),
+                        ground: git::Ground::TracksAnchorAhead,
+                        name: "ahead-held".to_string(),
+                    },
+                    git::StaleBranch {
+                        ground: git::Ground::UntrackedTipInAnchor,
+                        name: "untracked-held".to_string(),
                     },
                 ],
                 vec![
                     test_worktree("gone-held", "/tmp/gone"),
-                    test_worktree("landed-held", "/tmp/landed"),
+                    test_worktree("ahead-held", "/tmp/ahead"),
+                    test_worktree("untracked-held", "/tmp/untracked"),
                 ],
                 "origin",
                 None,
@@ -2092,7 +2108,9 @@ mod tests {
             .map(|offer| console::strip_ansi_codes(&offer.label).into_owned())
             .collect();
         assert!(
-            labels[0].contains("gone   (+ worktree)") && labels[1].contains("landed (+ worktree)"),
+            labels[0].contains("gone                     (+ worktree)")
+                && labels[1].contains("tracks anchor, ahead     (+ worktree)")
+                && labels[2].contains("untracked, tip in anchor (+ worktree)"),
             "grounds should align their following detail: {labels:?}"
         );
     }
@@ -2102,7 +2120,7 @@ mod tests {
         let assessment = build_stale_assessment(
             StaleRequest::new(
                 vec![git::StaleBranch {
-                    ground: git::Ground::Landed,
+                    ground: git::Ground::UntrackedTipInAnchor,
                     name: "feature".to_string(),
                 }],
                 vec![test_worktree("feature", "/tmp/feature")],
@@ -2118,7 +2136,7 @@ mod tests {
 
         let label = console::strip_ansi_codes(&assessment.offers[0].label).into_owned();
         assert!(
-            label.contains("landed (+ worktree ●) ↑2"),
+            label.contains("untracked, tip in anchor (+ worktree ●) ↑2"),
             "ground and risks should keep their established order: {label}"
         );
     }
@@ -2167,7 +2185,7 @@ mod tests {
         let assessment = build_stale_assessment(
             StaleRequest::new(
                 vec![git::StaleBranch {
-                    ground: git::Ground::Landed,
+                    ground: git::Ground::UntrackedTipInAnchor,
                     name: "shipped".to_string(),
                 }],
                 Vec::new(),

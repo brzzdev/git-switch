@@ -580,6 +580,41 @@ fn local_only_branch_stale_after_main_advances() {
     );
 }
 
+/// A branch with no commits of its own can still match the untracked ref proxy.
+/// Its row must report that evidence rather than claiming its dirty work landed.
+#[test]
+fn dirty_uncommitted_worktree_reports_its_ref_ground() {
+    let (_bare, parent, work) = setup_with_parent();
+    let held = parent.path().join("worktrees/repo/uncommitted");
+    fs::create_dir_all(held.parent().unwrap()).unwrap();
+    git(
+        &work,
+        &[
+            "worktree",
+            "add",
+            "--no-track",
+            "-b",
+            "uncommitted",
+            held.to_str().unwrap(),
+            "main",
+        ],
+    );
+    fs::write(held.join("file.txt"), "uncommitted work\n").unwrap();
+
+    fs::write(work.join("advance.txt"), "advance main\n").unwrap();
+    git(&work, &["add", "advance.txt"]);
+    git(&work, &["commit", "-m", "advance main"]);
+    git(&work, &["branch", "dest", "main"]);
+
+    let text =
+        console::strip_ansi_codes(&cleanup_prompt(&work, "dest", "uncommitted")).into_owned();
+
+    assert!(
+        text.contains("untracked, tip in anchor (+ worktree ●)"),
+        "the row should state the ref evidence, got: {text}"
+    );
+}
+
 /// Keeping a branch is about the sweep and nothing else: a branch `perch.keep`
 /// names is stale by every rule and still never offered.
 #[test]

@@ -399,9 +399,9 @@ impl BranchRef<'_> {
         self.upstream_branch.strip_prefix("refs/heads/") == Some(name)
     }
 
-    /// Whether the branch's own refs show its work has landed on the anchor —
-    /// see [`stale_branches`] for the cases where nothing shows it.
-    fn landed_on(&self, anchor: &Anchor<'_>) -> bool {
+    /// For a branch already known to be reachable from the anchor, the ref
+    /// evidence that qualifies it as stale.
+    fn ground_on(&self, anchor: &Anchor<'_>) -> Option<Ground> {
         // Cut from the anchor, as `wt` creates them. Commits it holds that the
         // published anchor doesn't are taken for work of its own, and being
         // merged into the local anchor for where that work went. A branch cut
@@ -409,15 +409,15 @@ impl BranchRef<'_> {
         // having earned it; nothing in the refs separates the two, and
         // `stale_branches` documents that as a known cost.
         if self.tracks(anchor.branch) {
-            return parse_track(self.track).0 > 0;
+            return (parse_track(self.track).0 > 0).then_some(Ground::TracksAnchorAhead);
         }
         // Published under a name of its own: whether the anchor holds its work
         // is a question about two remote branches, which no local ref answers.
         if !self.upstream_branch.is_empty() {
-            return false;
+            return None;
         }
         // Tracks nothing, and the anchor has moved past it.
-        self.tip != anchor.tip
+        (self.tip != anchor.tip).then_some(Ground::UntrackedTipInAnchor)
     }
 }
 
@@ -473,9 +473,9 @@ fn merged_anchor(remote: &str) -> Option<(String, String)> {
         .map(|_| (remote_ref, default))
 }
 
-/// Which of the two staleness clauses put a branch on the cleanup prompt. The
-/// clauses cannot both apply: a deleted upstream is read first, and a branch
-/// whose upstream is gone is never asked whether it landed.
+/// Which ref fact put a branch on the cleanup prompt. The facts cannot overlap:
+/// a deleted upstream is read first, and a branch whose upstream is gone is
+/// never tested against the anchor.
 ///
 /// A ground says why a branch is offered, never what deleting it would destroy,
 /// so it is rendered as a word and never as a `Marker` — see [ADR
@@ -484,8 +484,11 @@ fn merged_anchor(remote: &str) -> Option<(String, String)> {
 pub enum Ground {
     /// The upstream it tracked was deleted from the remote.
     Gone,
-    /// Its work has been absorbed by the anchor.
-    Landed,
+    /// It tracks the anchor's counterpart and is ahead of it.
+    TracksAnchorAhead,
+    /// It tracks nothing and its tip is reachable from, but not equal to, the
+    /// anchor's tip.
+    UntrackedTipInAnchor,
 }
 
 /// A stale branch and the ground it is stale on.
@@ -513,54 +516,53 @@ fn stale_from(
         .collect();
 
     if let Some(anchor) = anchor {
-        stale.extend(
-            merged
-                .lines()
-                .filter(|name| {
-                    refs.get(name)
-                        .is_some_and(|r| !r.gone() && r.landed_on(anchor))
-                })
-                .map(|name| StaleBranch {
-                    ground: Ground::Landed,
-                    name: name.to_string(),
-                }),
-        );
+        stale.extend(merged.lines().filter_map(|name| {
+            let ground = refs
+                .get(name)
+                .filter(|branch| !branch.gone())?
+                .ground_on(anchor)?;
+            Some(StaleBranch {
+                ground,
+                name: name.to_string(),
+            })
+        }));
     }
 
     stale
 }
 
-/// Branches that have outlived their purpose: a deleted upstream, or work that
-/// has landed on the anchor.
+/// Branches whose refs qualify them for the cleanup prompt.
 ///
 /// Merged-ness alone doesn't settle it. Every branch reachable from the anchor
 /// has its tip as its own merge-base with it, so a branch freshly cut from the
 /// anchor is topologically indistinguishable from one whose commits were
 /// fast-forwarded onto it — and, if it was cut from a merged topic, from one
 /// whose commits arrived by merge commit too. Topology is therefore no evidence
-/// at all here; only what a branch *tracks* is. Two clauses read that, and
-/// either suffices:
+/// at all here; only what a branch *tracks* is. Three ref facts qualify a
+/// branch:
 ///
-/// - it tracks the anchor's counterpart and is *ahead* of it, so it holds work
-///   of its own that the local anchor has since taken;
-/// - it tracks nothing and its tip is *behind* the anchor's, so it was merged
-///   locally and left behind.
+/// - its configured upstream was deleted;
+/// - it tracks the anchor's counterpart and is *ahead* of it;
+/// - it tracks nothing and its tip is reachable from, but not equal to, the
+///   anchor's tip.
 ///
-/// A branch cut from the anchor and never committed to satisfies neither, as
-/// long as the anchor it was cut from was level with what it tracks.
+/// A branch cut from the anchor and never committed to satisfies neither anchor
+/// ground, as long as the anchor it was cut from was level with what it tracks.
 ///
-/// Where a branch is published under a name of its own, neither applies.
+/// Where a branch is published under a name of its own, neither anchor ground
+/// applies.
 /// Whether the anchor holds its work is a question about two remote branches,
 /// and no local ref answers it. Such a branch waits for its upstream to be
 /// deleted, as a rebased or squashed one does — neither is an ancestor of the
 /// anchor in any way this rule can read.
 ///
-/// Both clauses read a proxy, and both are wrong at the edges. They go quiet
-/// where the branch comes to look untouched — an untracked one once the anchor
-/// moves past it, a `wt` one once the anchor reaches its own upstream — and
-/// they misfire where an untouched branch comes to look worked on: cut from an
-/// anchor that was already behind, or already ahead. In each pair the two
-/// branches carry identical refs, so the proxy is the whole of the evidence.
+/// Both anchor grounds read a proxy, and both are wrong at the edges. They go
+/// quiet where the branch comes to look untouched — an untracked one once the
+/// anchor moves past it, a `wt` one once the anchor reaches its own upstream —
+/// and they misfire where an untouched branch comes to look worked on: cut
+/// from an anchor that was already behind, or already ahead. In each pair the
+/// two branches carry identical refs, so the proxy is the whole of the
+/// evidence.
 /// [ADR 0002](../docs/adr/0002-staleness-is-anchored-to-the-default-branch.md)
 /// records why that is accepted rather than guessed at.
 pub fn stale_branches(remote: &str) -> AppResult<Vec<StaleBranch>> {
@@ -1620,17 +1622,16 @@ mod tests {
         got
     }
 
-    /// The two clauses are alternatives, and the row that reports them says
-    /// which fired — so a branch stale on a deleted upstream must not be
-    /// reported as having landed, or vice versa.
+    /// Each fact that qualifies a branch is carried to the row independently.
     #[test]
-    fn each_clause_reports_its_own_ground() {
+    fn each_staleness_fact_reports_its_own_ground() {
         let refs_output = head_refs(&[
             ("main", "aaa", "refs/heads/main", ""),
             ("abandoned", "bbb", "refs/heads/abandoned", "gone"),
-            ("shipped", "ccc", "", ""),
+            ("ahead", "ccc", "refs/heads/main", "ahead 1"),
+            ("untracked", "ddd", "", ""),
         ]);
-        let got = grounds(&refs_output, "shipped", "aaa");
+        let got = grounds(&refs_output, "ahead\nuntracked", "aaa");
         assert_eq!(
             got,
             vec![
@@ -1639,16 +1640,20 @@ mod tests {
                     name: "abandoned".to_string(),
                 },
                 StaleBranch {
-                    ground: Ground::Landed,
-                    name: "shipped".to_string(),
+                    ground: Ground::TracksAnchorAhead,
+                    name: "ahead".to_string(),
+                },
+                StaleBranch {
+                    ground: Ground::UntrackedTipInAnchor,
+                    name: "untracked".to_string(),
                 },
             ]
         );
     }
 
-    /// A branch whose upstream is gone is never asked whether it landed, so it
-    /// cannot appear twice or under the wrong ground — even when the anchor's
-    /// `--merged` list names it.
+    /// A branch whose upstream is gone is never tested against the anchor, so
+    /// it cannot appear twice or under the wrong ground — even when the
+    /// anchor's `--merged` list names it.
     #[test]
     fn a_gone_branch_listed_as_merged_is_reported_once_as_gone() {
         let refs_output = head_refs(&[
