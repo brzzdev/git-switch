@@ -399,9 +399,9 @@ impl BranchRef<'_> {
         self.upstream_branch.strip_prefix("refs/heads/") == Some(name)
     }
 
-    /// Whether the branch's own refs show its work has landed on the anchor —
-    /// see [`stale_branches`] for the cases where nothing shows it.
-    fn landed_on(&self, anchor: &Anchor<'_>) -> bool {
+    /// For a branch already known to be reachable from the anchor, the ref
+    /// evidence that qualifies it as stale.
+    fn ground_on(&self, anchor: &Anchor<'_>) -> Option<Ground> {
         // Cut from the anchor, as `wt` creates them. Commits it holds that the
         // published anchor doesn't are taken for work of its own, and being
         // merged into the local anchor for where that work went. A branch cut
@@ -409,15 +409,15 @@ impl BranchRef<'_> {
         // having earned it; nothing in the refs separates the two, and
         // `stale_branches` documents that as a known cost.
         if self.tracks(anchor.branch) {
-            return parse_track(self.track).0 > 0;
+            return (parse_track(self.track).0 > 0).then_some(Ground::TracksAnchorAhead);
         }
         // Published under a name of its own: whether the anchor holds its work
         // is a question about two remote branches, which no local ref answers.
         if !self.upstream_branch.is_empty() {
-            return false;
+            return None;
         }
         // Tracks nothing, and the anchor has moved past it.
-        self.tip != anchor.tip
+        (self.tip != anchor.tip).then_some(Ground::UntrackedTipInAnchor)
     }
 }
 
@@ -473,9 +473,9 @@ fn merged_anchor(remote: &str) -> Option<(String, String)> {
         .map(|_| (remote_ref, default))
 }
 
-/// Which of the two staleness clauses put a branch on the cleanup prompt. The
-/// clauses cannot both apply: a deleted upstream is read first, and a branch
-/// whose upstream is gone is never asked whether it landed.
+/// Which ref fact put a branch on the cleanup prompt. The facts cannot overlap:
+/// a deleted upstream is read first, and a branch whose upstream is gone is
+/// never tested against the anchor.
 ///
 /// A ground says why a branch is offered, never what deleting it would destroy,
 /// so it is rendered as a word and never as a `Marker` — see [ADR
@@ -484,8 +484,11 @@ fn merged_anchor(remote: &str) -> Option<(String, String)> {
 pub enum Ground {
     /// The upstream it tracked was deleted from the remote.
     Gone,
-    /// Its work has been absorbed by the anchor.
-    Landed,
+    /// It tracks the anchor's counterpart and is ahead of it.
+    TracksAnchorAhead,
+    /// It tracks nothing and its tip is reachable from, but not equal to, the
+    /// anchor's tip.
+    UntrackedTipInAnchor,
 }
 
 /// A stale branch and the ground it is stale on.
@@ -513,18 +516,16 @@ fn stale_from(
         .collect();
 
     if let Some(anchor) = anchor {
-        stale.extend(
-            merged
-                .lines()
-                .filter(|name| {
-                    refs.get(name)
-                        .is_some_and(|r| !r.gone() && r.landed_on(anchor))
-                })
-                .map(|name| StaleBranch {
-                    ground: Ground::Landed,
-                    name: name.to_string(),
-                }),
-        );
+        stale.extend(merged.lines().filter_map(|name| {
+            let ground = refs
+                .get(name)
+                .filter(|branch| !branch.gone())?
+                .ground_on(anchor)?;
+            Some(StaleBranch {
+                ground,
+                name: name.to_string(),
+            })
+        }));
     }
 
     stale
@@ -1620,17 +1621,16 @@ mod tests {
         got
     }
 
-    /// The two clauses are alternatives, and the row that reports them says
-    /// which fired — so a branch stale on a deleted upstream must not be
-    /// reported as having landed, or vice versa.
+    /// Each fact that qualifies a branch is carried to the row independently.
     #[test]
-    fn each_clause_reports_its_own_ground() {
+    fn each_staleness_fact_reports_its_own_ground() {
         let refs_output = head_refs(&[
             ("main", "aaa", "refs/heads/main", ""),
             ("abandoned", "bbb", "refs/heads/abandoned", "gone"),
-            ("shipped", "ccc", "", ""),
+            ("ahead", "ccc", "refs/heads/main", "ahead 1"),
+            ("untracked", "ddd", "", ""),
         ]);
-        let got = grounds(&refs_output, "shipped", "aaa");
+        let got = grounds(&refs_output, "ahead\nuntracked", "aaa");
         assert_eq!(
             got,
             vec![
@@ -1639,8 +1639,12 @@ mod tests {
                     name: "abandoned".to_string(),
                 },
                 StaleBranch {
-                    ground: Ground::Landed,
-                    name: "shipped".to_string(),
+                    ground: Ground::TracksAnchorAhead,
+                    name: "ahead".to_string(),
+                },
+                StaleBranch {
+                    ground: Ground::UntrackedTipInAnchor,
+                    name: "untracked".to_string(),
                 },
             ]
         );
