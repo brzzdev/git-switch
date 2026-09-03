@@ -1650,9 +1650,9 @@ mod tests {
         );
     }
 
-    /// A branch whose upstream is gone is never asked whether it landed, so it
-    /// cannot appear twice or under the wrong ground — even when the anchor's
-    /// `--merged` list names it.
+    /// A branch whose upstream is gone is never tested against the anchor, so
+    /// it cannot appear twice or under the wrong ground — even when the
+    /// anchor's `--merged` list names it.
     #[test]
     fn a_gone_branch_listed_as_merged_is_reported_once_as_gone() {
         let refs_output = head_refs(&[

@@ -606,7 +606,8 @@ fn dirty_uncommitted_worktree_reports_its_ref_ground() {
     git(&work, &["commit", "-m", "advance main"]);
     git(&work, &["branch", "dest", "main"]);
 
-    let text = cleanup_prompt(&work, "dest", "uncommitted");
+    let text =
+        console::strip_ansi_codes(&cleanup_prompt(&work, "dest", "uncommitted")).into_owned();
 
     assert!(
         text.contains("untracked, tip in anchor (+ worktree ●)"),
