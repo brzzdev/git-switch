@@ -932,18 +932,14 @@ fn build_stale_assessment(
 ) -> Assessment {
     let mut raw = Vec::new();
     let mut locals = Vec::new();
-    let ground_width = request
-        .stale
+    let mut stale = request.stale;
+    stale.retain(|branch| request.destination.as_deref() != Some(branch.name.as_str()));
+    let ground_width = stale
         .iter()
-        .filter(|branch| request.destination.as_deref() != Some(branch.name.as_str()))
         .map(|branch| stale_ground_label(branch.ground).len())
         .max()
         .unwrap_or_default();
-    for stale in request
-        .stale
-        .into_iter()
-        .filter(|branch| request.destination.as_deref() != Some(branch.name.as_str()))
-    {
+    for stale in stale {
         let worktree = git::worktree_for_branch(&request.worktrees, &stale.name);
         let proof = equivalent.get(&stale.name).cloned();
         let risk = Risk {
